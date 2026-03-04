@@ -24,7 +24,9 @@ class CopilotAgent(Agent):
         tools: list|bool = True,
         capabilities: Any = None,
         telemetry: bool = False,
-        memory: bool = False
+        memory: bool = False,
+        skills: list = None,
+        workspace_root: str = None
     ):
         # Use copilot-specific prompt if no custom message provided
         if not system_message:
@@ -41,7 +43,9 @@ class CopilotAgent(Agent):
             tools=tools,
             capabilities=capabilities,
             telemetry=telemetry,
-            memory=memory
+            memory=memory,
+            skills=skills,
+            workspace_root=workspace_root
         )
         
         # Auto-load tools useful for coding

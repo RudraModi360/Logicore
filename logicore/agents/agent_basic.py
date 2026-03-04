@@ -87,6 +87,8 @@ class BasicAgent:
         debug: bool = False,
         telemetry: bool = False,
         max_iterations: int = 20,
+        skills: list = None,
+        workspace_root: str = None,
         **kwargs
     ):
         """
@@ -127,7 +129,9 @@ class BasicAgent:
             debug=debug,
             telemetry=telemetry,
             memory=memory_enabled,
-            max_iterations=max_iterations
+            max_iterations=max_iterations,
+            skills=skills,
+            workspace_root=workspace_root
         )
         
         # Register custom tools
@@ -439,6 +443,19 @@ You are ready to help. Use your tools effectively.
         """Cleanup resources."""
         await self._agent.cleanup()
     
+    def load_skill(self, skill):
+        """Load a single skill into the agent."""
+        self._agent.load_skill(skill)
+
+    def load_skills(self, skills: list):
+        """Load multiple skills by name or Skill objects."""
+        self._agent.load_skills(skills)
+
+    @property
+    def loaded_skills(self) -> list:
+        """Get list of loaded skill names."""
+        return [s.name for s in self._agent.skills]
+
     def __repr__(self):
         return f"BasicAgent(name='{self.name}', provider='{self.provider_name}', tools={self.tools})"
 

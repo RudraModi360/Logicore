@@ -8,6 +8,7 @@ from logicore.providers.base import LLMProvider
 from logicore.providers.gateway import ProviderGateway, get_gateway_for_provider
 from logicore.tools import ALL_TOOL_SCHEMAS, DANGEROUS_TOOLS, APPROVAL_REQUIRED_TOOLS, SAFE_TOOLS, execute_tool
 from logicore.config.prompts import get_system_prompt
+from logicore.skills import Skill, SkillLoader
 from logicore.telemetry import TelemetryTracker
 from logicore.simplemem import AgentrySimpleMem
 import logging
@@ -62,7 +63,9 @@ class Agent:
         capabilities: Any = None,
         telemetry: bool = False,
         memory: bool = False,
-        context_compression: bool = False
+        context_compression: bool = False,
+        skills: list = None,
+        workspace_root: str = None
     ):
         if isinstance(llm, str):
             self.provider = self._create_provider(llm, model, api_key, endpoint)
@@ -132,6 +135,11 @@ class Agent:
         self.custom_tool_executors: Dict[str, Callable] = {}
         self.disabled_tools = set() # Tool names or formatted IDs (e.g., 'mcp:server:tool')
         
+        # Skills Management
+        self.skills: List[Skill] = []
+        self.skill_tool_executors: Dict[str, Callable] = {}  # skill tool name -> executor
+        self.workspace_root = workspace_root
+        
         # Session Management
         self.sessions: Dict[str, AgentSession] = {}
         
@@ -166,6 +174,10 @@ class Agent:
                 if self.debug:
                     print(f"[Agent] Loaded {len(self.internal_tools)} custom tool(s) (default tools NOT loaded)")
         
+        # Load skills if provided
+        if skills:
+            self.load_skills(skills)
+        
         # Callbacks
         self.callbacks = {
             "on_tool_start": None,
@@ -194,12 +206,15 @@ class Agent:
         return self.telemetry_tracker.get_total_summary()
 
     def _rebuild_system_prompt_with_tools(self):
-        """Regenerate the system prompt to include currently registered tools."""
+        """Regenerate the system prompt to include currently registered tools and skill instructions."""
         # Format tools from internal_tools schemas with full parameter details
         from logicore.config.prompts import _format_tools
         tools_section = _format_tools(self.internal_tools)
         # Note: _format_tools() already returns the complete <available_tools>...</available_tools> block
         # NO NEED to wrap it again!
+        
+        # Build skill instructions section
+        skills_section = self._build_skills_prompt_section()
         
         # Decide whether to use custom or auto-generated system message
         if self._custom_system_message:
@@ -216,8 +231,12 @@ class Agent:
                 # No existing tools section, just append
                 self.default_system_message = self._custom_system_message + tools_section
             
+            # Append skill instructions
+            if skills_section:
+                self.default_system_message += skills_section
+            
             if self.debug:
-                print(f"[Agent] System prompt (custom + tools): {len(self._custom_system_message)} chars + tools")
+                print(f"[Agent] System prompt (custom + tools + skills): {len(self._custom_system_message)} chars + tools + {len(self.skills)} skills")
         else:
             # Use auto-generated system prompt with tools
             from logicore.config.prompts import get_system_prompt
@@ -227,8 +246,13 @@ class Agent:
                 tools=self.internal_tools  # Pass schemas, the function will format them
             )
             self.default_system_message = base_prompt
+            
+            # Append skill instructions
+            if skills_section:
+                self.default_system_message += skills_section
+            
             if self.debug:
-                print(f"[Agent] System prompt (auto-generated with tools): {len(base_prompt)} chars")
+                print(f"[Agent] System prompt (auto-generated with tools + {len(self.skills)} skills): {len(self.default_system_message)} chars")
         
         # Update system message in all existing sessions
         for session in self.sessions.values():
@@ -236,15 +260,7 @@ class Agent:
                 session.messages[0]["content"] = self.default_system_message
         
         if self.debug:
-            print(f"[Agent] System prompt updated with {len(self.internal_tools)} tools")
-        
-        # Update system message in all existing sessions
-        for session in self.sessions.values():
-            if session.messages and session.messages[0].get("role") == "system":
-                session.messages[0]["content"] = self.default_system_message
-        
-        if self.debug:
-            print(f"[Agent] System prompt updated with {len(self.internal_tools)} tools")
+            print(f"[Agent] System prompt updated with {len(self.internal_tools)} tools and {len(self.skills)} skills")
 
     def _create_provider(self, provider_name: str, model: str, api_key: str, endpoint: str = None) -> LLMProvider:
         """
@@ -283,6 +299,102 @@ class Agent:
             raise ValueError(f"Unknown provider: {provider_name}. Supported: 'ollama', 'groq', 'gemini', 'azure', 'openai'.")
 
 
+    # --- Skill Management ---
+
+    def _build_skills_prompt_section(self) -> str:
+        """Build the skills instructions section for the system prompt."""
+        if not self.skills:
+            return ""
+        
+        blocks = []
+        for skill in self.skills:
+            block = f"### Skill: {skill.name}\n"
+            block += f"_{skill.description}_\n\n"
+            block += skill.instructions
+            blocks.append(block)
+        
+        skills_str = "\n\n---\n\n".join(blocks)
+        return f"\n\n<skills>\n{skills_str}\n</skills>"
+
+    def _load_default_skills(self):
+        """Load default skills from the logicore/skills/defaults directory."""
+        import os
+        defaults_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "defaults")
+        if os.path.exists(defaults_dir):
+            default_skills = SkillLoader.discover(defaults_dir)
+            for skill in default_skills:
+                self._register_skill(skill)
+            if self.debug and default_skills:
+                print(f"[Agent] 🧩 Loaded {len(default_skills)} default skill(s): {[s.name for s in default_skills]}")
+
+    def load_skills(self, skills):
+        """
+        Load skills by name (from defaults/workspace) or from Skill objects.
+        
+        Args:
+            skills: List of skill names (str) or Skill objects.
+                    String names are resolved from defaults and workspace.
+        """
+        import os
+        defaults_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "defaults")
+        
+        for item in skills:
+            if isinstance(item, Skill):
+                self._register_skill(item)
+            elif isinstance(item, str):
+                # Try to load by name from defaults directory first
+                skill_path = os.path.join(defaults_dir, item)
+                skill = SkillLoader.load(skill_path)
+                
+                # Try workspace skills if not found in defaults
+                if not skill and self.workspace_root:
+                    ws_skills = SkillLoader.discover_workspace_skills(self.workspace_root)
+                    for ws_skill in ws_skills:
+                        if ws_skill.name.lower() == item.lower():
+                            skill = ws_skill
+                            break
+                
+                if skill:
+                    self._register_skill(skill)
+                else:
+                    if self.debug:
+                        print(f"[Agent] ⚠️ Skill not found: '{item}'")
+            else:
+                if self.debug:
+                    print(f"[Agent] ⚠️ Invalid skill type: {type(item)}")
+        
+        # Rebuild prompt with new skills
+        if self.skills:
+            self._rebuild_system_prompt_with_tools()
+
+    def load_skill(self, skill: Skill):
+        """Load a single skill into the agent."""
+        self._register_skill(skill)
+        self._rebuild_system_prompt_with_tools()
+
+    def _register_skill(self, skill: Skill):
+        """Register a skill: add its tools and instructions."""
+        # Avoid duplicates
+        if any(s.name == skill.name for s in self.skills):
+            if self.debug:
+                print(f"[Agent] 🧩 Skill '{skill.name}' already loaded, skipping.")
+            return
+        
+        self.skills.append(skill)
+        
+        # Register skill tools
+        for tool_schema in skill.tools:
+            self.internal_tools.append(tool_schema)
+            tool_name = tool_schema.get("function", {}).get("name")
+            if tool_name and tool_name in skill.tool_executors:
+                self.skill_tool_executors[tool_name] = skill.tool_executors[tool_name]
+        
+        if skill.tools:
+            self.supports_tools = True
+        
+        if self.debug:
+            print(f"[Agent] 🧩 Loaded skill: '{skill.name}' ({len(skill.tools)} tools)")
+
     # --- Tool Management ---
 
     def load_default_tools(self):
@@ -290,6 +402,8 @@ class Agent:
         self.internal_tools.extend(ALL_TOOL_SCHEMAS)
         # VFS tools removed - SimpleMem handles memory now
         self.supports_tools = True  # Mark that tools are loaded and supported
+        # Auto-load default skills from package defaults
+        self._load_default_skills()
         self._rebuild_system_prompt_with_tools()  # Update system prompt with tools
         if self.debug:
             print(f"[Agent] Loaded {len(ALL_TOOL_SCHEMAS)} default tools.")
@@ -1050,6 +1164,14 @@ class Agent:
             # 1. Custom Tools
             if name in self.custom_tool_executors:
                 result = self.custom_tool_executors[name](**args)
+            
+            # 1b. Skill Tools
+            elif name in self.skill_tool_executors:
+                executor = self.skill_tool_executors[name]
+                if inspect.iscoroutinefunction(executor):
+                    result = await executor(**args)
+                else:
+                    result = executor(**args)
             
             # 2. MCP Tools
             elif any(name in manager.server_tools_map for manager in self.mcp_managers):

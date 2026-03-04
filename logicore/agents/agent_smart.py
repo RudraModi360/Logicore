@@ -46,7 +46,9 @@ class SmartAgent(Agent):
         telemetry: bool = False,
         memory: bool = False,
         max_iterations: int = 40,
-        capabilities: Any = None
+        capabilities: Any = None,
+        skills: list = None,
+        workspace_root: str = None
     ):
         # Initialize base agent
         super().__init__(
@@ -59,7 +61,9 @@ class SmartAgent(Agent):
             telemetry=telemetry,
             memory=memory,
             max_iterations=max_iterations,
-            capabilities=capabilities
+            capabilities=capabilities,
+            skills=skills,
+            workspace_root=workspace_root
         )
         
         # Smart Agent specific

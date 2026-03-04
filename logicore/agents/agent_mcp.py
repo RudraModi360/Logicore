@@ -97,7 +97,9 @@ class MCPAgent(Agent):
         mcp_config_path: str = None,
         mcp_config: Dict[str, Any] = None,
         deferred_tools: bool = False,
-        tool_threshold: int = 15  # Auto-enable deferred mode if tools exceed this
+        tool_threshold: int = 15,  # Auto-enable deferred mode if tools exceed this
+        skills: list = None,
+        workspace_root: str = None
     ):
         """
         Initialize MCPAgent.
@@ -117,6 +119,8 @@ class MCPAgent(Agent):
             mcp_config: MCP config dict (alternative to file)
             deferred_tools: Enable deferred tool loading (dynamic discovery)
             tool_threshold: Auto-enable deferred mode if tool count exceeds this
+            skills: List of skill names or Skill objects to load
+            workspace_root: Root directory for workspace skill discovery
         """
         # Initialize base Agent with tools=True first to load default tools
         # We'll manage deferred mode after checking total tool count
@@ -131,7 +135,9 @@ class MCPAgent(Agent):
             telemetry=telemetry,
             memory=memory,
             max_iterations=max_iterations,
-            tools=True  # Always load default tools initially
+            tools=True,  # Always load default tools initially
+            skills=skills,
+            workspace_root=workspace_root
         )
         
         # MCP-specific configuration
