@@ -352,7 +352,7 @@ You are ready to help with {project.title}. Focus on the project goal and build 
     # --- Enhanced Chat with Memory and Learning ---
     
     async def chat(self, user_input: Union[str, List[Dict[str, Any]]], 
-                   session_id: str = "default", stream: bool = False, **kwargs) -> str:
+                   session_id: str = "default", stream: bool = False, generate_walkthrough: bool = True, **kwargs) -> str:
         """
         Enhanced chat with automatic learning capture.
         """
@@ -369,7 +369,7 @@ You are ready to help with {project.title}. Focus on the project goal and build 
                     session.messages[0]['content'] = base + "\n\n" + project_context
         
         # Call parent chat
-        response = await super().chat(user_input, session_id, **kwargs)
+        response = await super().chat(user_input, session_id=session_id, stream=stream, generate_walkthrough=generate_walkthrough, **kwargs)
         
         # Auto-capture significant learnings (can be enhanced with LLM-based extraction)
         # This is a simple heuristic - could use LLM to identify learnings

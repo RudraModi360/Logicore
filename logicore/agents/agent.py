@@ -10,7 +10,6 @@ from logicore.tools import ALL_TOOL_SCHEMAS, DANGEROUS_TOOLS, APPROVAL_REQUIRED_
 from logicore.config.prompts import get_system_prompt
 from logicore.telemetry import TelemetryTracker
 from logicore.simplemem import AgentrySimpleMem
-from logicore.execution_summary import ExecutionSummary, ToolCallStatus
 import logging
 
 logger = logging.getLogger(__name__)
@@ -129,7 +128,7 @@ class Agent:
         self.sessions: Dict[str, AgentSession] = {}
         
         # Execution Tracking
-        self.execution_summary: Optional[ExecutionSummary] = None
+        self.execution_log: List[str] = []
         
         # Tool support flag - set when load_default_tools is called
         self.supports_tools = False
@@ -449,19 +448,16 @@ class Agent:
         callbacks: Dict[str, Callable] = None, 
         stream: bool = False, 
         streaming_funct: Callable = None,
+        generate_walkthrough: bool = True,
         **kwargs
     ) -> str:
         """Main chat loop."""
         from logicore.providers.utils import extract_content
         
-        # Initialize execution summary for this chat
-        self.execution_summary = ExecutionSummary(agent_name=self.__class__.__name__, session_id=session_id)
-        
-        # Record user's request
-        if isinstance(user_input, str):
-            self.execution_summary.set_user_request(user_input)
-        else:
-            self.execution_summary.set_user_request(str(user_input)[:200])
+        # Initialize execution tracking for this chat
+        self.execution_log = []
+        user_req_str = user_input if isinstance(user_input, str) else str(user_input)[:200]
+        self.execution_log.append(f"Agent Started Task. User Request: {user_req_str}")
         
         # Merge ephemeral callbacks
         active_callbacks = self.callbacks.copy()
@@ -507,8 +503,7 @@ class Agent:
         if not is_valid:
             if self.debug: print(f"[Agent] Input validation failed: {error}")
             # Finalize summary with validation error
-            if self.execution_summary:
-                self.execution_summary.finalize(status="failed", error=f"Input validation failed: {error}")
+            self.execution_log.append(f"Failed: Input validation error: {error}")
             return error
 
         start_time = time.time()
@@ -537,8 +532,7 @@ class Agent:
                 print(f"\n[Agent] 🔄 ITERATION {i+1}/{self.max_iterations}")
             
             # Track iteration in execution summary
-            if self.execution_summary:
-                self.execution_summary.start_iteration(i + 1)
+            self.execution_log.append(f"--- Iteration {i+1} ---")
             
             # 1. Get response from LLM
             response = None
@@ -616,8 +610,11 @@ class Agent:
                             if self.debug: 
                                 print(f"[Agent] ❌ All retries exhausted: {fallback_error}")
                             # Finalize summary with error
-                            if self.execution_summary:
-                                self.execution_summary.finalize(status="failed", error=str(fallback_error))
+                            self.execution_log.append(f"Failed: LLM error exhausted retries. {fallback_error}")
+                            if generate_walkthrough:
+                                walkthrough = await self._generate_walkthrough_summary(session_id, active_callbacks, stream)
+                                if walkthrough:
+                                    error_msg += f"\n\n---\n### Walkthrough Summary\n{walkthrough}"
                             if active_callbacks["on_final_message"]:
                                 active_callbacks["on_final_message"](session_id, error_msg)
                             return error_msg
@@ -628,9 +625,13 @@ class Agent:
                     # User asked to continue session chat.
                     # We will return the error as a message to the user so they know something happened.
                     # Finalize summary with error
-                    if self.execution_summary:
-                        self.execution_summary.finalize(status="failed", error=str(e))
-                    return f"Error during execution: {str(e)}"
+                    error_msg = f"Error during execution: {str(e)}"
+                    self.execution_log.append(f"Failed with runtime error: {e}")
+                    if generate_walkthrough:
+                        walkthrough = await self._generate_walkthrough_summary(session_id, active_callbacks, stream)
+                        if walkthrough:
+                            error_msg += f"\n\n---\n### Walkthrough Summary\n{walkthrough}"
+                    return error_msg
             
             # If we still don't have a response, skip this iteration
             if response is None:
@@ -689,9 +690,13 @@ class Agent:
                     print(f"[Agent] ✅ No tool calls required. Returning response.")
                 
                 # Mark convergence in execution summary
-                if self.execution_summary:
-                    self.execution_summary.mark_convergence(i + 1)
-                    self.execution_summary.finalize(status="completed", final_response=content)
+                self.execution_log.append(f"Task successfully completed. Final LLM Response: {content[:200]}...")
+                
+                if generate_walkthrough:
+                    if self.debug: print(f"[Agent] 📝 Generating walkthrough summary...")
+                    walkthrough = await self._generate_walkthrough_summary(session_id, active_callbacks, stream)
+                    if walkthrough:
+                        content += f"\n\n---\n### Walkthrough Summary\n{walkthrough}"
 
                 if active_callbacks["on_final_message"]:
                     active_callbacks["on_final_message"](session_id, content)
@@ -770,14 +775,7 @@ class Agent:
                     print(tool_fail_log)
                     logger.warning(tool_fail_log)
                     # Track denied tool call in summary
-                    if self.execution_summary:
-                        self.execution_summary.record_tool_call(
-                            iteration=i + 1,
-                            tool_name=name,
-                            parameters=args if isinstance(args, dict) else {},
-                            status=ToolCallStatus.SKIPPED,
-                            error="Denied by user"
-                        )
+                    self.execution_log.append(f"Tool {name} was DENIED by the user.")
                 else:
                     # Record tool call start time
                     start_time_tool = time.time()
@@ -793,15 +791,7 @@ class Agent:
                         print(tool_fail_log)
                         logger.error(tool_fail_log)
                         # Track failed tool call in summary
-                        if self.execution_summary:
-                            self.execution_summary.record_tool_call(
-                                iteration=i + 1,
-                                tool_name=name,
-                                parameters=args if isinstance(args, dict) else {},
-                                status=ToolCallStatus.FAILED,
-                                error=error_msg,
-                                duration_ms=duration_ms
-                            )
+                        self.execution_log.append(f"Tool {name} FAILED with error: {error_msg}")
                     else:
                         # Format result summary (up to 100 words)
                         if isinstance(result, dict):
@@ -814,15 +804,7 @@ class Agent:
                         if self.debug:
                             logger.info(tool_success_log)
                         # Track successful tool call in summary
-                        if self.execution_summary:
-                            self.execution_summary.record_tool_call(
-                                iteration=i + 1,
-                                tool_name=name,
-                                parameters=args if isinstance(args, dict) else {},
-                                status=ToolCallStatus.SUCCESS,
-                                result=result_preview,
-                                duration_ms=duration_ms
-                            )
+                        self.execution_log.append(f"Tool {name} SUCCEEDED with result: {result_preview}")
 
                 if active_callbacks["on_tool_end"]:
                     callback = active_callbacks["on_tool_end"]
@@ -853,10 +835,57 @@ class Agent:
                 session.add_message(tool_msg)
 
         # Max iterations reached
-        if self.execution_summary:
-            self.execution_summary.finalize(status="timeout", error="Max iterations reached")
+        self.execution_log.append("Execution timed out: Max iterations reached.")
+            
+        final_msg = "Max iterations reached."
+        if generate_walkthrough:
+            walkthrough = await self._generate_walkthrough_summary(session_id, active_callbacks, stream)
+            if walkthrough:
+                final_msg += f"\n\n---\n### Walkthrough Summary\n{walkthrough}"
+                
+        return final_msg
+
+    async def _generate_walkthrough_summary(self, session_id: str, active_callbacks: dict, stream: bool = False) -> str:
+        """Helper to generate the final walkthrough using the LLM itself."""
+        if not self.execution_log:
+            return ""
         
-        return "Max iterations reached."
+        execution_records = "\n".join(self.execution_log)
+        walkthrough_prompt = (
+            "Task execution is complete! Please review your execution details below and generate a 'Walkthrough Summary' for the user. "
+            "Your summary must quickly explain what you successfully achieved, the status of any identified goals/tasks, "
+            "and finally ask counter-questions or suggest clear next steps for the user.\n\n"
+            f"Execution Records:\n{execution_records}"
+        )
+        
+        session = self.get_session(session_id)
+        session.add_message({"role": "user", "content": walkthrough_prompt})
+        
+        try:
+            has_stream = hasattr(self.provider, 'chat_stream')
+            on_token = active_callbacks.get("on_token") if active_callbacks else None
+            
+            if stream and on_token and has_stream:
+                 # Stream the separator so the user knows the walkthrough is starting
+                 if inspect.iscoroutinefunction(on_token):
+                     await on_token("\n\n---\n### Walkthrough Summary\n")
+                 else:
+                     on_token("\n\n---\n### Walkthrough Summary\n")
+                 response = await self.gateway.chat_stream(session.messages, tools=None, on_token=on_token)
+            else:
+                 response = await self.gateway.chat(session.messages, tools=None)
+            
+            from logicore.providers.gateway import NormalizedMessage
+            if isinstance(response, NormalizedMessage):
+                content = response.content
+            else:
+                content = getattr(response, 'content', str(response))
+                
+            session.add_message({"role": "assistant", "content": content})
+            return content
+        except Exception as e:
+            if self.debug: print(f"[Agent] ⚠️ Failed generating walkthrough summary: {e}")
+            return f"Walkthrough unavailable. Check logs. error={e}"
 
     def _requires_approval(self, name: str) -> bool:
         """Check if a tool requires user approval."""
@@ -912,27 +941,27 @@ class Agent:
             logger.error(f"Tool Execution Failed: {name} | Duration: {duration:.4f}s | Error: {e}")
             return {"error": f"Tool execution failed: {str(e)}"}
 
-    def get_execution_summary(self) -> Optional[ExecutionSummary]:
-        """Get the current execution summary for the last chat."""
-        return self.execution_summary
+    def get_execution_summary(self) -> List[str]:
+        """Get the current execution log for the last chat."""
+        return self.execution_log
     
     def print_execution_summary(self) -> str:
         """Print a formatted text summary of the last execution."""
-        if not self.execution_summary:
-            return "No execution summary available - run chat() first"
-        return self.execution_summary.get_summary_text()
+        if not self.execution_log:
+            return "No execution logged - run chat() first"
+        return "\n".join(self.execution_log)
     
     def get_execution_summary_dict(self) -> Optional[Dict[str, Any]]:
         """Get the execution summary as a dictionary."""
-        if not self.execution_summary:
+        if not self.execution_log:
             return None
-        return self.execution_summary.to_dict()
+        return {"log": self.execution_log}
     
     def get_execution_summary_json(self) -> Optional[str]:
         """Get the execution summary as JSON."""
-        if not self.execution_summary:
+        if not self.execution_log:
             return None
-        return self.execution_summary.to_json()
+        return json.dumps({"log": self.execution_log}, indent=2)
 
     async def cleanup(self):
         """Clean up resources."""

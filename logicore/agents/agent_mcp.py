@@ -92,7 +92,7 @@ class MCPAgent(Agent):
         debug: bool = False,
         telemetry: bool = False,
         memory: bool = False,
-        max_iterations: int = 20,
+        max_iterations: int = 40,
         session_timeout: int = 3600,  # 1 hour default
         mcp_config_path: str = None,
         mcp_config: Dict[str, Any] = None,
@@ -570,6 +570,7 @@ class MCPAgent(Agent):
         create_if_missing: bool = True,
         stream: bool = False,
         streaming_funct: Optional[Callable[[str], None]] = None,
+        generate_walkthrough: bool = True,
         **kwargs
     ) -> Optional[str]:
         """
@@ -605,6 +606,7 @@ class MCPAgent(Agent):
             session_id=session_id,
             stream=stream,
             streaming_funct=streaming_funct,
+            generate_walkthrough=generate_walkthrough,
             **kwargs
         )
         

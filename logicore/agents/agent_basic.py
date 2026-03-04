@@ -327,7 +327,7 @@ You are ready to help. Use your tools effectively.
     
     # --- Public API ---
     
-    async def chat(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, **kwargs) -> str:
+    async def chat(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, generate_walkthrough: bool = True, **kwargs) -> str:
         """
         Send a message and get a response.
         
@@ -335,24 +335,26 @@ You are ready to help. Use your tools effectively.
             message: The user's message (str or list with multimodal content)
             session_id: Session ID for conversation context
             stream: Whether to stream the response
+            generate_walkthrough: Provide a summary of execution at the end
             
         Returns:
             The agent's response
         """
-        return await self._agent.chat(message, session_id=session_id, stream=stream, **kwargs)
+        return await self._agent.chat(message, session_id=session_id, stream=stream, generate_walkthrough=generate_walkthrough, **kwargs)
     
-    def chat_sync(self, message: str, session_id: str = "default") -> str:
+    def chat_sync(self, message: str, session_id: str = "default", generate_walkthrough: bool = True) -> str:
         """
         Synchronous version of chat.
         
         Args:
             message: The user's message
             session_id: Session ID for conversation context
+            generate_walkthrough: Provide a summary of execution at the end
             
         Returns:
             The agent's response
         """
-        return asyncio.run(self.chat(message, session_id))
+        return asyncio.run(self.chat(message, session_id=session_id, generate_walkthrough=generate_walkthrough))
     
     def set_callbacks(
         self,
