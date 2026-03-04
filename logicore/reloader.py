@@ -69,5 +69,4 @@ def start_reloader(watch_dir: str):
     observer = Observer()
     observer.schedule(event_handler, watch_dir, recursive=True)
     observer.start()
-    # print(f"[HotReload] Watching for changes in {watch_dir}...")
     return observer

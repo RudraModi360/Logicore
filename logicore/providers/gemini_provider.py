@@ -63,7 +63,7 @@ class GeminiProvider(LLMProvider):
                     if isinstance(args_raw, str):
                         try:
                             args = json.loads(args_raw)
-                        except:
+                        except Exception:
                             args = {}
                     else:
                         args = args_raw or {}
@@ -90,7 +90,7 @@ class GeminiProvider(LLMProvider):
                         resp_dict = json.loads(tool_content)
                         if not isinstance(resp_dict, dict):
                             resp_dict = {"result": resp_dict}
-                    except:
+                    except Exception:
                         resp_dict = {"result": tool_content}
                 else:
                     resp_dict = tool_content or {}
@@ -234,7 +234,7 @@ class GeminiProvider(LLMProvider):
                     args_raw = func_data.get("arguments")
                     if isinstance(args_raw, str):
                         try: args = json.loads(args_raw)
-                        except: args = {}
+                        except Exception: args = {}
                     else: args = args_raw or {}
                     parts.append(types.Part.from_function_call(name=name, args=args))
             
@@ -249,7 +249,7 @@ class GeminiProvider(LLMProvider):
                     try:
                         resp_dict = json.loads(tool_content)
                         if not isinstance(resp_dict, dict): resp_dict = {"result": resp_dict}
-                    except: resp_dict = {"result": tool_content}
+                    except Exception: resp_dict = {"result": tool_content}
                 else: resp_dict = tool_content or {}
                 
                 contents.append(types.Content(role="tool", parts=[types.Part.from_function_response(name=name or "unknown_function", response=resp_dict)]))

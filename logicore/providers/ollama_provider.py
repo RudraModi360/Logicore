@@ -229,7 +229,7 @@ class OllamaProvider(LLMProvider):
                 return True
                 
             return False
-        except:
+        except Exception:
             return False
 
     def get_model_name(self) -> str:

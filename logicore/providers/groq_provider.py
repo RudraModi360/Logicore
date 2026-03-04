@@ -18,59 +18,34 @@ class GroqProvider(LLMProvider):
         """Convert local image file paths to base64 data URLs for Groq API."""
         import mimetypes
         
-        print(f"[GroqProvider] _convert_local_images_to_base64 called with {len(messages)} messages")
-        
         converted_messages = []
-        for msg_idx, msg in enumerate(messages):
+        for msg in messages:
             new_msg = msg.copy()
             content = msg.get("content")
-            print(f"[GroqProvider] Message {msg_idx}: content type = {type(content)}, value = {content if not isinstance(content, str) else content[:100] + '...' if len(content) > 100 else content}")
             
             if isinstance(content, list):
-                print(f"[GroqProvider] Message {msg_idx}: processing {len(content)} content parts")
                 new_content = []
-                for part_idx, part in enumerate(content):
-                    print(f"[GroqProvider] Part {part_idx}: type = {part.get('type') if isinstance(part, dict) else 'non-dict'}")
-                    
+                for part in content:
                     if isinstance(part, dict) and part.get("type") == "image_url":
                         new_part = part.copy()
                         image_url_data = part.get("image_url")
-                        print(f"[GroqProvider] Image URL data: {type(image_url_data)} = {image_url_data}")
                         
                         if isinstance(image_url_data, dict):
                             url = image_url_data.get("url")
                         else:
                             url = image_url_data
                         
-                        print(f"[GroqProvider] URL: {url}")
-                        
-                        # Check if it's a local file path
                         if url and not url.startswith(("http://", "https://", "data:")):
-                            print(f"[GroqProvider] URL is local file, checking if exists: {url}")
-                            # Normalize path for Windows
                             url = str(url).replace("\\\\", "\\")
                             if os.path.isfile(url):
-                                print(f"[GroqProvider] File found, converting to base64...")
                                 try:
-                                    # Read and encode to base64
                                     with open(url, "rb") as f:
                                         image_data = f.read()
-                                    # Get mime type
                                     mime_type, _ = mimetypes.guess_type(url)
                                     mime_type = mime_type or "image/jpeg"
-                                    # Convert to base64 data URL
-                                    b64_image = base64.b64encode(image_data).decode("utf-8")
-                                    data_url = f"data:{mime_type};base64,{b64_image[:50]}..."
-                                    
-                                    # Update the part
                                     new_part["image_url"] = {"url": f"data:{mime_type};base64,{base64.b64encode(image_data).decode('utf-8')}"}
-                                    print(f"[GroqProvider] [OK] Converted image to base64 data URL")
                                 except Exception as e:
-                                    print(f"[GroqProvider] [ERROR] Error converting image: {e}")
-                            else:
-                                print(f"[GroqProvider] ✗ File not found")
-                        else:
-                            print(f"[GroqProvider] URL is remote or already data URL, skipping")
+                                    pass
                         
                         new_content.append(new_part)
                     else:

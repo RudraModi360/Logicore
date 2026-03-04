@@ -119,13 +119,8 @@ class AzureProvider(LLMProvider):
                 if "/v1" in base_url:
                     base_url = base_url.split("/v1")[0]
                 if "/anthropic" in base_url:
-                    # SDK often expects the parent of /anthropic for some versions, 
-                    # or the exact /anthropic base for others.
-                    # Let's try to keep /anthropic if it's there but strip headers
                     pass
                 else:
-                    # If just root, append /anthropic? 
-                    # Actually, better to trust the user's endpoint if it looks complete
                     pass
                 
                 # Ensure no trailing slash

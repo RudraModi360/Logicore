@@ -207,16 +207,10 @@ class AgentrySettings:
     # ==========================================================================
     # AGENT DEFAULTS
     # ==========================================================================
-    # ==========================================================================
-    # AGENT DEFAULTS
-    # ==========================================================================
     DEFAULT_PROVIDER: str = field(default_factory=lambda: _get_env("DEFAULT_PROVIDER", "ollama", "agent", "default_provider"))
     DEFAULT_MODEL: str = field(default_factory=lambda: _get_env("DEFAULT_MODEL", "gpt-oss:20b-cloud", "agent", "default_model"))
     MAX_ITERATIONS: int = field(default_factory=lambda: _get_int("MAX_ITERATIONS", 40, "agent", "max_iterations"))
     
-    # ==========================================================================
-    # SMTP (Email)
-    # ==========================================================================
     # ==========================================================================
     # SMTP (Email)
     # ==========================================================================
@@ -227,9 +221,6 @@ class AgentrySettings:
     SMTP_FROM_EMAIL: str = field(default_factory=lambda: _get_env("SMTP_FROM_EMAIL", "", "smtp", "from_email"))
     SMTP_USE_TLS: bool = field(default_factory=lambda: _get_bool("SMTP_USE_TLS", True, "smtp", "use_tls"))
     
-    # ==========================================================================
-    # KUBERNETES / AZURE (for deployment)
-    # ==========================================================================
     # ==========================================================================
     # KUBERNETES / AZURE (for deployment)
     # ==========================================================================

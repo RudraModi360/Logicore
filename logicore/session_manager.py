@@ -97,7 +97,7 @@ class SessionStorage:
             if row and row["metadata"]:
                 try:
                     existing = json.loads(row["metadata"])
-                except:
+                except Exception:
                     pass
             
             existing.update(metadata)
@@ -132,7 +132,7 @@ class SessionStorage:
             if row:
                 try:
                     return json.loads(row["value"])
-                except:
+                except Exception:
                     return row["value"]
             return None
     
@@ -169,7 +169,7 @@ class SessionStorage:
                     try:
                         msgs = json.loads(msg_row["value"])
                         msg_count = len([m for m in msgs if isinstance(m, dict) and m.get("role") == "user"])
-                    except:
+                    except Exception:
                         pass
                 
                 sessions.append({
@@ -233,7 +233,7 @@ class SessionManager:
                     s['provider'] = meta.get('provider')
                     s['model'] = meta.get('model')
                     s['model_type'] = meta.get('model_type')
-                except:
+                except Exception:
                     pass
         
         # Filter out sessions with no messages

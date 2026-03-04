@@ -77,13 +77,13 @@ class Agent:
         # Initialize the provider gateway for unified interface
         self.gateway: ProviderGateway = get_gateway_for_provider(self.provider)
         
-        self.llm = self.provider # Alias for consistency
+        self.llm = self.provider
 
         self.default_system_message = system_message or get_system_prompt(self.model_name, role)
         self._custom_system_message = system_message  # Store original if user provided one
         self.debug = debug
         self.max_iterations = max_iterations
-        self.role = role # Store role for simplemem initialization
+        self.role = role
         
         # Initialize Capabilities
         from logicore.providers.capability_detector import ModelCapabilities, get_known_capability
@@ -93,10 +93,8 @@ class Agent:
             else:
                 self.capabilities = capabilities
         else:
-            # If no capabilities provided, try to detect from cache
             provider_name = self.llm.provider_name if hasattr(self.llm, "provider_name") else "unknown"
             known = get_known_capability(self.model_name, provider=provider_name)
-            print(known)
             if known:
                 self.capabilities = ModelCapabilities(
                     supports_tools=known.get("supports_tools", False),
@@ -106,9 +104,8 @@ class Agent:
                     detection_method="cache"
                 )
             else:
-                # Default "to-be-detected" capabilities
                 self.capabilities = ModelCapabilities(
-                    supports_tools=True, # Modern defaults
+                    supports_tools=True,
                     supports_vision=False,
                     provider=provider_name,
                     model_name=self.model_name,
@@ -133,7 +130,7 @@ class Agent:
         self.internal_tools = []  # List of schemas
         self.mcp_managers: List[MCPClientManager] = []
         self.custom_tool_executors: Dict[str, Callable] = {}
-        self.disabled_tools = set() # Tool names or formatted IDs (e.g., 'mcp:server:tool')
+        self.disabled_tools = set()
         
         # Skills Management
         self.skills: List[Skill] = []
@@ -400,8 +397,7 @@ class Agent:
     def load_default_tools(self):
         """Load all built-in tools (Filesystem, Web, Execution)."""
         self.internal_tools.extend(ALL_TOOL_SCHEMAS)
-        # VFS tools removed - SimpleMem handles memory now
-        self.supports_tools = True  # Mark that tools are loaded and supported
+        self.supports_tools = True
         # Auto-load default skills from package defaults
         self._load_default_skills()
         self._rebuild_system_prompt_with_tools()  # Update system prompt with tools
