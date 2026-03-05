@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "logicore"
-version = "0.1.0"
+version = "0.1.1"
 description = "A modular, multi-provider AI agent framework for building intelligent tool-using agents with Gemini, Groq, Ollama, Azure OpenAI, and Anthropic."
 readme = "README.md"
 license = {text = "MIT"}
