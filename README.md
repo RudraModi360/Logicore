@@ -1,4 +1,4 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 # 🧠 Logicore
 
@@ -24,16 +24,16 @@ Logicore is a **lightweight, production-ready** Python framework for building AI
 ### 🔑 Key Features
 
 | Feature | Description |
-|---|---|
-| 🔄 **Multi-Provider** | Gemini, Groq, Ollama, Azure OpenAI, Anthropic — one interface |
-| 🛠️ **Tool Use** | Built-in file, web, git, PDF, Office, and code execution tools |
-| 🧩 **MCP Support** | Model Context Protocol for dynamic tool discovery |
-| 📡 **Streaming** | Real-time token streaming with async callbacks |
-| 🖼️ **Vision** | Multimodal image understanding across supported models |
-| 💾 **Memory** | Session persistence and simple memory stores |
-| 📊 **Telemetry** | Built-in execution tracing and walkthrough generation |
-| 🔌 **Skills** | Modular, reusable skill packs for domain-specific tasks |
-| ⚡ **Hot Reload** | Live code reloading during development |
+|---------|-------------|
+|  **Multi-Provider** | Gemini, Groq, Ollama, Azure OpenAI, Anthropic — one interface |
+|  **Tool Use** | Built-in file, web, git, PDF, Office, and code execution tools |
+|  **MCP Support** | Model Context Protocol for dynamic tool discovery |
+|  **Streaming** | Real-time token streaming with async callbacks |
+|  **Vision** | Multimodal image understanding across supported models |
+|  **Memory** | Session persistence and simple memory stores |
+|  **Telemetry** | Built-in execution tracing and walkthrough generation |
+|  **Skills** | Modular, reusable skill packs for domain-specific tasks |
+|  **Hot Reload** | Live code reloading during development |
 
 ---
 
@@ -77,6 +77,7 @@ agent = create_agent(
 response = await agent.chat("What's the weather in Tokyo?")
 print(response)
 ```
+---
 
 ### Multi-Provider Flexibility
 
@@ -106,20 +107,6 @@ agent = MCPAgent(
 response = await agent.chat("Search for recent AI papers")
 ```
 
----
-
-## 📦 Provider Support
-
-| Provider | Text | Tools | Vision | Streaming |
-|---|:---:|:---:|:---:|:---:|
-| **Gemini** | ✅ | ✅ | ✅ | ✅ |
-| **Groq** | ✅ | ✅ | ❌ | ✅ |
-| **Ollama** | ✅ | ✅ | ✅ | ✅ |
-| **Azure OpenAI** | ✅ | ✅ | ✅ | ✅ |
-| **Azure Anthropic** | ✅ | ✅ | ✅ | ✅ |
-
----
-
 ## 🛠️ Built-in Tools
 
 Logicore ships with a comprehensive set of ready-to-use tools:
@@ -137,7 +124,7 @@ Logicore ships with a comprehensive set of ready-to-use tools:
 ## 🏗️ Agent Types
 
 | Agent | Best For |
-|---|---|
+|-------|----------|
 | `BasicAgent` | Simple single-turn tool-calling agents |
 | `Agent` | Full-featured agents with memory and tools |
 | `SmartAgent` | Autonomous multi-step reasoning agents |
@@ -148,7 +135,7 @@ Logicore ships with a comprehensive set of ready-to-use tools:
 
 ## 📖 Documentation
 
-Full docs: [https://rudramodi360.github.io/Agentry/](https://rudramodi360.github.io/Agentry/)
+Full documentation available at: [https://rudramodi360.github.io/Agentry/](https://rudramodi360.github.io/Agentry/)
 
 ---
 
@@ -171,4 +158,3 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 ⭐ Star this repo if you find it useful!
 
 </div>
-]]>
