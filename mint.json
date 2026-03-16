@@ -1,87 +1,52 @@
 {
   "name": "Logicore",
   "logo": {
-    "dark": "/logo/dark.svg",
-    "light": "/logo/light.svg"
+    "dark": "/logicore/artifacts/image-removebg-preview (1) copy.png",
+    "light": "/logicore/artifacts/image-removebg-preview (3).png"
   },
-  "favicon": "/favicon.ico",
+  "favicon": "/logicore/artifacts/image-removebg-preview (1) copy.png",
   "colors": {
-    "primary": "#0066FF",
-    "light": "#E6F0FF",
-    "dark": "#004DD9",
+    "primary": "#2563EB",
+    "light": "#EEF2FF",
+    "dark": "#0F172A",
     "anchors": {
-      "from": "#0066FF",
-      "to": "#004DD9"
+      "from": "#2563EB",
+      "to": "#0EA5E9"
     }
   },
   "topbarLinks": [
     {
       "name": "GitHub",
-      "url": "https://github.com/RudraModi360/Logicore"
+      "url": "https://github.com/RudraModi360/Agentry"
+    },
+    {
+      "name": "Discord",
+      "url": "https://discord.gg/Yz8yFzgQ"
     }
   ],
   "topbarCtaButton": {
     "name": "Get Started",
-    "url": "https://github.com/RudraModi360/Logicore"
+    "url": "/docs/introduction"
   },
   "tabs": [
     {
       "name": "Documentation",
       "url": "docs"
-    },
-    {
-      "name": "API Reference",
-      "url": "api"
-    },
-    {
-      "name": "Guides",
-      "url": "guides"
     }
   ],
   "navigation": [
     {
-      "group": "Get Started",
+      "group": "",
       "pages": [
         "docs/introduction",
         "docs/installation",
-        "docs/quickstart"
-      ]
-    },
-    {
-      "group": "Core Concepts",
-      "pages": [
+        "docs/quickstart",
         "docs/concepts/agents",
         "docs/concepts/providers",
         "docs/concepts/tools",
         "docs/concepts/skills",
-        "docs/concepts/memory"
-      ]
-    },
-    {
-      "group": "Guides & Tutorials",
-      "pages": [
-        "guides/your-first-agent",
-        "guides/multi-provider-patterns",
-        "guides/tool-integration",
-        "guides/streaming-async",
-        "guides/vision-multimodal",
-        "guides/memory-management",
-        "guides/production-deployment"
-      ]
-    },
-    {
-      "group": "API Reference",
-      "pages": [
-        "api/agent-class",
-        "api/providers",
-        "api/tools",
-        "api/memory",
-        "api/utilities"
-      ]
-    },
-    {
-      "group": "Resources",
-      "pages": [
+        "docs/concepts/memory",
+        "docs/guidelines/custom-agents",
         "docs/changelog",
         "docs/contributing",
         "docs/faq"
@@ -89,9 +54,9 @@
     }
   ],
   "footerSocials": {
-    "github": "https://github.com/RudraModi360/Logicore",
-    "discord": "https://discord.gg/logicore",
-    "twitter": "https://twitter.com/LogicoreAI"
+    "github": "https://github.com/RudraModi360/Agentry",
+    "discord": "https://discord.gg/Yz8yFzgQ",
+    "twitter": "https://twitter.com/RModi360"
   },
   "search": {
     "prompt": "Search Logicore documentation..."
@@ -102,8 +67,7 @@
   },
   "analytics": {
     "ga4": {
-      "measurementId": "YOUR_GA4_ID"
+      "measurementId": "G-YOUR_GA4_ID"
     }
-  },
-  "openapi": "/openapi.json"
+  }
 }

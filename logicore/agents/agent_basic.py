@@ -331,7 +331,7 @@ You are ready to help. Use your tools effectively.
     
     # --- Public API ---
     
-    async def chat(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, generate_walkthrough: bool = True, **kwargs) -> str:
+    async def chat(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, generate_walkthrough: bool = False, **kwargs) -> str:
         """
         Send a message and get a response.
         
@@ -346,7 +346,7 @@ You are ready to help. Use your tools effectively.
         """
         return await self._agent.chat(message, session_id=session_id, stream=stream, generate_walkthrough=generate_walkthrough, **kwargs)
     
-    def chat_sync(self, message: str, session_id: str = "default", generate_walkthrough: bool = True) -> str:
+    def chat_sync(self, message: str, session_id: str = "default", generate_walkthrough: bool = False) -> str:
         """
         Synchronous version of chat.
         

@@ -20,6 +20,7 @@ from .agent_tools import (
     get_smart_agent_tools, get_smart_agent_tool_schemas
 )
 from .media_search import MediaSearchTool
+from .cron_tools import AddCronJobTool, ListCronJobsTool, RemoveCronJobTool, GetCronsTool
 
 class ToolRegistry:
     def __init__(self):
@@ -64,6 +65,12 @@ class ToolRegistry:
         self.register_tool(MergePDFTool())
         self.register_tool(SplitPDFTool())
 
+        # Cron Scheduling Tools
+        self.register_tool(AddCronJobTool())
+        self.register_tool(ListCronJobsTool())
+        self.register_tool(RemoveCronJobTool())
+        self.register_tool(GetCronsTool())
+
     def get_tool(self, name: str) -> BaseTool:
         return self._tools.get(name)
 
@@ -90,12 +97,13 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> ToolResult:
     return registry.execute_tool(tool_name, tool_args)
 
 # Tool categories
-SAFE_TOOLS = ['read_file', 'list_files', 'search_files', 'fast_grep', 'read_document', 'media_search']
+SAFE_TOOLS = ['read_file', 'list_files', 'search_files', 'fast_grep', 'read_document', 'media_search', 'list_cron_jobs', 'get_crons']
 APPROVAL_REQUIRED_TOOLS = [
     'create_file', 'edit_file', 'web_search', 'image_search', 'url_fetch', 'convert_document',
     'edit_pptx', 'create_pptx', 'append_slide',
     'edit_docx', 'create_docx',
     'edit_excel', 'create_excel',
-    'merge_pdfs', 'split_pdf'
+    'merge_pdfs', 'split_pdf',
+    'add_cron_job', 'remove_cron_job'
 ]
 DANGEROUS_TOOLS = ['delete_file', 'execute_command', 'git_command', 'code_execute']

@@ -97,3 +97,4 @@ test_*
 *.tar.gz
 dist/
 test_simple.py
+node_modules

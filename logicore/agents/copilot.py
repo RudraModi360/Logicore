@@ -51,7 +51,7 @@ class CopilotAgent(Agent):
         # Auto-load tools useful for coding
         self.load_default_tools()
         
-    async def chat(self, user_input: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, generate_walkthrough: bool = True, **kwargs) -> str:
+    async def chat(self, user_input: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, generate_walkthrough: bool = False, **kwargs) -> str:
         """Coding-optimized chat."""
         return await super().chat(user_input, session_id=session_id, stream=stream, generate_walkthrough=generate_walkthrough, **kwargs)
 

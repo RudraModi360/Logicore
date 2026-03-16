@@ -10,6 +10,7 @@ Based on SimpleMem: https://github.com/aiming-lab/SimpleMem
 """
 import asyncio
 import uuid
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -74,16 +75,26 @@ class AgentrySimpleMem:
         session_id: str = "default",
         max_context_entries: int = 5,
         enable_background_processing: bool = True,
+        isolate_by_session: bool = True,
         debug: bool = False
     ):
         self.user_id = user_id
         self.session_id = session_id
         self.max_context_entries = max_context_entries
         self.enable_background = enable_background_processing
+        self.isolate_by_session = isolate_by_session
         self.debug = debug
+        self.min_store_score = config.get_min_store_score()
+        self.min_retrieve_score = config.get_min_retrieve_score()
+        self.max_facts_per_turn = config.get_max_facts_per_turn()
+        self.max_memory_chars = config.get_max_memory_chars()
         
         # Per-user table name
-        self.table_name = config.get_memory_table_name(user_id)
+        self.table_name = config.get_memory_table_name(
+            user_id=user_id,
+            session_id=session_id,
+            isolate_by_session=isolate_by_session
+        )
         
         # Components (lazy initialized)
         self._vector_store = None
@@ -96,10 +107,35 @@ class AgentrySimpleMem:
         
         # Background processing
         self._processing_lock = threading.Lock()
+
+    def _resolve_table_name(self) -> str:
+        return config.get_memory_table_name(
+            user_id=self.user_id,
+            session_id=self.session_id,
+            isolate_by_session=self.isolate_by_session
+        )
+
+    def _ensure_table_binding(self):
+        expected = self._resolve_table_name()
+        if expected == self.table_name:
+            return
+
+        if self.debug:
+            print(f"[SimpleMem] Switching table: {self.table_name} -> {expected}")
+
+        self.table_name = expected
+        self._vector_store = None
+
+        if self._dialogue_queue:
+            self._dialogue_queue = []
+            if self.debug:
+                print("[SimpleMem] Cleared pending dialogue queue due to session table switch")
     
     def _lazy_init(self):
         """Lazy initialization of vector store and embedding model."""
-        if self._initialized:
+        self._ensure_table_binding()
+
+        if self._initialized and self._vector_store is not None:
             return
         
         try:
@@ -107,13 +143,14 @@ class AgentrySimpleMem:
             from .vector_store import VectorStore
             
             if self.debug:
-                print(f"[SimpleMem] Initializing for user {self.user_id}...")
+                print(f"[SimpleMem] Initializing for user {self.user_id} (session: {self.session_id})...")
             
             # Initialize embedding model
-            embed_config = config.get_embedding_config()
-            self._embedding_model = EmbeddingModel(
-                ollama_base_url=embed_config["ollama_url"]
-            )
+            if self._embedding_model is None:
+                embed_config = config.get_embedding_config()
+                self._embedding_model = EmbeddingModel(
+                    ollama_base_url=embed_config["ollama_url"]
+                )
             
             # Initialize vector store with per-user table
             self._vector_store = VectorStore(
@@ -130,6 +167,166 @@ class AgentrySimpleMem:
         except Exception as e:
             print(f"[SimpleMem] Init error: {e}")
             self._initialized = True  # Mark as tried to avoid repeated errors
+
+    def _is_transient_memory_text(self, text: str) -> bool:
+        normalized = text.lower().strip()
+
+        transient_patterns = [
+            r"\[user\]:\s*remind me",
+            r"\[user\]:\s*set (a )?reminder",
+            r"\[user\]:\s*remind",
+            r"\[assistant\]:\s*(sure thing|of course|okay|alright).*(i('| wi)?ll)\s+remind",
+            r"\[assistant\]:.*in\s+\d+\s*(sec|second|seconds|min|minute|minutes)",
+            r"\[assistant\]:.*\b(i('| wi)?ll|got it)\b.*\b(remind|reminder|ping|notify|pop)\b",
+        ]
+
+        return any(re.search(pattern, normalized) for pattern in transient_patterns)
+
+    def _looks_like_question(self, text: str) -> bool:
+        t = text.strip().lower()
+        if not t:
+            return False
+        if "?" in t:
+            return True
+        return bool(re.match(r"^(what|why|how|when|where|who|can|could|would|should|do|does|did|is|are|will)\b", t))
+
+    def _is_vague_or_smalltalk(self, text: str) -> bool:
+        t = text.strip().lower()
+        if not t:
+            return True
+
+        vague_patterns = [
+            r"^thanks[.!]*$",
+            r"^okay[.!]*$",
+            r"^ok[.!]*$",
+            r"^sure[.!]*$",
+            r"^got it[.!]*$",
+            r"^sounds good[.!]*$",
+            r"^nice[.!]*$",
+            r"^hello[.!]*$",
+            r"^hi[.!]*$",
+        ]
+        return any(re.match(pattern, t) for pattern in vague_patterns)
+
+    def _score_memory_signal(self, speaker: str, text: str) -> int:
+        t = text.strip().lower()
+        if not t:
+            return 0
+
+        score = 0
+
+        durable_markers = [
+            r"\bmy name is\b",
+            r"\bi (am|work|use|prefer|need|want|always|usually)\b",
+            r"\b(project|repo|codebase|stack|language|framework|database|api)\b",
+            r"\b(prefer|preference|constraint|requirement|deadline|timezone)\b",
+            r"\b(version|path|port|endpoint|model|provider|environment)\b",
+        ]
+        if any(re.search(pattern, t) for pattern in durable_markers):
+            score += 2
+
+        if re.search(r"\b(scheduled|created|added|saved|updated|deleted|fixed|resolved|next run|job id)\b", t):
+            score += 2
+
+        if re.search(r"\d", t):
+            score += 1
+
+        token_count = len(re.findall(r"\b\w+\b", t))
+        if 5 <= token_count <= 40:
+            score += 1
+        elif token_count > 80:
+            score -= 1
+
+        if self._looks_like_question(t):
+            score -= 2
+
+        if self._is_vague_or_smalltalk(t):
+            score -= 2
+
+        if self._is_transient_memory_text(t):
+            score -= 3
+
+        if speaker.lower() == "assistant":
+            if re.search(r"\b(i('| wi)?ll|i can)\b", t) and not re.search(r"\b(done|completed|scheduled|created|saved|updated)\b", t):
+                score -= 2
+
+        return max(score, 0)
+
+    def _extract_atomic_facts(self, dialogue: Dialogue) -> List[str]:
+        text = dialogue.content.strip()
+        if not text:
+            return []
+
+        candidate_lines = [line.strip(" -\t") for line in re.split(r"[\n\r]+", text) if line.strip()]
+        facts: List[str] = []
+
+        for line in candidate_lines:
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", line) if s.strip()]
+            if not sentences:
+                sentences = [line]
+
+            for sentence in sentences:
+                cleaned = sentence.strip()
+                if not cleaned:
+                    continue
+                if len(cleaned) > self.max_memory_chars:
+                    cleaned = cleaned[: self.max_memory_chars].rstrip() + "..."
+
+                score = self._score_memory_signal(dialogue.speaker, cleaned)
+                if score < self.min_store_score:
+                    continue
+
+                if self._looks_like_question(cleaned):
+                    continue
+
+                if self._is_transient_memory_text(f"[{dialogue.speaker}]: {cleaned}"):
+                    continue
+
+                facts.append(cleaned)
+                if len(facts) >= self.max_facts_per_turn:
+                    return facts
+
+        return facts
+
+    def _parse_score_from_memory_text(self, memory_text: str) -> int:
+        m = re.search(r"\[score=(\d+)\]", memory_text)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+        return 0
+
+    def _format_memory_text(self, dialogue: Dialogue, fact: str, score: int) -> str:
+        speaker = dialogue.speaker.capitalize()
+        return f"[{speaker}][score={score}] {fact}"
+
+    def _should_store_dialogue(self, dialogue: Dialogue) -> bool:
+        text = dialogue.content.strip()
+        if not text:
+            return False
+
+        normalized = text.lower()
+        if dialogue.speaker.lower() == "user":
+            if re.search(r"^\s*(remind me|set (a )?reminder|in next \d+\s*(sec|second|seconds|min|minute|minutes))", normalized):
+                return False
+
+        if dialogue.speaker.lower() == "assistant":
+            promissory = re.search(r"\b(i('| wi)?ll|i can|got it)\b.*\b(remind|reminder|schedule|notify|ping|pop)\b", normalized)
+            action_confirmed = re.search(r"\b(scheduled|created|added|next run|job id|done|completed|triggered)\b", normalized)
+            if promissory and not action_confirmed:
+                return False
+
+        if self._is_vague_or_smalltalk(normalized):
+            return False
+
+        if self._looks_like_question(normalized):
+            return False
+
+        if self._score_memory_signal(dialogue.speaker, text) < self.min_store_score:
+            return False
+
+        return True
     
     async def on_user_message(self, content: str) -> List[str]:
         """
@@ -184,7 +381,26 @@ class AgentrySimpleMem:
         
         try:
             results = self._vector_store.semantic_search(query, top_k=limit)
-            return [r.lossless_restatement for r in results if r.lossless_restatement]
+            filtered: List[str] = []
+            seen = set()
+
+            for row in results:
+                memory_text = (row.lossless_restatement or "").strip()
+                if not memory_text:
+                    continue
+                if self._is_transient_memory_text(memory_text):
+                    continue
+
+                if self._parse_score_from_memory_text(memory_text) < self.min_retrieve_score:
+                    continue
+
+                canonical = memory_text.lower()
+                if canonical in seen:
+                    continue
+                seen.add(canonical)
+                filtered.append(memory_text)
+
+            return filtered[:limit]
         except Exception as e:
             if self.debug:
                 print(f"[SimpleMem] Retrieval error: {e}")
@@ -217,13 +433,21 @@ class AgentrySimpleMem:
             # Convert dialogues to memory entries (simplified)
             entries = []
             for dialogue in dialogues:
-                entry = MemoryEntry(
-                    lossless_restatement=f"[{dialogue.speaker}]: {dialogue.content}",
-                    keywords=self._extract_keywords(dialogue.content),
-                    timestamp=dialogue.timestamp,
-                    persons=[dialogue.speaker] if dialogue.speaker else [],
-                )
-                entries.append(entry)
+                if not self._should_store_dialogue(dialogue):
+                    continue
+                facts = self._extract_atomic_facts(dialogue)
+                for fact in facts:
+                    score = self._score_memory_signal(dialogue.speaker, fact)
+                    if score < self.min_store_score:
+                        continue
+
+                    entry = MemoryEntry(
+                        lossless_restatement=self._format_memory_text(dialogue, fact, score),
+                        keywords=self._extract_keywords(fact),
+                        timestamp=dialogue.timestamp,
+                        persons=[dialogue.speaker] if dialogue.speaker else [],
+                    )
+                    entries.append(entry)
             
             # Store to vector store
             if entries:

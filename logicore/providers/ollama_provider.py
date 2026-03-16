@@ -50,9 +50,25 @@ class OllamaProvider(LLMProvider):
                             if 'required' in tc or 'properties' in tc:
                                 continue
                             clean_calls.append(tc)
+                        elif hasattr(tc, 'function'):
+                            # Handle Ollama's native ToolCall objects
+                            # Retain name/arguments so it passes correctly back into history
+                            clean_call = {
+                                'function': {
+                                    'name': getattr(tc.function, 'name', ''),
+                                    'arguments': getattr(tc.function, 'arguments', {})
+                                }
+                            }
+                            clean_calls.append(clean_call)
                     
                     if clean_calls:
                         ollama_msg["tool_calls"] = clean_calls
+            
+            # Preserve tool result metadata for proper LLM context
+            if "name" in msg:
+                ollama_msg["name"] = msg["name"]
+            if "tool_call_id" in msg:
+                ollama_msg["tool_call_id"] = msg["tool_call_id"]
             
             if role and (text_content or images or tool_calls):
                 filtered_messages.append(ollama_msg)
@@ -151,20 +167,50 @@ class OllamaProvider(LLMProvider):
                 )
                 
                 for chunk in stream:
-                    if 'message' in chunk:
+                    # Handle both dictionary and object formats from Ollama client
+                    msg = None
+                    if isinstance(chunk, dict) and 'message' in chunk:
                         msg = chunk['message']
+                    elif hasattr(chunk, 'message'):
+                        msg = chunk.message
                         
-                        if msg.get('content'):
-                            token = msg['content']
+                    if msg is not None:
+                        # Extract content
+                        token = None
+                        if isinstance(msg, dict):
+                            token = msg.get('content')
+                        else:
+                            token = getattr(msg, 'content', None)
+                            
+                        if token:
                             full_content += token
-                            # Put token in queue for async processing
                             asyncio.run_coroutine_threadsafe(
                                 token_queue.put(token),
                                 loop
                             )
+                            
+                        # Extract thinking
+                        think_token = None
+                        if isinstance(msg, dict):
+                            think_token = msg.get('thinking')
+                        else:
+                            think_token = getattr(msg, 'thinking', None)
+                            
+                        if think_token:
+                            full_content += think_token
+                            asyncio.run_coroutine_threadsafe(
+                                token_queue.put(think_token),
+                                loop
+                            )
                         
-                        if msg.get('tool_calls'):
-                            tool_calls = msg['tool_calls']
+                        # Extract tool calls
+                        if isinstance(msg, dict):
+                            tc = msg.get('tool_calls')
+                        else:
+                            tc = getattr(msg, 'tool_calls', None)
+                            
+                        if tc:
+                            tool_calls = tc
                 
                 final_message = {"role": "assistant", "content": full_content}
                 if tool_calls:

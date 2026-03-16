@@ -2,6 +2,7 @@ import time
 import json
 import inspect
 import asyncio
+import re
 from typing import List, Dict, Any, Callable, Awaitable, Optional, Union, get_type_hints
 from datetime import datetime
 from logicore.providers.base import LLMProvider
@@ -625,6 +626,67 @@ class Agent:
         """Set callbacks: on_tool_start, on_tool_end, on_tool_approval, on_final_message, on_token."""
         self.callbacks.update(kwargs)
 
+    def _is_reminder_like_request(self, text: Any) -> bool:
+        request = str(text or "").lower()
+        return bool(
+            re.search(
+                r"\b(remind|reminder|notify|notification|ping me|in next \d+\s*(sec|second|seconds|min|minute|minutes))\b",
+                request,
+            )
+        )
+
+    def _has_unverified_reminder_claim(self, content: str) -> bool:
+        response = (content or "").lower()
+        claim_patterns = [
+            r"\b(i('| wi)?ll|i can|got it)\b.*\b(remind|reminder|ping|notify)\b",
+            r"\b(pop|ping)\b.*\b(in\s+\d+\s*(sec|second|seconds|min|minute|minutes))\b",
+            r"\bi('| wi)?ll\s+.*\b(in\s+\d+\s*(sec|second|seconds|min|minute|minutes))\b",
+        ]
+        return any(re.search(pattern, response) for pattern in claim_patterns)
+
+    def _extract_reminder_window_seconds(self, text: Any) -> Optional[int]:
+        request = str(text or "").lower()
+
+        m = re.search(r"(\d+)\s*(sec|second|seconds|min|minute|minutes|hr|hour|hours)", request)
+        if not m:
+            return None
+
+        value = int(m.group(1))
+        unit = m.group(2)
+
+        if unit.startswith("sec"):
+            return value
+        if unit.startswith("min"):
+            return value * 60
+        if unit.startswith("hr") or unit.startswith("hour"):
+            return value * 3600
+        return None
+
+    def _build_reminder_routing_hint(self, text: Any, tool_names: List[str]) -> Optional[str]:
+        if not self._is_reminder_like_request(text):
+            return None
+
+        seconds = self._extract_reminder_window_seconds(text)
+        has_cron = "add_cron_job" in tool_names
+
+        if seconds is not None and seconds < 60:
+            return (
+                "<reminder_routing_hint>\n"
+                "User requested a sub-minute reminder. Cron tools are minute-granularity and cannot satisfy seconds-level reminders. "
+                "Do not call add_cron_job for this request. Explain limitation and ask for either rounding to the next minute or explicit approval for a one-shot execution tool.\n"
+                "</reminder_routing_hint>"
+            )
+
+        if has_cron:
+            return (
+                "<reminder_routing_hint>\n"
+                "For reminder/scheduling requests that are minute-level or greater, prefer cron tools first: add_cron_job (and list_cron_jobs to confirm). "
+                "Avoid execute_command/code_execute for scheduling when cron can handle it.\n"
+                "</reminder_routing_hint>"
+            )
+
+        return None
+
     async def chat(
         self, 
         user_input: Union[str, List[Dict[str, Any]]], 
@@ -632,7 +694,7 @@ class Agent:
         callbacks: Dict[str, Callable] = None, 
         stream: bool = False, 
         streaming_funct: Callable = None,
-        generate_walkthrough: bool = True,
+        generate_walkthrough: bool = False,
         **kwargs
     ) -> str:
         """Main chat loop."""
@@ -691,20 +753,24 @@ class Agent:
 
         session.add_message({"role": "user", "content": user_input})
 
-        # --- Memory Context Injection ---
-        # Retrieve relevant past memories and inject as a system message before the user turn.
-        # Must happen AFTER add_message so session.messages[-1] is correctly the user message.
+        # --- Memory System (Revised) ---
+        # REMOVED: Automatic memory context injection at chat start.
+        # WHY: Auto-injection polluted context with stale data from casual conversations,
+        # causing hallucinations and irrelevant information.
+        # NEW APPROACH: Memory is now explicit and on-demand via RAG-based memory tool:
+        # - Agents call the 'memory' tool (search/store/list) when they need context
+        # - This prevents casual "hello" or "remind me" from polluting context
+        # - Only significant learnings are auto-captured (not casual chat)
+        # - Memory context is injected only when agent explicitly requests it via tool
+        #
         if self.memory_enabled and self.simplemem:
-            memory_context = await self.simplemem.on_user_message(text_for_memory)
-            if memory_context:
-                context_str = "\n".join(f"- {c}" for c in memory_context)
-                # Insert the memory block immediately before the user message
-                session.messages.insert(-1, {
-                    "role": "system",
-                    "content": f"<memory_context>\nRelevant memories from past conversations:\n{context_str}\n</memory_context>"
-                })
+            # Queue the message for SimpleMem indexing (for future searches)
+            # but DO NOT inject its context into current session automatically
+            try:
+                _ = await self.simplemem.on_user_message(text_for_memory)
+            except Exception as e:
                 if self.debug:
-                    print(f"[Agent] 🧠 Injected {len(memory_context)} memory entries into context")
+                    print(f"[Agent] ⚠️ SimpleMem queueing failed: {e}")
 
         # --- Input Validation (second check) ---
         is_valid, error = self.capabilities.validate_input(session.messages)
@@ -714,13 +780,29 @@ class Agent:
         
         # Only get tools if they're supported
         all_tools = None
+        tool_names: List[str] = []
+        successful_tools_this_chat = 0
         if self.supports_tools:
             all_tools = await self.get_all_tools()
+            tool_names = [
+                t.get("function", {}).get("name", "")
+                for t in all_tools
+                if isinstance(t, dict)
+            ]
             if self.debug and all_tools:
                 print(f"[Agent] 🛠️ Loaded {len(all_tools)} available tools")
         else:
             if self.debug:
                 print(f"[Agent] ℹ️ Tool-free mode: {self.tools_disabled_reason or 'Model does not support tools'}")
+
+        reminder_hint = self._build_reminder_routing_hint(text_for_memory, tool_names)
+        reminder_hint_added = False
+        if reminder_hint:
+            session.messages.insert(-1, {
+                "role": "system",
+                "content": reminder_hint
+            })
+            reminder_hint_added = True
 
         for i in range(self.max_iterations):
             if self.debug:
@@ -925,6 +1007,23 @@ class Agent:
 
             # 3. Handle Final Response
             if not tool_calls:
+                if reminder_hint_added:
+                    for idx in range(len(session.messages) - 1, -1, -1):
+                        msg = session.messages[idx]
+                        if msg.get("role") == "system" and msg.get("content") == reminder_hint:
+                            del session.messages[idx]
+                            break
+
+                if (
+                    self._is_reminder_like_request(text_for_memory)
+                    and successful_tools_this_chat == 0
+                    and self._has_unverified_reminder_claim(content)
+                ):
+                    content = (
+                        "I can’t trigger a real timed reminder inside this chat unless an approved tool runs successfully. "
+                        "If you want, I can help set one up using an approved scheduler command or provide a local reminder script."
+                    )
+
                 # Store assistant response in memory and flush to vector store
                 if self.memory_enabled and self.simplemem:
                     await self.simplemem.on_assistant_message(content)
@@ -1000,6 +1099,7 @@ class Agent:
 
                 # Approval
                 approved = True
+                result = None
                 if self._requires_approval(name):
                     if active_callbacks["on_tool_approval"]:
                         approval_result = await active_callbacks["on_tool_approval"](session_id, name, args)
@@ -1012,16 +1112,25 @@ class Agent:
                             # Boolean or None
                             approved = bool(approval_result)
                     else:
-                        # If no callback is set but approval is required, we pass (backward compatibility)
-                        pass
+                        # Secure default: deny approval-required tools when no approval callback is configured.
+                        approved = False
+                        result = {
+                            "error": (
+                                f"Tool '{name}' requires explicit approval, but no approval callback is configured. "
+                                "Add on_tool_approval callback or use a safe tool."
+                            )
+                        }
+                        if self.debug:
+                            print(f"[Agent] 🔒 Approval required for '{name}' but no callback configured; denying execution.")
 
                 if not approved:
-                    result = {"error": "Denied by user"}
+                    if 'result' not in locals() or not isinstance(result, dict) or "error" not in result:
+                        result = {"error": "Denied by user"}
                     tool_fail_log = f"[Agent] ❌ EXECUTION DENIED: '{name}'"
                     print(tool_fail_log)
                     logger.warning(tool_fail_log)
                     # Track denied tool call in summary
-                    self.execution_log.append(f"Tool {name} was DENIED by the user.")
+                    self.execution_log.append(f"Tool {name} was denied. Reason: {result.get('error', 'Denied by user')}")
                 else:
                     # Record tool call start time
                     start_time_tool = time.time()
@@ -1029,7 +1138,9 @@ class Agent:
                     duration_ms = (time.time() - start_time_tool) * 1000
                     
                     # Check if tool execution was successful
-                    is_error = isinstance(result, dict) and ("error" in result or "exception" in result)
+                    is_error = False
+                    if isinstance(result, dict):
+                        is_error = bool(result.get("error")) or bool(result.get("exception"))
                     
                     if is_error:
                         error_msg = result.get("error", result.get("exception", "Unknown error"))
@@ -1039,6 +1150,7 @@ class Agent:
                         # Track failed tool call in summary
                         self.execution_log.append(f"Tool {name} FAILED with error: {error_msg}")
                     else:
+                        successful_tools_this_chat += 1
                         # Format result summary (up to 100 words)
                         if isinstance(result, dict):
                             result_str = json.dumps(result)
@@ -1063,9 +1175,7 @@ class Agent:
                 # Format: "Tool 'name' executed successfully. Result: {result_summary}"
                 result_summary = result
                 if isinstance(result, dict):
-                    if "error" in result:
-                        result_summary = f"Error: {result['error']}"
-                    elif "message" in result and "status" in result:
+                    if "message" in result and "status" in result:
                         result_summary = f"{result.get('status', 'executed')}: {result['message']}"
                     else:
                         result_summary = json.dumps(result)
@@ -1159,7 +1269,11 @@ class Agent:
         try:
             # 1. Custom Tools
             if name in self.custom_tool_executors:
-                result = self.custom_tool_executors[name](**args)
+                executor = self.custom_tool_executors[name]
+                if inspect.iscoroutinefunction(executor):
+                    result = await executor(**args)
+                else:
+                    result = executor(**args)
             
             # 1b. Skill Tools
             elif name in self.skill_tool_executors:

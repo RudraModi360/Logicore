@@ -5,10 +5,10 @@
   "scripts": {
     "dev": "mintlify dev",
     "build": "mintlify build",
-    "preview": "mintlify preview"
+    "preview": "mintlify preview",
+    "lint-docs": "mintlify lint"
   },
   "dependencies": {
-    "mintlify": "^6.0.0"
-  },
-  "devDependencies": {}
+    "mintlify": "^4.2.0"
+  }
 }
