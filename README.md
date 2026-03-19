@@ -1,7 +1,7 @@
 # Logicore AI Framework
 
 <p align="center">
-    <img src="https://raw.githubusercontent.com/rudramodi360/Logicore/HEAD/logicore/artifacts/image-removebg-preview%20(2).png" alt="Logicore Banner" width="420" style="max-width:60%; height:auto;" />
+    <img src="https://raw.githubusercontent.com/rudramodi360/Agentry/main/logicore/artifacts/image-removebg-preview%20(2).png" alt="Logicore Banner" width="420" style="max-width:60%; height:auto;" />
 </p>
 
 <p align="center">
