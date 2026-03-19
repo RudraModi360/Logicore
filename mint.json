@@ -34,22 +34,98 @@
       "url": "docs"
     }
   ],
+  "breadcrumbs": false,
   "navigation": [
     {
-      "group": "",
+      "group": "Getting Started",
       "pages": [
         "docs/introduction",
         "docs/installation",
-        "docs/quickstart",
-        "docs/concepts/agents",
-        "docs/concepts/providers",
-        "docs/concepts/tools",
-        "docs/concepts/skills",
-        "docs/concepts/memory",
-        "docs/guidelines/custom-agents",
-        "docs/changelog",
-        "docs/contributing",
-        "docs/faq"
+        "docs/quickstart"
+      ]
+    },
+    {
+      "group": "Core Concepts",
+      "pages": [
+        {
+          "group": "Agents",
+          "pages": [
+            "docs/concepts/agents/agents",
+            "docs/concepts/agents/agents-overview",
+            "docs/concepts/agents/basic-agent",
+            "docs/concepts/agents/full-agent",
+            "docs/concepts/agents/smart-agent"
+          ]
+        },
+        {
+          "group": "MCP",
+          "pages": [
+            "docs/concepts/mcp/mcp",
+            "docs/concepts/mcp/mcp-overview",
+            "docs/concepts/mcp/mcp-how-it-works",
+            "docs/concepts/mcp/mcp-dynamic-tools",
+            "docs/concepts/mcp/mcp-examples",
+            "docs/concepts/mcp/mcp-agent"
+          ]
+        },
+        {
+          "group": "Providers",
+          "pages": [
+            "docs/concepts/providers/providers",
+            "docs/concepts/providers/provider-ollama",
+            "docs/concepts/providers/provider-groq",
+            "docs/concepts/providers/provider-gemini",
+            "docs/concepts/providers/provider-azure",
+            "docs/concepts/providers/provider-openai",
+            "docs/concepts/providers/providers-overview"
+          ]
+        },
+        {
+          "group": "Tools",
+          "pages": [
+            "docs/concepts/tools/tools",
+            "docs/concepts/tools/tools-overview",
+            "docs/concepts/tools/tools-ways",
+            "docs/concepts/tools/tools-built-in",
+            "docs/concepts/tools/tools-custom"
+          ]
+        },
+        {
+          "group": "Skills",
+          "pages": [
+            "docs/concepts/skills/skills",
+            "docs/concepts/skills/skills-overview",
+            "docs/concepts/skills/skills-why-important",
+            "docs/concepts/skills/skills-build-custom",
+            "docs/concepts/skills/skills-use-in-agents",
+            "docs/concepts/skills/skills-working-internals"
+          ]
+        },
+        {
+          "group": "Memory",
+          "pages": [
+            "docs/concepts/memory/memory",
+            "docs/concepts/memory/memory-overview",
+            "docs/concepts/memory/memory-short-term",
+            "docs/concepts/memory/memory-long-term",
+            "docs/concepts/memory/memory-simplemem-integration",
+            "docs/concepts/memory/memory-use-in-agents"
+          ]
+        }
+      ]
+    },
+    {
+      "group": "Guidelines",
+      "pages": [
+        "docs/guidelines/custom-agents"
+      ]
+    },
+    {
+      "group": "Resources",
+      "pages": [
+        "docs/resources/release-notes",
+        "docs/resources/contribution-guide",
+        "docs/resources/faq"
       ]
     }
   ],

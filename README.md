@@ -1,10 +1,21 @@
 # Logicore AI Framework
 
-![Logicore Banner](logicore/artifacts/image-removebg-preview%20(2).png)
+<p align="center">
+    <img src="logicore/artifacts/image-removebg-preview%20(2).png" alt="Logicore Banner" width="420" style="max-width:60%; height:auto;" />
+</p>
 
-[![Documentation](https://img.shields.io/badge/Docs-Live-blue.svg)](https://rudramodi360.github.io/Agentry/) [![Discord](https://img.shields.io/badge/Discord-Join-7289DA.svg)](https://discord.gg/Yz8yFzgQ)
+<p align="center">
+    <a href="https://rudramodi360.github.io/Agentry/"><img src="https://img.shields.io/badge/Docs-Live-blue.svg" alt="Documentation" /></a>
+    <a href="https://discord.gg/Yz8yFzgQ"><img src="https://img.shields.io/badge/Discord-Join-7289DA.svg" alt="Discord" /></a>
+    <a href="https://pypi.org/project/logicore/"><img src="https://img.shields.io/badge/PyPI-1.0.3-green.svg" alt="PyPI" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
+</p>
 
-**Logicore** is a powerful Python framework designed for building intelligent, multi-provider AI agents. Whether you're running local open-source models via Ollama or connecting to cloud models like Gemini and OpenAI, Logicore provides a unified, transparent, and highly robust interface without vendor lock-in.
+**Logicore** is an enterprise-grade Python framework for building autonomous, intelligent AI agents that work seamlessly across any LLM provider—local (Ollama), cloud (OpenAI, Gemini, Groq, Azure), or hybrid. 
+
+Build agents **once** → Deploy everywhere. No vendor lock-in. Zero provider-specific code.
+
+> 💡 **New to Logicore?** → Read the [Comprehensive Introduction](./docs/introduction.md) to understand what makes this framework different.
 
 ---
 
