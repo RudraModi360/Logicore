@@ -7,7 +7,7 @@
 <p align="center">
     <a href="https://rudramodi360.github.io/Agentry/"><img src="https://img.shields.io/badge/Docs-Live-blue.svg" alt="Documentation" /></a>
     <a href="https://discord.gg/Yz8yFzgQ"><img src="https://img.shields.io/badge/Discord-Join-7289DA.svg" alt="Discord" /></a>
-    <a href="https://pypi.org/project/logicore/"><img src="https://img.shields.io/badge/PyPI-1.0.3-green.svg" alt="PyPI" /></a>
+    <a href="https://pypi.org/project/logicore/"><img src="https://img.shields.io/pypi/v/logicore.svg" alt="PyPI" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
 </p>
 
