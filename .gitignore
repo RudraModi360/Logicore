@@ -98,3 +98,6 @@ test_*
 dist/
 test_simple.py
 node_modules
+
+deploy/
+.github/
