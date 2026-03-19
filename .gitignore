@@ -86,3 +86,18 @@ test_azure_anthropic.py
 test_azure_connectivity.py
 ui/media/
 .env
+tests/
+example/
+# docs/
+.agent/
+test_*
+
+# Deploy build artifacts
+*.whl
+*.tar.gz
+dist/
+test_simple.py
+node_modules
+
+deploy/
+.github/

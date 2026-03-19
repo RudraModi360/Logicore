@@ -1,108 +1,97 @@
-# Agentry
+# Logicore AI Framework
 
-**A Modular AI Agent Framework for Python**
+<p align="center">
+    <img src="https://raw.githubusercontent.com/rudramodi360/Logicore/HEAD/logicore/artifacts/image-removebg-preview%20(2).png" alt="Logicore Banner" width="420" style="max-width:60%; height:auto;" />
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/agentry-community)](https://pypi.org/project/agentry-community/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rudramodi360.github.io/Agentry/)
+<p align="center">
+    <a href="https://rudramodi360.github.io/Agentry/"><img src="https://img.shields.io/badge/Docs-Live-blue.svg" alt="Documentation" /></a>
+    <a href="https://discord.gg/Yz8yFzgQ"><img src="https://img.shields.io/badge/Discord-Join-7289DA.svg" alt="Discord" /></a>
+    <a href="https://pypi.org/project/logicore/"><img src="https://img.shields.io/pypi/v/logicore.svg" alt="PyPI" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
+</p>
 
-Agentry is a powerful, privacy-focused AI agent framework designed for flexibility and ease of use. It provides a unified interface to interact with multiple LLM providers, comprehensive built-in tools, and MCP support.
+**Logicore** is an enterprise-grade Python framework for building autonomous, intelligent AI agents that work seamlessly across any LLM provider—local (Ollama), cloud (OpenAI, Gemini, Groq, Azure), or hybrid. 
 
-## Documentation
+Build agents **once** → Deploy everywhere. No vendor lock-in. Zero provider-specific code.
 
-**Full documentation is available at: [https://rudramodi360.github.io/Agentry/](https://rudramodi360.github.io/Agentry/)**
+> 💡 **New to Logicore?** → Read the [Comprehensive Introduction](./docs/introduction.md) to understand what makes this framework different.
 
 ---
 
-## Quick Start
+## 🌟 Key Features
 
-### Installation
+* **Unified Multi-Provider Architecture:** Switch between LLM backends (Ollama, Gemini, OpenAI, Groq) seamlessly. Your agent logic and tool schemas remain completely unchanged.
+* **Native Streaming & Reasoning Extraction:** Advanced streaming support that pulls hidden `<think>` reasoning tokens from local models (like `qwen3.5:0.8b` and DeepSeek series) so your UI updates in real-time before tools execute.
+* **First-Class Tooling:** Turn any Python function into an LLM tool automatically. Logicore parses type hints and docstrings into JSON schemas, supports `**kwargs` for hallucination-resilience, and safely reflects execution errors back to the model.
+* **Built-in Cron Job Scheduler:** Endow your agents with temporal awareness. Agents can natively schedule, manage, and execute automated background tasks without external infrastructure.
+* **Persistent Memory & RAG:** Equip agents with long-term conversational memory and semantic vector search so they never lose context across sessions.
+* **Built-in Skills & Copilot:** Pre-packaged skill sets (Web Research, Code Review, File Manipulation) and a ready-to-use `CopilotAgent` for instant productivity.
 
+---
+
+## 🚀 Quickstart
+
+Get an intelligent, tool-enabled agent running locally in two minutes.
+
+### 1. Install Logicore
 ```bash
-pip install agentry_community
+pip install logicore
 ```
 
-### Basic Usage
+### 2. Run your first Agent
+Make sure you have [Ollama](https://ollama.com) installed and a model pulled (`ollama run qwen3.5:0.8b`).
 
 ```python
 import asyncio
-from agentry import Agent
+from logicore.agents.agent import Agent
+
+# 1. Define a robust custom tool
+def check_weather(location: str, **kwargs) -> str:
+    """Checks the current weather for a specific location."""
+    if "seattle" in location.lower():
+        return "72°F and sunny."
+    return "65°F and cloudy."
 
 async def main():
-    # Create an agent with Ollama
-    agent = Agent(llm="ollama", model="gpt-oss:20b:cloud")
-    agent.load_default_tools()
+    # 2. Initialize agent with Ollama by provider name
+    agent = Agent(
+        llm="ollama",
+        role="Weather Assistant",
+        system_message="Use the provided tools to answer user questions accurately.",
+        tools=[check_weather],
+        debug=True
+    )
     
-    response = await agent.chat("What files are in the current directory?")
-    print(response)
+    # 3. Stream the execution live
+    def on_token(token):
+        print(token, end="", flush=True)
 
-asyncio.run(main())
-```
+    print("Agent is thinking...\n")
+    response = await agent.chat(
+        "What's the weather like in Seattle today?", 
+        callbacks={"on_token": on_token},
+        stream=True
+    )
+    
+    print("\n\nFinal Output:", response['content'])
 
-> **Jupyter/Colab Users:** Use `await agent.chat(...)` directly instead of `asyncio.run()`. See [full docs](https://rudramodi360.github.io/Agentry/getting-started#running-in-jupyter-notebook) for details.
-
-### Launch CLI
-
-```bash
-agentry_cli
-```
-
-### Launch Web UI
-
-```bash
-agentry_gui
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ---
 
-## Supported Providers
+## 📚 Documentation
+Comprehensive documentation for Logicore is available via our official site. It includes deep dives into Agents, Providers, Skills, Custom Tool guidelines, and a full API Reference.
 
-| Provider | Type | Models Tested |
-|:---------|:-----|:--------------|
-| **Ollama** | Local/Cloud | `gpt-oss:20b:cloud`, `glm-4.5:cloud`, `llama3.2` |
-| **Groq** | Cloud | `llama-3.3-70b-versatile` |
-| **Gemini** | Cloud | `gemini-2.0-flash` |
-| **Azure** | Cloud | `claude-opus:4.5`, `gpt-4` |
+👉 **[Read the Official Documentation here](https://rudramodi360.github.io/Agentry/)**
 
 ---
 
-## Features
-
-- **Multi-Provider Support** - Ollama, Groq, Gemini, Azure OpenAI
-- **Built-in Tools** - Filesystem, web search, code execution, documents
-- **MCP Integration** - Connect external tool servers
-- **Session Management** - Automatic persistence
-- **Custom Tools** - Register any Python function
+## 🤝 Community & Contributions
+* **Discord:** Join our official server to connect with other developers: [Logicore Discord](https://discord.gg/Yz8yFzgQ)
+* **Contributing:** We welcome all contributions! Please see our [Contributing Guidelines](docs/contributing.md) to get started.
 
 ---
-
-## Documentation Topics
-
-For detailed information, visit the [full documentation](https://rudramodi360.github.io/Agentry/):
-
-- [Getting Started](https://rudramodi360.github.io/Agentry/getting-started) - Installation guide
-- [Core Concepts](https://rudramodi360.github.io/Agentry/core-concepts) - Architecture
-- [API Reference](https://rudramodi360.github.io/Agentry/api-reference) - Complete API
-- [Custom Tools](https://rudramodi360.github.io/Agentry/custom-tools) - Create tools
-- [MCP Integration](https://rudramodi360.github.io/Agentry/mcp-integration) - External servers
-- [Examples](https://rudramodi360.github.io/Agentry/examples) - Code samples
-- [Troubleshooting](https://rudramodi360.github.io/Agentry/troubleshooting) - Common issues
-
----
-
-## Contributing
-
-Contributions are welcome! See [Contributing Guide](https://rudramodi360.github.io/Agentry/CONTRIBUTING).
-
----
-
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-## Contact
-
-- **GitHub**: [RudraModi360/Agentry](https://github.com/RudraModi360/Agentry)
-- **Email**: rudramodi9560@gmail.com
+*Built with ❤️ for multi-provider agentic workflows.*
