@@ -3,7 +3,7 @@ import json
 import inspect
 import asyncio
 import re
-from typing import List, Dict, Any, Callable, Awaitable, Optional, Union, get_type_hints
+from typing import List, Dict, Any, Callable, Awaitable, Optional, Union, Tuple, get_type_hints
 from datetime import datetime
 from logicore.providers.base import LLMProvider
 from logicore.providers.gateway import ProviderGateway, get_gateway_for_provider
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 import sys
 import os
+import tempfile
+from urllib.parse import urlparse
 from logicore.mcp_client import MCPClientManager
 class AgentSession:
     """Represents a conversation session."""
@@ -61,7 +63,6 @@ class Agent:
         debug: bool = False,
         tools: list = [],
         max_iterations: int = 40,
-        capabilities: Any = None,
         telemetry: bool = False,
         memory: bool = False,
         context_compression: bool = False,
@@ -74,44 +75,22 @@ class Agent:
         else:
             self.provider = llm
             self.model_name = getattr(llm, "model_name", "Custom Provider")
+
+        self.debug = debug
         
         # Initialize the provider gateway for unified interface
         self.gateway: ProviderGateway = get_gateway_for_provider(self.provider)
         
         self.llm = self.provider
+        try:
+            setattr(self.provider, "debug", self.debug)
+        except Exception:
+            pass
 
         self.default_system_message = system_message or get_system_prompt(self.model_name, role)
         self._custom_system_message = system_message  # Store original if user provided one
-        self.debug = debug
         self.max_iterations = max_iterations
         self.role = role
-        
-        # Initialize Capabilities
-        from logicore.providers.capability_detector import ModelCapabilities, get_known_capability
-        if capabilities:
-            if isinstance(capabilities, dict):
-                self.capabilities = ModelCapabilities.from_dict(capabilities)
-            else:
-                self.capabilities = capabilities
-        else:
-            provider_name = self.llm.provider_name if hasattr(self.llm, "provider_name") else "unknown"
-            known = get_known_capability(self.model_name, provider=provider_name)
-            if known:
-                self.capabilities = ModelCapabilities(
-                    supports_tools=known.get("supports_tools", False),
-                    supports_vision=known.get("supports_vision", False),
-                    provider=provider_name,
-                    model_name=self.model_name,
-                    detection_method="cache"
-                )
-            else:
-                self.capabilities = ModelCapabilities(
-                    supports_tools=True,
-                    supports_vision=False,
-                    provider=provider_name,
-                    model_name=self.model_name,
-                    detection_method="default"
-                )
         
         self.telemetry_enabled = telemetry
         self.telemetry_tracker = TelemetryTracker(enabled=telemetry)
@@ -210,22 +189,32 @@ class Agent:
         """Regenerate the system prompt to include currently registered tools and skill instructions."""
         # Format tools from internal_tools schemas with full parameter details
         from logicore.config.prompts import _format_tools
-        tools_section = _format_tools(self.internal_tools)
-        # Note: _format_tools() already returns the complete <available_tools>...</available_tools> block
-        # NO NEED to wrap it again!
+        tool_prompt_cap = 60
+        visible_tools = self.internal_tools[:tool_prompt_cap]
+        hidden_count = max(0, len(self.internal_tools) - len(visible_tools))
+        tools_section = _format_tools(visible_tools)
+        if hidden_count > 0:
+            tools_section += (
+                f"\n\n- Note: {hidden_count} additional tools are available at runtime "
+                "but omitted from prompt docs for context efficiency."
+            )
         
         # Build skill instructions section
         skills_section = self._build_skills_prompt_section()
         
         # Decide whether to use custom or auto-generated system message
         if self._custom_system_message:
-            # User provided a custom system message - replace any empty tools section or append
+            # User provided a custom system message - replace known tools sections or append
             if "<available_tools>" in self._custom_system_message:
-                # Replace the empty <available_tools> section with actual formatter tools
-                import re
                 self.default_system_message = re.sub(
-                    r'<available_tools>\s*</available_tools>',
+                    r'<available_tools>[\s\S]*?</available_tools>',
                     tools_section.strip() if tools_section else "",
+                    self._custom_system_message
+                )
+            elif "## Available Tools" in self._custom_system_message:
+                self.default_system_message = re.sub(
+                    r'## Available Tools[\s\S]*?(?=\n## |\Z)',
+                    tools_section.strip() + "\n",
                     self._custom_system_message
                 )
             else:
@@ -254,6 +243,15 @@ class Agent:
             
             if self.debug:
                 print(f"[Agent] System prompt (auto-generated with tools + {len(self.skills)} skills): {len(self.default_system_message)} chars")
+
+        max_prompt_chars = 36000
+        if len(self.default_system_message) > max_prompt_chars:
+            self.default_system_message = (
+                self.default_system_message[:max_prompt_chars]
+                + "\n\n[System prompt truncated for context efficiency.]"
+            )
+            if self.debug:
+                print(f"[Agent] ⚠️ System prompt exceeded {max_prompt_chars} chars and was truncated")
         
         # Update system message in all existing sessions
         for session in self.sessions.values():
@@ -315,7 +313,171 @@ class Agent:
             blocks.append(block)
         
         skills_str = "\n\n---\n\n".join(blocks)
-        return f"\n\n<skills>\n{skills_str}\n</skills>"
+        return f"\n\n## Active Skills\n{skills_str}"
+
+    def _parse_tool_arguments(self, name: str, raw_args: Any) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Parse tool-call arguments into a JSON object and return parse error if invalid."""
+        if raw_args is None:
+            return {}, None
+
+        if isinstance(raw_args, dict):
+            return raw_args, None
+
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args)
+            except json.JSONDecodeError as exc:
+                return {}, f"Tool '{name}' received invalid JSON arguments: {str(exc)}"
+
+            if not isinstance(parsed, dict):
+                return {}, f"Tool '{name}' arguments must be a JSON object (dictionary), got {type(parsed).__name__}."
+
+            return parsed, None
+
+        return {}, f"Tool '{name}' arguments must be a dict or JSON object string, got {type(raw_args).__name__}."
+
+    def _normalize_tool_result(self, tool_name: str, result: Any) -> Dict[str, Any]:
+        """Normalize all tool outputs to a canonical envelope."""
+        if isinstance(result, dict):
+            if "success" in result:
+                normalized = {"success": bool(result.get("success"))}
+
+                if "content" in result:
+                    normalized["content"] = result.get("content")
+
+                if "error" in result and result.get("error") is not None:
+                    normalized["error"] = str(result.get("error"))
+                elif not normalized["success"]:
+                    exception_text = result.get("exception")
+                    normalized["error"] = str(exception_text) if exception_text else f"Tool '{tool_name}' failed without an explicit error message."
+
+                if normalized["success"] and "content" not in normalized and "message" in result:
+                    normalized["content"] = result.get("message")
+
+                return normalized
+
+            if result.get("error") is not None or result.get("exception") is not None:
+                return {
+                    "success": False,
+                    "error": str(result.get("error") or result.get("exception"))
+                }
+
+            if "content" in result:
+                return {
+                    "success": True,
+                    "content": result.get("content")
+                }
+
+            return {
+                "success": True,
+                "content": result
+            }
+
+        return {
+            "success": True,
+            "content": result
+        }
+
+    def _tool_signature(self, name: str, args: Dict[str, Any]) -> str:
+        """Create a stable signature for tool deduplication checks."""
+        try:
+            args_json = json.dumps(args or {}, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            args_json = str(args)
+        return f"{name}::{args_json}"
+
+    def _serialize_tool_result_for_model(self, tool_name: str, result: Dict[str, Any], reused: bool = False) -> str:
+        """Serialize tool output for model context while keeping payload bounded and explicit."""
+        payload = {
+            "tool": tool_name,
+            "success": bool(result.get("success", False)),
+            "reused_cached_result": reused,
+        }
+
+        if result.get("error"):
+            payload["error"] = str(result.get("error"))
+
+        if "content" in result:
+            payload["content"] = result.get("content")
+
+        serialized = json.dumps(payload, ensure_ascii=False)
+        max_chars = 12000
+        if len(serialized) <= max_chars:
+            return serialized
+
+        content_preview = str(result.get("content", ""))[:4000]
+        compact_payload = {
+            "tool": tool_name,
+            "success": bool(result.get("success", False)),
+            "reused_cached_result": reused,
+            "error": str(result.get("error")) if result.get("error") else None,
+            "content_preview": content_preview,
+            "_truncated": True,
+            "_note": "Tool output truncated for context efficiency. Use this result before recalling the same tool with identical arguments.",
+        }
+        return json.dumps(compact_payload, ensure_ascii=False)
+
+    def _normalize_tool_paths(self, session: AgentSession, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize bare file paths against recent tool directory context."""
+        if not isinstance(args, dict):
+            return args
+
+        file_tools = {"read_file", "edit_file", "create_file", "delete_file"}
+        if tool_name not in file_tools:
+            return args
+
+        file_path = args.get("file_path")
+        if not isinstance(file_path, str) or not file_path.strip():
+            return args
+
+        path_str = file_path.strip()
+        if os.path.isabs(path_str):
+            return args
+
+        # If model already provided a nested relative path, keep it.
+        if any(sep in path_str for sep in ("/", "\\")):
+            return args
+
+        last_dir = session.metadata.get("last_tool_directory")
+        if not isinstance(last_dir, str) or not last_dir:
+            return args
+
+        candidate = os.path.join(last_dir, path_str)
+
+        # For create_file, candidate may not exist yet; still a sensible normalization.
+        if tool_name == "create_file" or os.path.exists(candidate):
+            normalized = args.copy()
+            normalized["file_path"] = candidate
+            if self.debug:
+                print(f"[Agent] 🧭 Normalized tool path for {tool_name}: '{path_str}' -> '{candidate}'")
+            return normalized
+
+        return args
+
+    def _update_tool_directory_context(self, session: AgentSession, tool_name: str, args: Dict[str, Any], result: Dict[str, Any]):
+        """Track most recent working directory from successful file/list tool calls."""
+        if not isinstance(result, dict) or not bool(result.get("success")):
+            return
+
+        if tool_name == "list_files":
+            directory = args.get("directory") if isinstance(args, dict) else None
+            if isinstance(directory, str) and directory.strip() and directory.strip() != ".":
+                session.metadata["last_tool_directory"] = os.path.normpath(directory.strip())
+            return
+
+        if tool_name in {"create_file", "read_file", "edit_file", "delete_file"} and isinstance(args, dict):
+            file_path = args.get("file_path")
+            if not isinstance(file_path, str) or not file_path.strip():
+                return
+
+            normalized = os.path.normpath(file_path.strip())
+            # For file targets, keep parent directory as context.
+            if os.path.isdir(normalized):
+                session.metadata["last_tool_directory"] = normalized
+            else:
+                parent = os.path.dirname(normalized)
+                if parent:
+                    session.metadata["last_tool_directory"] = parent
 
     def _load_default_skills(self):
         """Load default skills from the logicore/skills/defaults directory."""
@@ -690,6 +852,177 @@ class Agent:
 
         return None
 
+    def _extract_references_from_text(self, text: str) -> List[str]:
+        """Extract URL/local path-like references from free-form text."""
+        if not isinstance(text, str) or not text.strip():
+            return []
+
+        image_or_doc_ext = r"(?:png|jpg|jpeg|webp|bmp|gif|tif|tiff|pdf|ppt|pptx|doc|docx|xls|xlsx|csv|txt|md|py|js|ts|json|xml|html|css)"
+        patterns = [
+            r"https?://[^\s'\"<>]+",
+            r"['\"]([A-Za-z]:\\[^'\"\r\n]+)['\"]",
+            rf"([A-Za-z]:\\[^\r\n]*?\.{image_or_doc_ext})",
+            r"([A-Za-z]:\\[^\s'\"\r\n]+)",
+            r"['\"]((?:\.{1,2}[\\/])[^'\"\r\n]+)['\"]",
+            rf"((?:\.{1,2}[\\/])[^\r\n]*?\.{image_or_doc_ext})",
+            r"((?:\.{1,2}[\\/])[^\s'\"\r\n]+)",
+            r"['\"]((?:/[^'\"\r\n]+)+)['\"]",
+            rf"((?:/[^\r\n]+)+\.{image_or_doc_ext})",
+            r"((?:/[^\s'\"\r\n]+)+)",
+        ]
+
+        refs: List[str] = []
+        seen = set()
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                ref = match.group(1) if match.groups() else match.group(0)
+                ref = ref.strip().strip("'\"")
+                ref = ref.rstrip(".,;:!?)]}")
+                if ref and ref not in seen:
+                    seen.add(ref)
+                    refs.append(ref)
+        return refs
+
+    def _resolve_local_reference(self, ref: str) -> Optional[str]:
+        """Resolve local file references to absolute paths when possible."""
+        if not isinstance(ref, str) or not ref:
+            return None
+
+        if ref.startswith(("http://", "https://")):
+            return None
+
+        candidates = []
+        if os.path.isabs(ref):
+            candidates.append(ref)
+        else:
+            candidates.append(os.path.abspath(ref))
+            if self.workspace_root:
+                candidates.append(os.path.abspath(os.path.join(self.workspace_root, ref)))
+
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def _is_image_reference(self, ref: str) -> bool:
+        lower = str(ref or "").lower()
+        image_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff")
+        return lower.endswith(image_exts)
+
+    def _extract_text_from_local_file(self, file_path: str) -> Optional[str]:
+        """Extract text from a local file via document handlers."""
+        try:
+            from logicore.document_handlers.registry import get_handler
+            handler = get_handler(file_path)
+            text = handler.get_text()
+            return text if isinstance(text, str) and text.strip() else None
+        except Exception:
+            return None
+
+    def _extract_text_from_url(self, url: str) -> Optional[str]:
+        """Fetch URL content and extract text if possible."""
+        try:
+            import httpx
+
+            with httpx.Client(follow_redirects=True, timeout=20.0) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                content_type = (response.headers.get("content-type") or "").lower()
+
+                if "text/" in content_type or "json" in content_type or "xml" in content_type:
+                    return response.text
+
+                parsed = urlparse(url)
+                _, ext = os.path.splitext(parsed.path)
+                if not ext:
+                    return None
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                    tmp.write(response.content)
+                    temp_path = tmp.name
+
+                try:
+                    return self._extract_text_from_local_file(temp_path)
+                finally:
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+        except Exception:
+            return None
+
+    def _auto_enrich_user_input(self, user_input: Union[str, List[Dict[str, Any]]]) -> Union[str, List[Dict[str, Any]]]:
+        """Generic input enrichment for string prompts: detect refs, attach images, and inject extracted text context."""
+        if not isinstance(user_input, str):
+            return user_input
+
+        refs = self._extract_references_from_text(user_input)
+        if not refs:
+            return user_input
+
+        image_refs: List[str] = []
+        context_chunks: List[str] = []
+        cleaned_text = user_input
+
+        max_sources = 4
+        max_chars_per_source = 1800
+        processed = 0
+
+        for ref in refs:
+            if processed >= max_sources:
+                break
+
+            is_url = ref.startswith(("http://", "https://"))
+            local_path = self._resolve_local_reference(ref) if not is_url else None
+
+            if self._is_image_reference(ref):
+                if is_url:
+                    image_refs.append(ref)
+                    cleaned_text = cleaned_text.replace(ref, " ")
+                    processed += 1
+                    continue
+                if local_path:
+                    image_refs.append(local_path)
+                    cleaned_text = cleaned_text.replace(ref, " ")
+                    processed += 1
+                    continue
+
+            extracted = None
+            source_label = ref
+            if local_path:
+                extracted = self._extract_text_from_local_file(local_path)
+                source_label = local_path
+            elif is_url:
+                extracted = self._extract_text_from_url(ref)
+
+            if extracted:
+                snippet = extracted.strip()
+                if len(snippet) > max_chars_per_source:
+                    snippet = snippet[:max_chars_per_source] + "\n...[truncated]"
+                context_chunks.append(f"Source: {source_label}\n{snippet}")
+                cleaned_text = cleaned_text.replace(ref, " ")
+                processed += 1
+
+        cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
+        if not cleaned_text:
+            cleaned_text = "Please analyze the attached references and answer the user request."
+
+        if context_chunks:
+            cleaned_text += "\n\n<auto_reference_context>\n" + "\n\n---\n\n".join(context_chunks) + "\n</auto_reference_context>"
+
+        if image_refs:
+            parts: List[Dict[str, Any]] = [{"type": "text", "text": cleaned_text}]
+            for image_ref in image_refs:
+                parts.append({"type": "image_url", "image_url": {"url": image_ref}})
+            if self.debug:
+                print(f"[Agent] 🧠 Auto-enriched input: {len(image_refs)} image(s), {len(context_chunks)} text source(s)")
+            return parts
+
+        if context_chunks and self.debug:
+            print(f"[Agent] 🧠 Auto-enriched input with {len(context_chunks)} referenced text source(s)")
+
+        return cleaned_text
+
     async def chat(
         self, 
         user_input: Union[str, List[Dict[str, Any]]], 
@@ -729,28 +1062,17 @@ class Agent:
         if isinstance(user_input, list):
             text_for_memory, _ = extract_content(user_input)
 
-        # --- Dynamic Capability Detection ---
-        if self.capabilities.detection_method == "default":
-            if self.debug: print(f"[Agent] 🔍 Detecting capabilities for {self.model_name}...")
-            from logicore.providers.capability_detector import detect_model_capabilities
-            try:
-                self.capabilities = await detect_model_capabilities(
-                    self.capabilities.provider, 
-                    self.capabilities.model_name, 
-                    provider_instance=self.llm
-                )
-                if self.debug:
-                    print(f"[Agent] ✓ Detected: tools={self.capabilities.supports_tools}, vision={self.capabilities.supports_vision} (via {self.capabilities.detection_method})")
-            except Exception as e:
-                if self.debug: print(f"[Agent] ⚠️ Capability detection failed: {e}")
 
-        # --- Input Validation ---
-        is_valid, error = self.capabilities.validate_input(session.messages)
-        if not is_valid:
-            if self.debug: print(f"[Agent] Input validation failed: {error}")
-            # Finalize summary with validation error
-            self.execution_log.append(f"Failed: Input validation error: {error}")
-            return error
+
+        # Auto-enrich plain-text prompts by resolving referenced files/URLs.
+        # Keeps explicit multimodal inputs unchanged.
+        user_input = self._auto_enrich_user_input(user_input)
+
+        text_for_memory = user_input
+        if isinstance(user_input, list):
+            text_for_memory, _ = extract_content(user_input)
+
+
 
         start_time = time.time()
 
@@ -775,11 +1097,7 @@ class Agent:
                 if self.debug:
                     print(f"[Agent] ⚠️ SimpleMem queueing failed: {e}")
 
-        # --- Input Validation (second check) ---
-        is_valid, error = self.capabilities.validate_input(session.messages)
-        if not is_valid:
-            if self.debug: print(f"[Agent] Input validation failed: {error}")
-            return error
+
         
         # Only get tools if they're supported
         all_tools = None
@@ -807,6 +1125,8 @@ class Agent:
             })
             reminder_hint_added = True
 
+        tool_result_cache: Dict[str, Dict[str, Any]] = {}
+
         for i in range(self.max_iterations):
             if self.debug:
                 print(f"\n[Agent] 🔄 ITERATION {i+1}/{self.max_iterations}")
@@ -827,25 +1147,17 @@ class Agent:
                 if self.context_compression and self.context_middleware:
                     llm_messages = await self.context_middleware.manage_context(llm_messages)
 
-                if not self.capabilities.supports_vision:
-                    from logicore.providers.utils import extract_content
-                    stripped = []
-                    for m in llm_messages:
-                        m_copy = m.copy()
-                        if m.get("role") == "user" and isinstance(m.get("content"), list):
-                            text, _ = extract_content(m.get("content"))
-                            m_copy["content"] = text
-                        stripped.append(m_copy)
-                    llm_messages = stripped
+
 
                 # Use streaming if on_token callback is set and provider supports it
                 on_token = active_callbacks.get("on_token")
-                has_stream = hasattr(self.provider, 'chat_stream')
+                has_stream = hasattr(self.gateway, 'chat_stream')
+                use_stream = bool(has_stream and (stream or on_token is not None))
                 
                 if self.debug:
-                    print(f"[Agent] 🎯 Streaming: on_token={on_token is not None}, support={has_stream}")
+                    print(f"[Agent] 🎯 Streaming: requested={stream}, on_token={on_token is not None}, support={has_stream}, active={use_stream}")
                 
-                if on_token and has_stream:
+                if use_stream:
                     if self.debug:
                         model_name = getattr(self.provider, 'model_name', 'LLM')
                         print(f"[Agent] 📡 Streaming response from {model_name}...")
@@ -1052,24 +1364,57 @@ class Agent:
 
             # 4. Execute Tools
             for tc in tool_calls:       
-                
-                # Extract details
-                if isinstance(tc, dict):
-                    name = tc['function']['name']
-                    args = tc['function']['arguments']
-                    tc_id = tc.get('id')
-                else:
-                    name = tc.function.name
-                    args = tc.function.arguments
-                    tc_id = getattr(tc, 'id', None)
+
+                # Extract details defensively (dict/object variants)
+                try:
+                    if isinstance(tc, dict):
+                        func = tc.get('function')
+                        if not isinstance(func, dict):
+                            logger.warning(f"[Agent] ⚠️ Skipping malformed tool call without function block: {tc}")
+                            continue
+                        name = func.get('name')
+                        args = func.get('arguments', {})
+                        tc_id = tc.get('id')
+                    else:
+                        func = getattr(tc, 'function', None)
+                        name = getattr(func, 'name', None) if func else None
+                        args = getattr(func, 'arguments', {}) if func else {}
+                        tc_id = getattr(tc, 'id', None)
+
+                    if not name:
+                        logger.warning(f"[Agent] ⚠️ Skipping malformed tool call missing name: {tc}")
+                        continue
+                except Exception as extract_err:
+                    logger.error(f"[Agent] ⚠️ Failed to parse tool call payload: {extract_err}")
+                    continue
                 
                 # Robustly ensure args is a mapping
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        # If it's not valid JSON, keep it as is and let execution fail gracefully
-                        pass
+                args, parse_error = self._parse_tool_arguments(name, args)
+                args = self._normalize_tool_paths(session, name, args)
+                signature = self._tool_signature(name, args)
+                if parse_error:
+                    result = self._normalize_tool_result(name, {"success": False, "error": parse_error})
+                    tool_fail_log = f"[Agent] ❌ TOOL FAILED: '{name}' | Error: {parse_error[:120]}..."
+                    print(tool_fail_log)
+                    logger.error(tool_fail_log)
+                    self.execution_log.append(f"Tool {name} FAILED with error: {parse_error}")
+
+                    if active_callbacks["on_tool_end"]:
+                        callback = active_callbacks["on_tool_end"]
+                        if inspect.iscoroutinefunction(callback):
+                            await callback(session_id, name, result)
+                        else:
+                            callback(session_id, name, result)
+
+                    tool_msg = {
+                        "role": "tool",
+                        "name": name,
+                        "content": self._serialize_tool_result_for_model(name, result, reused=False)
+                    }
+                    if tc_id:
+                        tool_msg["tool_call_id"] = tc_id
+                    session.add_message(tool_msg)
+                    continue
                 
 
                 # Format tool parameters for logging (first 100 words)
@@ -1095,10 +1440,12 @@ class Agent:
                         callback(session_id, name, args)
 
                 # Clear logging: Show tool being called with params
-                tool_call_log = f"[Agent] 🔧 TOOL CALL: '{name}' | Params: {params_preview}"
-                print(tool_call_log)
                 if self.debug:
+                    tool_call_log = f"[Agent] 🔧 TOOL CALL: '{name}' | Params: {params_preview}"
+                    print(tool_call_log)
                     logger.info(tool_call_log)
+                else:
+                    print(f"[Agent] 🔧 TOOL CALL: '{name}'")
 
                 # Approval
                 approved = True
@@ -1114,39 +1461,82 @@ class Agent:
                         else:
                             # Boolean or None
                             approved = bool(approval_result)
+                    elif self._can_prompt_interactive_approval():
+                        approval_result = await self._default_tool_approval_prompt(session_id, name, args)
+                        if isinstance(approval_result, dict):
+                            args = approval_result
+                            approved = True
+                        else:
+                            approved = bool(approval_result)
                     else:
                         # Secure default: deny approval-required tools when no approval callback is configured.
                         approved = False
-                        result = {
+                        result = self._normalize_tool_result(name, {
+                            "success": False,
                             "error": (
                                 f"Tool '{name}' requires explicit approval, but no approval callback is configured. "
                                 "Add on_tool_approval callback or use a safe tool."
                             )
-                        }
+                        })
                         if self.debug:
                             print(f"[Agent] 🔒 Approval required for '{name}' but no callback configured; denying execution.")
 
                 if not approved:
-                    if 'result' not in locals() or not isinstance(result, dict) or "error" not in result:
-                        result = {"error": "Denied by user"}
+                    if 'result' not in locals() or not isinstance(result, dict) or not result.get("error"):
+                        result = self._normalize_tool_result(name, {"success": False, "error": "Denied by user"})
                     tool_fail_log = f"[Agent] ❌ EXECUTION DENIED: '{name}'"
                     print(tool_fail_log)
                     logger.warning(tool_fail_log)
                     # Track denied tool call in summary
                     self.execution_log.append(f"Tool {name} was denied. Reason: {result.get('error', 'Denied by user')}")
                 else:
-                    # Record tool call start time
-                    start_time_tool = time.time()
-                    result = await self._execute_tool(name, args, session_id)
-                    duration_ms = (time.time() - start_time_tool) * 1000
+                    cached_result = tool_result_cache.get(signature)
+                    reused_cached_result = bool(cached_result and cached_result.get("success"))
+
+                    if reused_cached_result:
+                        result = cached_result
+                        if self.debug:
+                            print(f"[Agent] ♻️ Reusing cached tool result for '{name}' with identical arguments")
+                        self.execution_log.append(f"Tool {name} reused cached result for identical arguments")
+                    else:
+                        # Record tool call start time
+                        start_time_tool = time.time()
+                        result = self._normalize_tool_result(name, await self._execute_tool(name, args, session_id))
+                        duration_ms = (time.time() - start_time_tool) * 1000
+
+                        # Auto-heal common edit workflow error:
+                        # edit_file requires read_file first in tool implementation.
+                        if (
+                            name == "edit_file"
+                            and not bool(result.get("success", True))
+                            and isinstance(args, dict)
+                            and args.get("file_path")
+                            and "file must be read before editing" in str(result.get("error", "")).lower()
+                        ):
+                            file_path = args.get("file_path")
+                            if self.debug:
+                                print(f"[Agent] 🛠️ Auto-recovery: running read_file before edit_file retry for '{file_path}'")
+
+                            self.execution_log.append(
+                                f"Auto-recovery triggered for edit_file on {file_path}: read-before-edit enforcement detected"
+                            )
+
+                            # Safe internal pre-read (no approval required for read_file)
+                            _ = self._normalize_tool_result(
+                                "read_file",
+                                await self._execute_tool("read_file", {"file_path": file_path}, session_id),
+                            )
+
+                            # Retry edit once with original args
+                            result = self._normalize_tool_result(name, await self._execute_tool(name, args, session_id))
+
+                        tool_result_cache[signature] = result
                     
                     # Check if tool execution was successful
-                    is_error = False
-                    if isinstance(result, dict):
-                        is_error = bool(result.get("error")) or bool(result.get("exception"))
+                    is_error = not bool(result.get("success", True))
                     
                     if is_error:
-                        error_msg = result.get("error", result.get("exception", "Unknown error"))
+                        error_msg = result.get("error", "Unknown error")
                         tool_fail_log = f"[Agent] ❌ TOOL FAILED: '{name}' | Error: {str(error_msg)[:80]}..."
                         print(tool_fail_log)
                         logger.error(tool_fail_log)
@@ -1155,10 +1545,7 @@ class Agent:
                     else:
                         successful_tools_this_chat += 1
                         # Format result summary (up to 100 words)
-                        if isinstance(result, dict):
-                            result_str = json.dumps(result)
-                        else:
-                            result_str = str(result)
+                        result_str = json.dumps(result, ensure_ascii=False)
                         result_preview = (result_str[:120] + "...") if len(result_str) > 120 else result_str
                         tool_success_log = f"[Agent] ✅ TOOL SUCCESS: '{name}' | Result: {result_preview}"
                         print(tool_success_log)
@@ -1174,19 +1561,14 @@ class Agent:
                     else:
                         callback(session_id, name, result)
 
+                self._update_tool_directory_context(session, name, args, result)
+
                 # Add result to history - use better formatting for LLM clarity
                 # Format: "Tool 'name' executed successfully. Result: {result_summary}"
-                result_summary = result
-                if isinstance(result, dict):
-                    if "message" in result and "status" in result:
-                        result_summary = f"{result.get('status', 'executed')}: {result['message']}"
-                    else:
-                        result_summary = json.dumps(result)
-                
                 tool_msg = {
                     "role": "tool",
                     "name": name,
-                    "content": str(result_summary)  # Keep it human-readable
+                    "content": self._serialize_tool_result_for_model(name, result, reused=reused_cached_result if approved else False)
                 }
                 if tc_id: 
                     tool_msg["tool_call_id"] = tc_id
@@ -1253,6 +1635,50 @@ class Agent:
             status = "enabled" if enabled else "disabled"
             print(f"[Agent] Auto-approval for all tools {status}")
 
+    def _can_prompt_interactive_approval(self) -> bool:
+        """Return True when interactive stdin is available for approval prompts."""
+        try:
+            return bool(sys.stdin and sys.stdin.isatty())
+        except Exception:
+            return False
+
+    async def _default_tool_approval_prompt(self, session_id: str, tool_name: str, tool_args: Dict[str, Any]) -> Union[bool, Dict[str, Any]]:
+        """Built-in fallback approval prompt for interactive CLI sessions.
+
+        Options:
+        - y / yes: approve this tool call
+        - a / all: approve this call and auto-approve all subsequent tool calls
+        - n / no / enter: deny this tool call
+        """
+        print("\n" + "=" * 60)
+        print("TOOL APPROVAL REQUIRED")
+        print("=" * 60)
+        print(f"Session : {session_id}")
+        print(f"Tool    : {tool_name}")
+        try:
+            print("Args    :", json.dumps(tool_args, indent=2, ensure_ascii=False))
+        except Exception:
+            print(f"Args    : {tool_args}")
+        print("=" * 60)
+        print("Allow this tool call? [y]es / [n]o / [a]ll: ", end="", flush=True)
+
+        try:
+            choice = input().strip().lower()
+        except Exception:
+            return False
+
+        if choice in {"a", "all"}:
+            self.set_auto_approve_all(True)
+            print(f"[Approval] Approved '{tool_name}' and enabled auto-approve for all remaining tools")
+            return True
+
+        if choice in {"y", "yes"}:
+            print(f"[Approval] Approved '{tool_name}'")
+            return True
+
+        print(f"[Approval] Denied '{tool_name}'")
+        return False
+
     def _requires_approval(self, name: str) -> bool:
         """Check if a tool requires user approval."""
         # 0. If auto_approve_all is enabled, skip all approval checks
@@ -1306,7 +1732,7 @@ class Agent:
                             break
                         except Exception as e:
                             logger.error(f"Tool Error (MCP): {name} | Error: {e}")
-                            return {"error": str(e)}
+                            return {"success": False, "error": str(e)}
                             
             # 3. Internal Default Tools
             else:
@@ -1314,14 +1740,14 @@ class Agent:
 
             duration = (datetime.now() - start_time).total_seconds()
             logger.info(f"Tool Execution End: {name} | Duration: {duration:.4f}s | Result: {str(result)[:200]}...") # Truncate result for logs
-            return result
+            return self._normalize_tool_result(name, result)
 
         except Exception as e:
             import traceback
             traceback.print_exc()
             duration = (datetime.now() - start_time).total_seconds()
             logger.error(f"Tool Execution Failed: {name} | Duration: {duration:.4f}s | Error: {e}")
-            return {"error": f"Tool execution failed: {str(e)}"}
+            return {"success": False, "error": f"Tool execution failed: {str(e)}"}
 
     def get_execution_summary(self) -> List[str]:
         """Get the current execution log for the last chat."""
