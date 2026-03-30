@@ -19,24 +19,48 @@ Agentry is a powerful, privacy-focused AI agent framework designed for flexibili
 ### Installation
 
 ```bash
-pip install agentry_community
+pip install logicore
 ```
 
-### Basic Usage
+### 2. Run your first Agent
+Make sure you have [Ollama](https://ollama.com) installed and a model pulled (`ollama run qwen3.5:0.8b`).
 
 ```python
 import asyncio
-from agentry import Agent
+from logicore.agents.agent import Agent
+
+# 1. Define a robust custom tool
+def check_weather(location: str, **kwargs) -> str:
+    """Checks the current weather for a specific location."""
+    if "seattle" in location.lower():
+        return "72°F and sunny."
+    return "65°F and cloudy."
 
 async def main():
-    # Create an agent with Ollama
-    agent = Agent(llm="ollama", model="gpt-oss:20b:cloud")
-    agent.load_default_tools()
+    # 2. Initialize agent with Ollama by provider name
+    agent = Agent(
+        llm="ollama",
+        role="Weather Assistant",
+        system_message="Use the provided tools to answer user questions accurately.",
+        tools=[check_weather],
+        debug=True
+    )
     
-    response = await agent.chat("What files are in the current directory?")
-    print(response)
+    # 3. Stream the execution live
+    def on_token(token):
+        print(token, end="", flush=True)
 
-asyncio.run(main())
+    print("Agent is thinking...\n")
+    response = await agent.chat(
+        "What's the weather like in Seattle today?", 
+        callbacks={"on_token": on_token},
+        stream=True
+    )
+    
+    print("\n\nFinal Output:", response['content'])
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 > **Jupyter/Colab Users:** Use `await agent.chat(...)` directly instead of `asyncio.run()`. See [full docs](https://rudramodi360-agentry.mintlify.app/getting-started#running-in-jupyter-notebook) for details.
@@ -95,14 +119,4 @@ For detailed information, visit the [full documentation](https://rudramodi360-ag
 Contributions are welcome! See [Contributing Guide](https://rudramodi360-agentry.mintlify.app/CONTRIBUTING).
 
 ---
-
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-## Contact
-
-- **GitHub**: [RudraModi360/Agentry](https://github.com/RudraModi360/Agentry)
-- **Email**: rudramodi9560@gmail.com
+*Built with ❤️ for multi-provider agentic workflows.*
