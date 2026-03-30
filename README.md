@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-    <a href="https://rudramodi360.github.io/Agentry/"><img src="https://img.shields.io/badge/Docs-Live-blue.svg" alt="Documentation" /></a>
+    <a href="https://rudramodi360-agentry-23.mintlify.app/"><img src="https://img.shields.io/badge/Docs-Live-blue.svg" alt="Documentation" /></a>
     <a href="https://discord.gg/Yz8yFzgQ"><img src="https://img.shields.io/badge/Discord-Join-7289DA.svg" alt="Discord" /></a>
     <a href="https://pypi.org/project/logicore/"><img src="https://img.shields.io/pypi/v/logicore.svg" alt="PyPI" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
@@ -85,7 +85,7 @@ if __name__ == "__main__":
 ## 📚 Documentation
 Comprehensive documentation for Logicore is available via our official site. It includes deep dives into Agents, Providers, Skills, Custom Tool guidelines, and a full API Reference.
 
-👉 **[Read the Official Documentation here](https://rudramodi360.github.io/Agentry/)**
+👉 **[Read the Official Documentation here](https://rudramodi360-agentry-23.mintlify.app/)**
 
 ---
 
