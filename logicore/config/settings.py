@@ -212,6 +212,72 @@ class AgentrySettings:
     MAX_ITERATIONS: int = field(default_factory=lambda: _get_int("MAX_ITERATIONS", 40, "agent", "max_iterations"))
     
     # ==========================================================================
+    # RUNTIME (Agentic Loop Configuration)
+    # ==========================================================================
+    # Turn Management
+    RUNTIME_MAX_TURNS: int = field(default_factory=lambda: _get_int("RUNTIME_MAX_TURNS", 60, "runtime", "max_turns"))
+    """Maximum turns per session (budget)"""
+    
+    RUNTIME_WARN_AT_TURNS: int = field(default_factory=lambda: _get_int("RUNTIME_WARN_AT_TURNS", 50, "runtime", "warn_at_turns"))
+    """Warn when remaining turns drops to this threshold"""
+    
+    RUNTIME_DEFAULT_TIMEOUT_MS: int = field(default_factory=lambda: _get_int("RUNTIME_DEFAULT_TIMEOUT_MS", 30000, "runtime", "default_timeout_ms"))
+    """Default turn timeout in milliseconds"""
+    
+    # Loop Detection
+    LOOP_DETECTION_ENABLED: bool = field(default_factory=lambda: _get_bool("LOOP_DETECTION_ENABLED", True, "runtime.loop_detection", "enabled"))
+    """Enable multi-layer loop detection"""
+    
+    LOOP_TOOL_THRESHOLD: int = field(default_factory=lambda: _get_int("LOOP_TOOL_THRESHOLD", 5, "runtime.loop_detection", "tool_threshold"))
+    """Consecutive identical tool calls before flagging"""
+    
+    LOOP_CONTENT_THRESHOLD: int = field(default_factory=lambda: _get_int("LOOP_CONTENT_THRESHOLD", 10, "runtime.loop_detection", "content_threshold"))
+    """Repeated content chunks before flagging"""
+    
+    LOOP_LLM_FALLBACK: bool = field(default_factory=lambda: _get_bool("LOOP_LLM_FALLBACK", True, "runtime.loop_detection", "llm_fallback"))
+    """Use LLM-based semantic loop detection as fallback"""
+    
+    # Context Management
+    CONTEXT_MAX_TOKENS: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_TOKENS", 128000, "runtime.context", "max_tokens"))
+    """Maximum context window tokens"""
+    
+    CONTEXT_COMPRESS_THRESHOLD: float = field(default_factory=lambda: float(_get_env("CONTEXT_COMPRESS_THRESHOLD", "0.85", "runtime.context", "compress_threshold")))
+    """Trigger compression when usage exceeds this ratio (0.0-1.0)"""
+    
+    CONTEXT_MAX_HISTORY_MESSAGES: int = field(default_factory=lambda: _get_int("CONTEXT_MAX_HISTORY_MESSAGES", 100, "runtime.context", "max_history_messages"))
+    """Maximum messages in history before forced truncation"""
+    
+    CONTEXT_TOOL_OUTPUT_MASK_THRESHOLD: int = field(default_factory=lambda: _get_int("CONTEXT_TOOL_OUTPUT_MASK_THRESHOLD", 30000, "runtime.context", "tool_output_mask_threshold"))
+    """Mask tool outputs when total tokens exceed this"""
+    
+    # Tool Execution
+    TOOL_EXECUTION_TIMEOUT: int = field(default_factory=lambda: _get_int("TOOL_EXECUTION_TIMEOUT", 60, "runtime.tool", "execution_timeout"))
+    """Tool execution timeout in seconds"""
+    
+    TOOL_ENABLE_DEDUPLICATION: bool = field(default_factory=lambda: _get_bool("TOOL_ENABLE_DEDUPLICATION", True, "runtime.tool", "enable_deduplication"))
+    """Enable tool call deduplication via content hash"""
+    
+    TOOL_DEFAULT_COOLDOWN: int = field(default_factory=lambda: _get_int("TOOL_DEFAULT_COOLDOWN", 60, "runtime.tool", "default_cooldown"))
+    """Default cooldown duration in seconds after loop detection"""
+    
+    # Retry
+    RETRY_MAX_ATTEMPTS: int = field(default_factory=lambda: _get_int("RETRY_MAX_ATTEMPTS", 3, "runtime.retry", "max_attempts"))
+    """Maximum retry attempts for transient failures"""
+    
+    RETRY_BASE_DELAY_MS: int = field(default_factory=lambda: _get_int("RETRY_BASE_DELAY_MS", 500, "runtime.retry", "base_delay_ms"))
+    """Base delay between retries in milliseconds"""
+    
+    RETRY_EXPONENTIAL_BACKOFF: bool = field(default_factory=lambda: _get_bool("RETRY_EXPONENTIAL_BACKOFF", True, "runtime.retry", "exponential_backoff"))
+    """Use exponential backoff for retries"""
+    
+    # Telemetry
+    TELEMETRY_ENABLED: bool = field(default_factory=lambda: _get_bool("TELEMETRY_ENABLED", True, "runtime.telemetry", "enabled"))
+    """Enable telemetry collection"""
+    
+    TELEMETRY_LOG_PROMPTS: bool = field(default_factory=lambda: _get_bool("TELEMETRY_LOG_PROMPTS", False, "runtime.telemetry", "log_prompts"))
+    """Include prompts in telemetry logs (privacy sensitive)"""
+    
+    # ==========================================================================
     # SMTP (Email)
     # ==========================================================================
     SMTP_HOST: str = field(default_factory=lambda: _get_env("SMTP_HOST", "smtp.gmail.com", "smtp", "host"))
