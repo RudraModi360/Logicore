@@ -67,7 +67,10 @@ class Agent:
         memory: bool = False,
         context_compression: bool = False,
         skills: list = None,
-        workspace_root: str = None
+        workspace_root: str = None,
+        reasoning_level: str = "medium",
+        task_tracking: bool = False,
+        plan_mode: bool = False,
     ):
         if isinstance(llm, str):
             self.provider = self._create_provider(llm, model, api_key, endpoint)
@@ -105,6 +108,52 @@ class Agent:
         if context_compression:
             from logicore.memory.context_middleware import ContextMiddleware
             self.context_middleware = ContextMiddleware(self.provider)
+
+        # === Reasoning Level Control ===
+        # Supports: "minimal", "low", "medium", "high", "deep"
+        self._reasoning_level = reasoning_level
+        self._reasoning_controller = None
+        try:
+            from logicore.runtime.reasoning import ReasoningLevel, ReasoningConfig, ReasoningController
+            level_map = {
+                "minimal": ReasoningLevel.MINIMAL,
+                "low": ReasoningLevel.LOW,
+                "medium": ReasoningLevel.MEDIUM,
+                "high": ReasoningLevel.HIGH,
+                "deep": ReasoningLevel.DEEP,
+            }
+            config = ReasoningConfig(level=level_map.get(reasoning_level, ReasoningLevel.MEDIUM))
+            self._reasoning_controller = ReasoningController(config)
+        except ImportError:
+            pass  # Reasoning module not available
+        
+        # === Task Tracking ===
+        self._task_tracking_enabled = task_tracking
+        self._tracker = None
+        if task_tracking:
+            try:
+                from logicore.runtime.tracker import TrackerService
+                self._tracker = TrackerService(project_dir=workspace_root)
+            except ImportError:
+                pass
+        
+        # === Plan Mode ===
+        self._plan_mode_enabled = plan_mode
+        self._planner = None
+        if plan_mode:
+            try:
+                from logicore.runtime.planner import PlanService
+                self._planner = PlanService(project_dir=workspace_root)
+            except ImportError:
+                pass
+        
+        # === Progress Tracking ===
+        self._progress_service = None
+        try:
+            from logicore.runtime.progress import ProgressService
+            self._progress_service = ProgressService()
+        except ImportError:
+            pass
 
         # Tool Management
         self.internal_tools = []  # List of schemas
@@ -184,6 +233,73 @@ class Agent:
         elif len(session_ids) == 0:
             return {"message": "No telemetry data recorded yet."}
         return self.telemetry_tracker.get_total_summary()
+
+    # === Reasoning Level API ===
+    
+    @property
+    def reasoning_level(self) -> str:
+        """Get current reasoning level: 'minimal', 'low', 'medium', 'high', or 'deep'."""
+        return self._reasoning_level
+    
+    @reasoning_level.setter
+    def reasoning_level(self, level: str) -> None:
+        """Set reasoning level: 'minimal', 'low', 'medium', 'high', or 'deep'."""
+        valid_levels = ["minimal", "low", "medium", "high", "deep"]
+        if level not in valid_levels:
+            raise ValueError(f"Invalid reasoning level '{level}'. Must be one of: {valid_levels}")
+        self._reasoning_level = level
+        
+        if self._reasoning_controller:
+            from logicore.runtime.reasoning import ReasoningLevel
+            level_map = {
+                "minimal": ReasoningLevel.MINIMAL,
+                "low": ReasoningLevel.LOW,
+                "medium": ReasoningLevel.MEDIUM,
+                "high": ReasoningLevel.HIGH,
+                "deep": ReasoningLevel.DEEP,
+            }
+            self._reasoning_controller.set_level(level_map[level], reason="manual_api")
+        
+        if self.debug:
+            print(f"[Agent] Reasoning level set to: {level}")
+    
+    def set_reasoning_level(self, level: str) -> None:
+        """Set reasoning level programmatically. Alias for reasoning_level setter."""
+        self.reasoning_level = level
+    
+    def get_reasoning_state(self) -> dict:
+        """Get current reasoning state for debugging/telemetry."""
+        if self._reasoning_controller:
+            return self._reasoning_controller.get_state_summary()
+        return {"level": self._reasoning_level, "controller": "not_initialized"}
+    
+    # === Task Tracking API ===
+    
+    @property
+    def tracker(self):
+        """Access the task tracker service."""
+        return self._tracker
+    
+    # === Plan Mode API ===
+    
+    @property
+    def planner(self):
+        """Access the plan service."""
+        return self._planner
+    
+    @property
+    def is_in_plan_mode(self) -> bool:
+        """Check if currently in plan mode."""
+        if self._planner:
+            return self._planner.is_in_plan_mode
+        return False
+    
+    # === Progress Tracking API ===
+    
+    @property
+    def progress(self):
+        """Access the progress service."""
+        return self._progress_service
 
     def _rebuild_system_prompt_with_tools(self):
         """Regenerate the system prompt to include currently registered tools and skill instructions."""

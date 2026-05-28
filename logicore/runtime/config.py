@@ -224,6 +224,69 @@ class TelemetryConfig:
 
 
 @dataclass
+class ReasoningConfig:
+    """
+    Configuration for agent reasoning behavior.
+    
+    Controls reasoning depth, thinking budgets, and auto-escalation.
+    Inspired by gemini-cli's thinkingConfig.
+    """
+    from enum import Enum
+    
+    # Reasoning level: 1=MINIMAL, 2=LOW, 3=MEDIUM, 4=HIGH, 5=DEEP
+    level: int = 3  # MEDIUM by default
+    
+    # Maximum tokens for reasoning/thinking (0 = unlimited, 8192 = max for most models)
+    thinking_budget: int = 2048
+    
+    # Whether to capture and display thinking process
+    include_thoughts: bool = True
+    
+    # Show step-by-step reasoning to user
+    show_reasoning_steps: bool = False
+    
+    # Automatically increase reasoning level for complex tasks
+    auto_escalate: bool = True
+    
+    # Approval mode: "plan", "default", "auto", "yolo"
+    approval_mode: str = "default"
+
+
+@dataclass
+class TrackerConfig:
+    """Configuration for task tracking subsystem."""
+    
+    # Enable task tracking
+    enabled: bool = True
+    
+    # Auto-create task for complex requests
+    auto_create_tasks: bool = True
+    
+    # Persist tasks to disk
+    persist: bool = True
+    
+    # Storage directory (relative to project root)
+    storage_dir: str = ".logicore/tracker"
+
+
+@dataclass
+class PlannerConfig:
+    """Configuration for plan mode subsystem."""
+    
+    # Enable plan mode
+    enabled: bool = True
+    
+    # Require approval for plans
+    require_approval: bool = True
+    
+    # Auto-enter plan mode for complex tasks
+    auto_plan_threshold: int = 5  # Number of steps that trigger auto-plan
+    
+    # Storage directory for plans
+    storage_dir: str = ".logicore/plans"
+
+
+@dataclass
 class RuntimeConfig:
     """
     Master configuration for the agentic runtime.
@@ -250,6 +313,9 @@ class RuntimeConfig:
     tool: ToolConfig = field(default_factory=ToolConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
+    reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
+    tracker: TrackerConfig = field(default_factory=TrackerConfig)
+    planner: PlannerConfig = field(default_factory=PlannerConfig)
     
     # Model-specific context windows (model_name -> token_limit)
     model_context_windows: Dict[str, int] = field(default_factory=lambda: {

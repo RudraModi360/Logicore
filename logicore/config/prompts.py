@@ -98,6 +98,107 @@ def _format_tools(tools: list = None) -> str:
     return f"\n## Available Tools\n{tools_str}"
 
 
+def _get_reasoning_section(reasoning_level: str = "medium") -> str:
+    """
+    Generate reasoning approach section based on reasoning level.
+    
+    Args:
+        reasoning_level: One of 'minimal', 'low', 'medium', 'high', 'deep'
+        
+    Returns:
+        Formatted reasoning approach section for system prompt
+    """
+    level_prompts = {
+        "minimal": """
+## Reasoning Approach: Quick
+- Provide brief, direct answers without extensive analysis
+- Skip detailed explanations unless specifically requested
+- Focus on the most immediate and relevant solution
+- Limit reasoning to 1-2 quick considerations
+""",
+        "low": """
+## Reasoning Approach: Concise
+- Provide concise reasoning with 1-2 key steps
+- Focus on the primary solution path
+- Brief justification for decisions
+- Skip edge case analysis unless critical
+""",
+        "medium": """
+## Reasoning Approach: Standard
+- Apply step-by-step reasoning for problem analysis
+- Consider main alternatives before deciding
+- Provide clear justification for chosen approach
+- Identify potential issues but stay focused
+- Balance thoroughness with efficiency
+""",
+        "high": """
+## Reasoning Approach: Thorough
+- Conduct deep analysis with multiple perspectives
+- Explore alternative approaches systematically
+- Consider edge cases and potential pitfalls
+- Provide detailed justification for decisions
+- Think through implications and dependencies
+- Validate assumptions before proceeding
+- Use the think tool for complex analysis
+""",
+        "deep": """
+## Reasoning Approach: Exhaustive
+- Perform exhaustive analysis exploring all angles
+- Extended thinking before taking any action
+- Systematically evaluate all viable approaches
+- Deep investigation of root causes
+- Consider long-term implications and maintainability
+- Question assumptions and verify understanding
+- Document reasoning process comprehensively
+- Seek clarification when requirements are ambiguous
+- Build execution plan before implementation
+- ALWAYS use the think tool with depth='deep' before major decisions
+- Break complex tasks into tracked subtasks
+""",
+    }
+    
+    return level_prompts.get(reasoning_level, level_prompts["medium"])
+
+
+def _get_task_tracking_section(enabled: bool = False) -> str:
+    """Generate task tracking section for system prompt."""
+    if not enabled:
+        return ""
+    
+    return """
+## Task Tracking
+You have access to task tracking tools for managing complex work:
+- Use `tracker_create` to create tasks for multi-step work
+- Use `tracker_update` to track progress (status: open → in_progress → closed)
+- Use `tracker_visualize` to see task tree and progress
+- Use `tracker_close` when tasks are complete
+
+For complex requests:
+1. Create an EPIC task for the overall goal
+2. Break into smaller TASK items
+3. Track progress as you work
+4. Close tasks upon completion
+"""
+
+
+def _get_plan_mode_section(enabled: bool = False) -> str:
+    """Generate plan mode section for system prompt."""
+    if not enabled:
+        return ""
+    
+    return """
+## Plan Mode
+For complex multi-step tasks that require user approval:
+1. Use `enter_plan_mode` when facing complex work
+2. Use `submit_plan` to create a detailed execution plan
+3. Wait for user approval before proceeding
+4. Use `exit_plan_mode` after approval to begin execution
+5. Use `update_plan_progress` to track step completion
+
+Use plan mode for: architectural changes, multi-file refactors, risky operations.
+"""
+
+
 def _structured_tool_contract() -> str:
     """Shared structured tool-call and tool-result contract."""
     return """
@@ -118,7 +219,14 @@ def _structured_tool_contract() -> str:
 """
 
 
-def get_system_prompt(model_name: str = "Unknown Model", role: str = "general", tools: list = None) -> str:
+def get_system_prompt(
+    model_name: str = "Unknown Model", 
+    role: str = "general", 
+    tools: list = None,
+    reasoning_level: str = "medium",
+    task_tracking: bool = False,
+    plan_mode: bool = False,
+) -> str:
     """
     Generates the system prompt for the AI agent.
     
@@ -126,6 +234,9 @@ def get_system_prompt(model_name: str = "Unknown Model", role: str = "general", 
         model_name (str): The name of the model being used.
         role (str): The role of the agent ('general', 'engineer', or 'copilot').
         tools (list): List of available tools (empty list by default, can be extended).
+        reasoning_level (str): Reasoning depth ('minimal', 'low', 'medium', 'high', 'deep').
+        task_tracking (bool): Whether task tracking is enabled.
+        plan_mode (bool): Whether plan mode is enabled.
         
     Returns:
         str: The formatted system prompt.
@@ -237,7 +348,9 @@ Core traits:
 - Thoughtful - you explain your reasoning before taking action
 {tools_section}
 {contract_section}
-
+{_get_reasoning_section(reasoning_level)}
+{_get_task_tracking_section(task_tracking)}
+{_get_plan_mode_section(plan_mode)}
 ## Approach
 **CRITICAL: Be Autonomous and Exploratory**
 1. Understand the user's intent from their request
