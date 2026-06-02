@@ -182,11 +182,43 @@ asyncio.run(main())
 
 ---
 
+## (Optional) Multi-Provider Resilient Setup
+
+If you need automatic failover across providers, use `ModelAvailabilityService` and `ResilientGateway`:
+
+```python
+from logicore.providers import (
+    ModelAvailabilityService, ResilientGateway, RetryPolicy,
+    OpenAIProvider, GroqProvider, OllamaProvider,
+)
+
+availability = ModelAvailabilityService()
+availability.register_provider("openai",  OpenAIProvider(model_name="gpt-4o"),               priority=1)
+availability.register_provider("groq",    GroqProvider(model_name="llama-3.3-70b-versatile"), priority=2)
+availability.register_provider("ollama",  OllamaProvider(model_name="qwen2:7b"),              priority=3)
+
+gateway = ResilientGateway(
+    provider=availability.get_available_provider(),
+    availability=availability,
+    retry_policy=RetryPolicy(max_attempts=5),
+)
+
+# gateway.chat() and gateway.chat_stream() work exactly like a regular provider gateway
+response = await gateway.chat([{"role": "user", "content": "Hello!"}])
+```
+
+- Rate limit on OpenAI → exponential backoff → failover to Groq → failover to Ollama.
+- See [Provider Resilience](./concepts/providers/provider-resilience) for the full API.
+
+---
+
 ## Next Steps
 
 - **[Explore Concepts](./concepts/agents)** — Understand agents, skills, memory
 - **[Check API Reference](./concepts/)** — Deep dive into all classes and methods
 - **[Load Skills](./concepts/skills)** — Pre-built capability packs (web_research, code_review, etc.)
+- **[Provider Resilience](./concepts/providers/provider-resilience)** — Multi-provider failover and health tracking
+- **[Execution Hooks](./concepts/hooks/hooks-overview)** — Intercept and customise the agent pipeline
 
 ---
 

@@ -302,6 +302,77 @@ Common recovery strategies:
 
 ---
 
+## Execution Hooks
+
+Logicore's hook system lets you intercept any point in the execution pipeline — before the LLM call, after the response, before/after each tool — without changing agent or provider code.
+
+```mermaid
+graph LR
+    U["User Query"] --> H1["BEFORE_MODEL<br/>hook"]
+    H1 --> LLM["LLM call"]
+    LLM --> H2["AFTER_MODEL<br/>hook"]
+    H2 --> TD{Tool?}
+    TD -->|Yes| H3["BEFORE_TOOL<br/>hook"]
+    H3 --> TX["Execute tool"]
+    TX --> H4["AFTER_TOOL<br/>hook"]
+    H4 --> LLM
+    TD -->|No| H5["AFTER_TURN<br/>hook"]
+    H5 --> R["Response"]
+
+    style H1 fill:#9C27B0,stroke:#6A1B9A,color:#fff
+    style H2 fill:#9C27B0,stroke:#6A1B9A,color:#fff
+    style H3 fill:#9C27B0,stroke:#6A1B9A,color:#fff
+    style H4 fill:#9C27B0,stroke:#6A1B9A,color:#fff
+    style H5 fill:#9C27B0,stroke:#6A1B9A,color:#fff
+    style LLM fill:#FF9800,stroke:#E65100,color:#fff
+    style TX fill:#4CAF50,stroke:#2E7D32,color:#fff
+```
+
+```python
+from logicore.runtime.hooks import HookSystem, HookPoint, HookContext, HookResult, HookAction
+
+hooks = HookSystem()
+
+@hooks.register(HookPoint.BEFORE_MODEL, priority=10)
+async def inject_date(ctx: HookContext) -> HookResult:
+    """Prepend today's date to every LLM call."""
+    from datetime import date
+    msg = {"role": "system", "content": f"Today is {date.today()}."}
+    return HookResult(action=HookAction.MODIFY, modified_messages=[msg] + ctx.messages)
+
+@hooks.register(HookPoint.AFTER_TOOL_EXECUTION)
+async def log_tools(ctx: HookContext) -> HookResult:
+    print(f"Tool '{ctx.tool_name}' returned: {ctx.tool_result}")
+    return HookResult()
+```
+
+See [Execution Hooks](../hooks/hooks-overview) for the full reference.
+
+---
+
+## Thought-Aware Reasoning
+
+`ThoughtParser` reads structured reasoning inside model responses (`**subject**: ...`, `<thinking>`, `Step N:`) and can automatically escalate the reasoning level for the next turn when the response is complex.
+
+```python
+from logicore.runtime.reasoning import ThoughtParser, ReasoningController, ReasoningLevel
+
+parser = ThoughtParser()
+analysis = parser.parse(model_response_text)
+
+print(analysis.complexity_score)       # 0.0 – 1.0
+print(analysis.subjects)              # ["Analysis", "Solution", ...]
+print(analysis.has_structured_thinking)
+
+# Auto-escalate based on response complexity
+controller = ReasoningController()
+controller.register_hooks(hooks)  # wires BEFORE_MODEL + AFTER_MODEL hooks
+```
+
+See [Reasoning & Thought Parsing](./reasoning-hooks) for details.
+
+---
+
 ## Configuration & Customization
 
 Agents expose control at every level:

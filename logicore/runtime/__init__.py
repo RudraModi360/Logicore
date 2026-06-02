@@ -72,6 +72,27 @@ from logicore.runtime.progress import (
     ProgressEventType,
 )
 
+# Hooks system for execution lifecycle customization
+from logicore.runtime.hooks import (
+    HookSystem,
+    HookPoint,
+    HookAction,
+    HookContext,
+    HookResult,
+    HookRegistration,
+    get_default_hook_system,
+    set_default_hook_system,
+)
+
+# Thought parsing for reasoning analysis
+from logicore.runtime.reasoning import (
+    ThoughtParser,
+    ThoughtAnalysis,
+    ParsedThought,
+    ThoughtType,
+    parse_thoughts,
+)
+
 __all__ = [
     # Config
     "RuntimeConfig",
@@ -115,6 +136,21 @@ __all__ = [
     "ReasoningController",
     "REASONING_PRESETS",
     "get_reasoning_system_prompt_addon",
+    # Thought Parsing
+    "ThoughtParser",
+    "ThoughtAnalysis",
+    "ParsedThought",
+    "ThoughtType",
+    "parse_thoughts",
+    # Hooks
+    "HookSystem",
+    "HookPoint",
+    "HookAction",
+    "HookContext",
+    "HookResult",
+    "HookRegistration",
+    "get_default_hook_system",
+    "set_default_hook_system",
     # Tracker
     "TrackerService",
     "TrackerTask",

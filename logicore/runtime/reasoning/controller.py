@@ -256,3 +256,206 @@ class ReasoningController:
             "thinking_budget": self.thinking_budget,
             "adjustment_count": len(self.state.adjustment_history),
         }
+    
+    # -------------------------------------------------------------------------
+    # Response-Based Adjustment (ThoughtParser Integration)
+    # -------------------------------------------------------------------------
+    
+    def adjust_for_response(
+        self, 
+        response_text: str,
+        complexity_threshold: float = 0.5,
+    ) -> ReasoningLevel:
+        """
+        Adjust reasoning level based on response complexity analysis.
+        
+        Uses ThoughtParser to analyze structured thinking in the response.
+        High complexity responses may trigger escalation for subsequent turns.
+        
+        Args:
+            response_text: Model response to analyze
+            complexity_threshold: Threshold for escalation (0-1)
+        
+        Returns:
+            Adjusted reasoning level
+        """
+        if not self.config.auto_escalate:
+            return self.state.current_level
+        
+        from logicore.runtime.reasoning.thought_parser import ThoughtParser
+        
+        parser = ThoughtParser()
+        analysis = parser.parse(response_text)
+        
+        # If response shows high complexity, escalate for next turn
+        if analysis.complexity_score >= complexity_threshold:
+            # Only escalate if not already at max
+            if self.state.current_level != ReasoningLevel.DEEP:
+                return self.escalate(
+                    f"response_complexity_{analysis.complexity_score:.2f}"
+                )
+        
+        # If response is very simple and we're escalated, consider de-escalation
+        elif analysis.complexity_score < 0.2 and not analysis.has_structured_thinking:
+            if self.state.current_level.value > self.state.original_level.value:
+                return self.de_escalate("response_simple")
+        
+        return self.state.current_level
+    
+    def analyze_response(self, response_text: str) -> dict:
+        """
+        Analyze a response for reasoning patterns.
+        
+        Returns analysis data useful for debugging and telemetry.
+        
+        Args:
+            response_text: Model response to analyze
+        
+        Returns:
+            Dict with analysis results
+        """
+        from logicore.runtime.reasoning.thought_parser import ThoughtParser
+        
+        parser = ThoughtParser()
+        analysis = parser.parse(response_text)
+        
+        return {
+            "has_structured_thinking": analysis.has_structured_thinking,
+            "thought_count": analysis.thought_count,
+            "complexity_score": analysis.complexity_score,
+            "thought_types": analysis.metadata.get("thought_types", []),
+            "subjects": analysis.subjects,
+        }
+    
+    # -------------------------------------------------------------------------
+    # Hook Integration
+    # -------------------------------------------------------------------------
+    
+    def create_after_model_hook(self):
+        """
+        Create an AFTER_MODEL hook for automatic reasoning adjustment.
+        
+        This hook analyzes model responses and adjusts reasoning level
+        for subsequent turns based on detected complexity.
+        
+        Usage:
+            from logicore.runtime.hooks import HookSystem, HookPoint
+            
+            hooks = HookSystem()
+            controller = ReasoningController()
+            
+            hooks.add_hook(
+                name="reasoning_auto_adjust",
+                hook_point=HookPoint.AFTER_MODEL,
+                hook_fn=controller.create_after_model_hook(),
+                priority=50,
+            )
+        """
+        from logicore.runtime.hooks import HookContext, HookResult, HookAction
+        
+        async def after_model_hook(ctx: HookContext) -> HookResult:
+            """Hook that adjusts reasoning based on response complexity."""
+            if ctx.model_response and ctx.model_response.content:
+                old_level = self.state.current_level
+                new_level = self.adjust_for_response(ctx.model_response.content)
+                
+                return HookResult(
+                    action=HookAction.CONTINUE,
+                    metadata={
+                        "reasoning_adjusted": old_level != new_level,
+                        "old_level": old_level.name,
+                        "new_level": new_level.name,
+                    }
+                )
+            
+            return HookResult()
+        
+        return after_model_hook
+    
+    def create_before_model_hook(self):
+        """
+        Create a BEFORE_MODEL hook for injecting reasoning instructions.
+        
+        This hook adds reasoning-specific system prompt addons based
+        on the current reasoning level.
+        
+        Usage:
+            hooks.add_hook(
+                name="reasoning_prompt_injection",
+                hook_point=HookPoint.BEFORE_MODEL,
+                hook_fn=controller.create_before_model_hook(),
+                priority=10,  # Early to influence other hooks
+            )
+        """
+        from logicore.runtime.hooks import HookContext, HookResult, HookAction
+        
+        async def before_model_hook(ctx: HookContext) -> HookResult:
+            """Hook that injects reasoning instructions."""
+            addon = self.get_system_prompt_addon()
+            
+            if not addon:
+                return HookResult()
+            
+            # Find system message and append reasoning addon
+            messages = list(ctx.messages)
+            system_idx = None
+            
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "system":
+                    system_idx = i
+                    break
+            
+            if system_idx is not None:
+                # Append to existing system message
+                current_content = messages[system_idx].get("content", "")
+                messages[system_idx] = {
+                    **messages[system_idx],
+                    "content": f"{current_content}\n\n{addon}"
+                }
+            else:
+                # Insert new system message at start
+                messages.insert(0, {"role": "system", "content": addon})
+            
+            return HookResult(
+                action=HookAction.MODIFY,
+                modified_messages=messages,
+                metadata={
+                    "reasoning_level": self.state.current_level.name,
+                    "thinking_budget": self.thinking_budget,
+                }
+            )
+        
+        return before_model_hook
+    
+    def register_hooks(self, hook_system) -> None:
+        """
+        Register all reasoning hooks with a HookSystem.
+        
+        Args:
+            hook_system: HookSystem instance to register with
+        
+        Usage:
+            from logicore.runtime.hooks import HookSystem
+            from logicore.runtime.reasoning import ReasoningController
+            
+            hooks = HookSystem()
+            controller = ReasoningController(config)
+            controller.register_hooks(hooks)
+        """
+        from logicore.runtime.hooks import HookPoint
+        
+        hook_system.add_hook(
+            name="reasoning_prompt_injection",
+            hook_point=HookPoint.BEFORE_MODEL,
+            hook_fn=self.create_before_model_hook(),
+            priority=10,
+            description="Injects reasoning-level system prompt addons",
+        )
+        
+        hook_system.add_hook(
+            name="reasoning_auto_adjust",
+            hook_point=HookPoint.AFTER_MODEL,
+            hook_fn=self.create_after_model_hook(),
+            priority=50,
+            description="Auto-adjusts reasoning level based on response complexity",
+        )

@@ -24,6 +24,8 @@ Logicore is a **unified agentic framework** that abstracts away the fragmentatio
 | **Memory Systems** | DIY vector DBs, RAG pipelines, session management | Built-in persistent memory with semantic search |
 | **Scheduling** | External cron, Celery, AWS Lambda dependencies | Native agent-aware cron scheduler |
 | **Approval & Safety** | Custom approval workflows, tool restriction layers | Declarative approval system with auto-approval APIs |
+| **Provider Failures** | Manual try/except per provider, no health tracking | `ModelAvailabilityService` — automatic failover chains, exponential backoff |
+| **Pipeline Customization** | Fork the agent class for every cross-cutting concern | Execution hooks: intercept any point without changing agent code |
 
 ---
 
@@ -129,6 +131,43 @@ async def approve_tool(session_id, tool_name, args):
 agent.set_callbacks(on_tool_approval=approve_tool)
 ```
 
+### 8. **Provider Resilience & Automatic Failover**
+Register N providers and let Logicore handle health tracking, retries, and failover:
+
+```python
+from logicore.providers import ModelAvailabilityService, ResilientGateway
+
+availability = ModelAvailabilityService()
+availability.register_provider("openai",  OpenAIProvider(model_name="gpt-4o"),    priority=1)
+availability.register_provider("groq",    GroqProvider(model_name="llama-3.3-70b"), priority=2)
+availability.register_provider("ollama",  OllamaProvider(model_name="qwen2:7b"),   priority=3)
+
+gateway = ResilientGateway(
+    provider=availability.get_available_provider(),
+    availability=availability,
+)
+# Rate limit on OpenAI → auto-retries → falls over to Groq → falls over to Ollama
+```
+
+### 9. **Execution Hooks**
+Intercept any point in the pipeline without modifying agent or provider code:
+
+```python
+from logicore.runtime.hooks import HookSystem, HookPoint, HookResult, HookAction
+
+hooks = HookSystem()
+
+@hooks.register(HookPoint.BEFORE_MODEL, priority=10)
+async def inject_context(ctx):
+    msg = {"role": "system", "content": f"Tenant: {ctx.metadata['tenant']}"}
+    return HookResult(action=HookAction.MODIFY, modified_messages=[msg] + ctx.messages)
+
+@hooks.register(HookPoint.AFTER_TOOL_EXECUTION)
+async def audit_tool(ctx):
+    log_tool_call(ctx.tool_name, ctx.tool_args, ctx.tool_result)
+    return HookResult()
+```
+
 ---
 
 ## Architecture Overview
@@ -149,6 +188,19 @@ graph TB
         - Telemetry & Observability
         "]
     end
+
+    subgraph "Execution Hooks"
+        HOOKS["
+        BEFORE_MODEL / AFTER_MODEL
+        BEFORE/AFTER Tool Execution
+        Context Compression Hooks
+        "]
+    end
+
+    subgraph "Provider Resilience"
+        MAS["ModelAvailabilityService
+        HealthState tracking · Failover · Retry"]
+    end
     
     subgraph "Unified Provider Gateway"
         GATEWAY["
@@ -168,7 +220,9 @@ graph TB
     end
     
     APP -->|Execute Chat| ORCH
-    ORCH -->|Normalize Requests| GATEWAY
+    ORCH -->|Hook points| HOOKS
+    ORCH -->|Normalize Requests| MAS
+    MAS -->|Healthy provider| GATEWAY
     GATEWAY -->|Route to Provider| OLLAMA
     GATEWAY -->|Route to Provider| OPENAI
     GATEWAY -->|Route to Provider| GEMINI
@@ -183,11 +237,15 @@ graph TB
     AZURE -->|Unified Response| GATEWAY
     OTHER -->|Unified Response| GATEWAY
     
-    GATEWAY -->|Normalized Response| ORCH
+    GATEWAY -->|Normalized Response| MAS
+    MAS -->|Report success/failure| MAS
+    MAS -->|Response| ORCH
     ORCH -->|Final Output| APP
     
     style APP fill:#4CAF50,stroke:#2E7D32,color:#fff
     style ORCH fill:#2196F3,stroke:#1565C0,color:#fff
+    style HOOKS fill:#9C27B0,stroke:#6A1B9A,color:#fff
+    style MAS fill:#FF9800,stroke:#E65100,color:#fff
     style GATEWAY fill:#FF9800,stroke:#E65100,color:#fff
     style OLLAMA fill:#9C27B0,stroke:#6A1B9A,color:#fff
     style OPENAI fill:#F44336,stroke:#C62828,color:#fff
@@ -206,6 +264,8 @@ graph TB
 | **Fail-Safe Execution** | Errors in tools don't crash agents; graceful degradation |
 | **Transparency** | Full execution logs, telemetry, and debugging hooks |
 | **Extensibility** | Skills, custom tools, middleware, and callbacks everywhere |
+| **Resilience** | `ModelAvailabilityService` health tracking; automatic failover on provider failure |
+| **Observability** | Execution hooks at every pipeline point; stats, audit logs, telemetry |
 
 ---
 
@@ -282,11 +342,16 @@ agent.add_tool(update_knowledge_base)  # Learning tool
 ```
 
 ### 6. **Multi-Provider Load Balancing**
-Route requests intelligently:
+Route requests intelligently, with automatic health-based failover:
+
 ```python
-agent = Agent(llm="ollama")  # Fast, cheap, local
-if ollama.is_busy():
-    agent = Agent(llm="groq")  # Fallback to cloud
+from logicore.providers import ModelAvailabilityService, ResilientGateway
+
+availability = ModelAvailabilityService()
+availability.register_provider("ollama",  OllamaProvider(model_name="qwen2:7b"),   priority=1)
+availability.register_provider("groq",    GroqProvider(model_name="llama-3.3-70b"), priority=2)
+# Ollama at capacity or down → Groq takes over automatically
+gateway = ResilientGateway(provider=availability.get_available_provider(), availability=availability)
 ```
 
 ### 7. Observability & Compliance

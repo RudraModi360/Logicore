@@ -68,18 +68,30 @@ print(agent.chat("Give me a 2-line TL;DR"))
 - `tools`: list of Tool instances
 - `metadata`: passed through to logs/telemetry
 
-### Failover pattern
-```python
-def make_agent(primary, fallback):
-    try:
-        return Agent(provider=primary)
-    except Exception:
-        return Agent(provider=fallback)
+## Automatic failover with `ModelAvailabilityService`
 
-agent = make_agent(
-    primary=GroqProvider(model="llama-3.3-70b-versatile"),
-    fallback=OpenAIProvider(model="gpt-4o")
+For production workloads, use `ModelAvailabilityService` and `ResilientGateway` instead of a single provider. This gives you health tracking, automatic failover, and retry with exponential backoff out of the box.
+
+```python
+from logicore.providers import (
+    ModelAvailabilityService, ResilientGateway,
+    OpenAIProvider, GroqProvider, OllamaProvider
 )
+
+# 1. Register providers with priorities
+availability = ModelAvailabilityService()
+availability.register_provider("openai",   OpenAIProvider(model_name="gpt-4o"), priority=1)
+availability.register_provider("groq",     GroqProvider(model_name="llama-3.3-70b"), priority=2)
+availability.register_provider("ollama",   OllamaProvider(model_name="qwen2:7b"), priority=3)
+
+# 2. Create a resilient gateway — handles retry and failover for you
+primary = availability.get_available_provider()
+gateway = ResilientGateway(provider=primary, availability=availability)
+
+# 3. Use it; if OpenAI is rate-limited or down, Groq is tried automatically
+response = await gateway.chat(messages)
 ```
 
-> Tip: capture per-provider latency and error rate; route traffic dynamically based on those metrics.
+See [Provider Resilience](./provider-resilience.md) for the full guide.
+
+> Tip: capture per-provider latency and error rate via `availability.get_stats()`; route traffic dynamically based on those metrics.
