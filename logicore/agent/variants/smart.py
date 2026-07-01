@@ -16,8 +16,6 @@ from logicore.config.prompts import (
 from logicore.memory.project import ProjectContext
 import os
 
-os.environ['GOOGLE_API_KEY']='AIzaSyB7sfStkrXLwzxEBfFtGxcmCnfxra0OEmQ'
-os.environ['GOOGLE_CX']='d3c4eae8e0bc44663'
 
 class SmartAgentMode:
     """Agent operation modes."""
