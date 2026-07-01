@@ -4,7 +4,7 @@ from .gemini_provider import GeminiProvider
 from .azure_provider import AzureProvider
 from .openai_provider import OpenAIProvider
 from .base import LLMProvider, ProviderCapability
-from .gateway import (
+from logicore.gateway.gateway import (
     ProviderGateway, 
     NormalizedMessage, 
     get_gateway_for_provider,

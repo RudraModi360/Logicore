@@ -1,19 +1,19 @@
 __version__ = "1.0.3"
 
-from .agents.agent import Agent
-from .agents.copilot import CopilotAgent
-from .agents.agent_mcp import MCPAgent
-from .agents.agent_smart import SmartAgent, SmartAgentMode
-from .agents.agent_basic import BasicAgent, create_agent, tool
+from .agent.base import Agent
+from .agent.variants.copilot import CopilotAgent
+from .agent.variants.mcp import MCPAgent
+from .agent.variants.smart import SmartAgent, SmartAgentMode
+from .agent.variants.basic import BasicAgent, create_agent, tool
 from .providers.ollama_provider import OllamaProvider
 from .providers.groq_provider import GroqProvider
 from .providers.gemini_provider import GeminiProvider
 from .providers.azure_provider import AzureProvider
 from .providers.base import LLMProvider
-from .mcp_client import MCPClientManager
-from .session_manager import SessionManager
-from .telemetry import TelemetryTracker
-from .simplemem import AgentrySimpleMem
+from .mcp.client import MCPClientManager
+from .session.manager import SessionManager
+from .telemetry.tracker import TelemetryTracker
+from .gateway.gateway import ProviderGateway
 
 __all__ = [
     "Agent",
@@ -32,5 +32,5 @@ __all__ = [
     "MCPClientManager",
     "SessionManager",
     "TelemetryTracker",
-    "AgentrySimpleMem"
+    "ProviderGateway",
 ]

@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Any
 
 from logicore.runtime.loop_detection.engine import (
     AgentEvent,

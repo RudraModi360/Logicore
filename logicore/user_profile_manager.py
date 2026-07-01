@@ -1,5 +1,5 @@
 import os
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 from logicore.providers.base import LLMProvider
 
 class UserProfileManager:

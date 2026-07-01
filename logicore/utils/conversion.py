@@ -1,5 +1,4 @@
 import os
-import shutil
 import html
 
 def convert_to_html(text_content: str, output_path: str, title: str = None) -> None:

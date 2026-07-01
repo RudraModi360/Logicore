@@ -1,14 +1,15 @@
 import os
-import re
 import fnmatch
-import difflib
 import shutil
+from collections import deque
 from typing import List, Optional, Literal, Set, Union
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
 
 # --- Shared State ---
 global_read_files_tracker: Set[str] = set()
+_READ_TRACKER_MAX = 1000
+_read_tracker_order: deque = deque(maxlen=_READ_TRACKER_MAX)
 
 def validate_read_before_edit(file_path: str) -> bool:
     return os.path.abspath(file_path) in global_read_files_tracker
@@ -91,6 +92,11 @@ class ReadFileTool(BaseTool):
                 content = f.read()
             
             global_read_files_tracker.add(abs_path)
+            _read_tracker_order.append(abs_path)
+            # Evict oldest entries if tracker exceeds max size
+            while len(global_read_files_tracker) > _READ_TRACKER_MAX:
+                oldest = _read_tracker_order.popleft()
+                global_read_files_tracker.discard(oldest)
             lines = content.splitlines()
 
             if start_line is not None:

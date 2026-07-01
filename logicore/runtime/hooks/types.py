@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional, List, Callable, Union, Awaitable, TYPE_C
 from datetime import datetime
 
 if TYPE_CHECKING:
-    from logicore.providers.gateway import NormalizedMessage
+    from logicore.gateway.gateway import NormalizedMessage
 
 
 class HookPoint(Enum):

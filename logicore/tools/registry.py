@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Type
+from typing import Dict, Any, List
 from .base import BaseTool, ToolResult
 from .filesystem import (
     ReadFileTool, CreateFileTool, EditFileTool, DeleteFileTool, 
@@ -8,19 +8,19 @@ from .execution import ExecuteCommandTool, CodeExecuteTool
 from .web import WebSearchTool, UrlFetchTool, ImageSearchTool
 from .git import GitCommandTool
 from .document import ReadDocumentTool
-from .convert_document import ConvertDocumentTool
-from .office_tools import (
+from .convert import ConvertDocumentTool
+from .office import (
     EditPPTXTool, CreatePPTXTool, AppendSlideTool,
     EditDOCXTool, CreateDOCXTool,
     EditExcelTool, CreateExcelTool
 )
-from .pdf_tools import MergePDFTool, SplitPDFTool
-from .agent_tools import (
-    DateTimeTool, NotesTool, MemoryTool, SmartBashTool, ThinkTool,
-    get_smart_agent_tools, get_smart_agent_tool_schemas
-)
-from .media_search import MediaSearchTool
-from .cron_tools import AddCronJobTool, ListCronJobsTool, RemoveCronJobTool, GetCronsTool
+from .pdf import MergePDFTool, SplitPDFTool
+from .notes import NotesTool
+from .datetime import DateTimeTool
+from .think import ThinkTool
+from .bash import SmartBashTool
+from .media import MediaSearchTool
+from .cron import AddCronJobTool, ListCronJobsTool, RemoveCronJobTool, GetCronsTool
 
 class ToolRegistry:
     def __init__(self):

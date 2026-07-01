@@ -1,7 +1,7 @@
 from typing import Optional
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
-from ..document_handlers import get_handler
+from ..document import get_handler
 
 class ReadDocumentParams(BaseModel):
     file_path: str = Field(..., description="Absolute path to the document file.")

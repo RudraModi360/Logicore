@@ -1,7 +1,7 @@
 import requests
 import os
 import re
-from typing import Any, Literal, List, Dict, Optional
+from typing import Literal, List, Dict, Optional
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
 from logicore.config.settings import get_api_key
@@ -65,7 +65,7 @@ def fetch_page_content(url: str, max_chars: int = 3000) -> Optional[str]:
         response.raise_for_status()
         
         return extract_text_from_html(response.text, max_chars)
-    except:
+    except Exception:
         return None
 
 

@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
 from enum import Enum
 
 if TYPE_CHECKING:
-    from .availability import HealthState, FailureCategory
+    from .availability import FailureCategory
 
 
 class ProviderCapability(Enum):
@@ -57,7 +57,7 @@ class LLMProvider(ABC):
 
     async def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Any:
         """Chat via gateway delegation. Subclasses inherit this for free."""
-        from .gateway import get_gateway_for_provider
+        from logicore.gateway.gateway import get_gateway_for_provider
         gw = get_gateway_for_provider(self)
         return await gw.chat(messages, tools=tools)
 
@@ -68,7 +68,7 @@ class LLMProvider(ABC):
         on_token: Optional[Callable[[str], None]] = None
     ) -> Any:
         """Streaming chat via gateway delegation. Subclasses inherit this for free."""
-        from .gateway import get_gateway_for_provider
+        from logicore.gateway.gateway import get_gateway_for_provider
         gw = get_gateway_for_provider(self)
         return await gw.chat_stream(messages, tools=tools, on_token=on_token)
     

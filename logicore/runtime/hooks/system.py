@@ -40,7 +40,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from logicore.providers.gateway import NormalizedMessage
+    from logicore.gateway.gateway import NormalizedMessage
 
 logger = logging.getLogger(__name__)
 

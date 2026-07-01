@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Type, Optional
+from typing import Any, Dict, Type
 from pydantic import BaseModel
 
 class ToolResult(dict):

@@ -5,10 +5,10 @@ This example demonstrates how to build a production-grade chatbot
 using native Logicore domain components with NEW FEATURES:
 
 Core Components:
-- logicore.agents.Agent - Main agent class with reasoning/tracking/planning
-- logicore.agents.LoopDetector - Loop detection
-- logicore.tools.ToolScheduler - Tool scheduling with dedup/retry
-- logicore.memory.TokenBudget - Context budget tracking
+- logicore.agent.base.Agent - Main agent class with reasoning/tracking/planning
+- logicore.runtime.loop_detection - Loop detection
+- logicore.runtime.scheduler - Tool scheduling with dedup/retry
+- logicore.context.TokenBudget - Context budget tracking
 
 NEW Deep Reasoning & Planning Features:
 - logicore.runtime.reasoning - 5-level reasoning depth (MINIMAL → DEEP)
@@ -40,10 +40,12 @@ from typing import Dict, Any, Optional, List
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # === Native Logicore Imports ===
-from logicore.agents import Agent, LoopDetector, LoopCheckResult
+from logicore.agent.base import Agent
 from logicore.providers.ollama_provider import OllamaProvider
-from logicore.tools import ToolScheduler, SchedulerConfig
-from logicore.memory import TokenBudget, estimate_message_tokens
+from logicore.runtime.scheduler import ToolScheduler
+from logicore.runtime import RuntimeConfig, ToolConfig
+from logicore.runtime.loop_detection import LoopDetectionEngine, LoopDetectionResult
+from logicore.context import TokenBudget, estimate_message_tokens
 
 # === NEW: Runtime Feature Imports ===
 from logicore.runtime.reasoning import ReasoningLevel, ReasoningController, ReasoningConfig
@@ -94,10 +96,7 @@ class ChatSession:
         self.turn_count = 0
         
         # Loop detection
-        self.loop_detector = LoopDetector(
-            tool_threshold=5,
-            content_threshold=10,
-        )
+        self.loop_detector = LoopDetectionEngine(RuntimeConfig())
         
         # Token budget
         self.budget = TokenBudget(
@@ -106,10 +105,9 @@ class ChatSession:
         )
         
         # Tool scheduler (for future tool execution)
-        self.scheduler = ToolScheduler(SchedulerConfig(
-            enable_deduplication=True,
-            max_retries=3,
-        ))
+        self.scheduler = ToolScheduler(
+            ToolConfig(enable_deduplication=True)
+        )
         
         # === NEW: Reasoning Controller ===
         self.reasoning = ReasoningController(
@@ -333,7 +331,7 @@ class ChatSession:
             # (In production, use actual token counts from provider)
             estimated = estimate_message_tokens([{"role": "user", "content": user_input}])
             estimated += estimate_message_tokens([{"role": "assistant", "content": response or ""}])
-            from logicore.memory import TokenCategory
+            from logicore.context.token_budget import TokenCategory
             self.budget.add_usage(TokenCategory.MESSAGES, estimated)
             
             if self.budget.should_warn():

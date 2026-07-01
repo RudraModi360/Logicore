@@ -17,7 +17,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, List, Any, Callable, Awaitable
+from typing import Optional, Dict, List, Any, Callable
 
 from logicore.runtime.config import RuntimeConfig
 

@@ -31,15 +31,13 @@ Usage:
 """
 
 from dataclasses import dataclass, field
-from typing import Set, Optional, AsyncIterator, Callable, Any, List
-from enum import Enum
+from typing import Set, Optional, Callable, Any, List
 import asyncio
 import random
 import logging
 import functools
-import time
 
-from .availability import FailureCategory, ModelAvailabilityService, HealthState
+from .availability import FailureCategory, ModelAvailabilityService
 
 logger = logging.getLogger(__name__)
 

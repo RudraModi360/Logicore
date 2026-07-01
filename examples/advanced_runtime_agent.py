@@ -20,7 +20,7 @@ from typing import Dict, Any, List
 # Ensure workspace root is on sys.path when running as a script
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from logicore.agents import Agent
+from logicore.agent.base import Agent
 from logicore.providers.ollama_provider import OllamaProvider
 from logicore.runtime import (
     AgentRuntime,

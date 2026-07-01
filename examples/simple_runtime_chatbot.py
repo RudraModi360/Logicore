@@ -21,7 +21,7 @@ from typing import Dict, Any, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # === Logicore Imports ===
-from logicore.agents import Agent
+from logicore.agent.base import Agent
 from logicore.providers.ollama_provider import OllamaProvider
 from logicore.runtime import (
     AgentRuntime,

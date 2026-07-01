@@ -2,10 +2,9 @@
 Skill Loader — discovers and loads skills from directories.
 """
 
-import os
 import re
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
 from .base import Skill, SkillMetadata
 

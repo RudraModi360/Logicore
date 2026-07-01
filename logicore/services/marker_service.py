@@ -1,6 +1,5 @@
 import subprocess
 import os
-import sys
 
 class MarkerService:
     # Define output directory relative to CWD

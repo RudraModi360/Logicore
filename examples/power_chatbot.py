@@ -25,14 +25,13 @@ from typing import Any, Dict, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Native Logicore imports ──────────────────────────────────────────────────
-from logicore.agents import Agent, LoopDetector
-from logicore.memory import (
+from logicore.agent.base import Agent
+from logicore.context import (
     TokenBudget, TokenCategory,
-    ContextMiddleware,
     estimate_message_tokens,
     get_model_context_window,
 )
-from logicore.tools import ToolScheduler, SchedulerConfig
+from logicore.runtime.scheduler import ToolScheduler
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Provider imports (only what's needed gets used at runtime)
