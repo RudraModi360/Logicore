@@ -5,6 +5,7 @@ from collections import deque
 from typing import List, Optional, Literal, Set, Union
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
+from .dedup import file_state_cache
 
 # --- Shared State ---
 global_read_files_tracker: Set[str] = set()
@@ -88,26 +89,51 @@ class ReadFileTool(BaseTool):
             if os.path.getsize(abs_path) > 50 * 1024 * 1024: # 50MB limit
                 return ToolResult(success=False, error="File too large (max 50MB)")
 
+            # Layer 3: File read deduplication — check cache first
+            # Only check cache for range reads (start_line/end_line) since full reads
+            # are less predictable and cache the full content anyway
+            start_idx = max(0, start_line - 1) if start_line is not None else None
+            end_limit = end_line  # stored as-is for cache keying
+
+            cached_entry = file_state_cache.get(abs_path, offset=start_idx, limit=end_limit)
+            if cached_entry is not None:
+                # Cache hit — file unchanged, return stub
+                global_read_files_tracker.add(abs_path)
+                _read_tracker_order.append(abs_path)
+                while len(global_read_files_tracker) > _READ_TRACKER_MAX:
+                    oldest = _read_tracker_order.popleft()
+                    global_read_files_tracker.discard(oldest)
+
+                stub = (
+                    f"[FILE_READ_CACHED] File unchanged since last read "
+                    f"(mtime={cached_entry.mtime:.6f}, content_hash={cached_entry.content_hash[:8]}). "
+                    f"The content from the earlier read_file tool_result in this conversation "
+                    f"is still current — refer to that instead of re-reading."
+                )
+                return ToolResult(success=True, content=stub)
+
+            # Cache miss — read from disk
             with open(abs_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            
+
             global_read_files_tracker.add(abs_path)
             _read_tracker_order.append(abs_path)
-            # Evict oldest entries if tracker exceeds max size
             while len(global_read_files_tracker) > _READ_TRACKER_MAX:
                 oldest = _read_tracker_order.popleft()
                 global_read_files_tracker.discard(oldest)
             lines = content.splitlines()
 
             if start_line is not None:
-                start_idx = max(0, start_line - 1)
-                end_idx = len(lines) if end_line is None else min(len(lines), end_line)
                 if start_idx >= len(lines):
                     return ToolResult(success=False, error="Start line exceeds file length")
-                
-                selected_content = "\n".join(lines[start_idx:end_idx])
+
+                selected_content = "\n".join(lines[start_idx:end_line if end_line is not None else len(lines)])
+                # Cache the full content (keyed by range)
+                file_state_cache.set(abs_path, content, offset=start_idx, limit=end_limit)
                 return ToolResult(success=True, content=selected_content)
             else:
+                # Full read — cache with no range constraints
+                file_state_cache.set(abs_path, content, offset=None, limit=None)
                 return ToolResult(success=True, content=content)
 
         except Exception as e:
@@ -131,6 +157,7 @@ class CreateFileTool(BaseTool):
                 os.makedirs(os.path.dirname(abs_path), exist_ok=True)
                 with open(abs_path, 'w', encoding='utf-8') as f:
                     f.write(content)
+                file_state_cache.invalidate(abs_path)
                 return ToolResult(success=True, content=f"File created: {file_path}")
             else:
                 return ToolResult(success=False, error="Invalid file_type. Must be 'file' or 'directory'.")
@@ -468,7 +495,10 @@ class EditFileTool(BaseTool):
                 ])
             
             response_content = '\n'.join(response_parts)
-            
+
+            # Invalidate file read cache after successful edit
+            file_state_cache.invalidate(abs_path)
+
             return ToolResult(success=True, content=response_content)
 
         except Exception as e:
@@ -488,6 +518,7 @@ class DeleteFileTool(BaseTool):
             if os.path.isdir(abs_path):
                 if recursive:
                     shutil.rmtree(abs_path)
+                    file_state_cache.invalidate(abs_path)
                     return ToolResult(success=True, content=f"Recursively deleted directory: {file_path}")
                 else:
                     if os.listdir(abs_path):
@@ -496,6 +527,7 @@ class DeleteFileTool(BaseTool):
                     return ToolResult(success=True, content=f"Deleted empty directory: {file_path}")
             else:
                 os.remove(abs_path)
+                file_state_cache.invalidate(abs_path)
                 return ToolResult(success=True, content=f"Deleted file: {file_path}")
 
         except Exception as e:

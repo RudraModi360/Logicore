@@ -1,9 +1,24 @@
 import subprocess
 import os
 import sys
+import platform
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
+
+# OS-aware command mapping
+_LINUX_TO_WINDOWS = {
+    r'\bgrep\b': 'findstr',
+    r'\bls\b': 'dir',
+    r'\bcat\b': 'type',
+    r'\bwc\b': 'find /c /v',
+    r'\bhead\b': 'more',
+    r'\btail\b': 'more',
+    r'\bchmod\b': 'icacls',
+    r'\bcp\b': 'copy',
+    r'\brm\b': 'del',
+    r'\bmv\b': 'move',
+}
 
 # --- Schemas ---
 
@@ -34,16 +49,17 @@ class ExecuteCommandTool(BaseTool):
 
             # Safe Python wrapping
             if command_type == 'python':
-                # Attempt to use sys.executable if possible, or just 'python'
-                # Escaping quotes for shell execution can be tricky. 
-                # It is safer to write to a temp file, but for simplicity we keep -c but try to be safe.
-                # However, complex python scripts should be written to file and run via 'python file.py'
                 pass 
 
-            # Detect OS for default shell behavior if needed (Windows vs Posix)
-            # Python's subprocess.run with shell=True handles this mostly, but 'bash' might not exist on Windows.
-            
-            # Simple logging or reasoning injection could happen here
+            # OS-aware command adaptation
+            if platform.system() == "Windows":
+                import re
+                original_command = command
+                for linux_cmd, win_cmd in _LINUX_TO_WINDOWS.items():
+                    command = re.sub(linux_cmd, win_cmd, command)
+                if command != original_command:
+                    # Log the adaptation for debugging
+                    pass
             
             result = subprocess.run(
                 command,
@@ -68,10 +84,19 @@ class ExecuteCommandTool(BaseTool):
             success = result.returncode == 0 or ignore_error
             
             if not success:
+                error_msg = f"Command failed (Exit Code {result.returncode})\n{stderr}"
+                # Add OS-specific recovery hints
+                if platform.system() == "Windows":
+                    if "grep" in command.lower() or "'grep'" in command.lower():
+                        error_msg += "\n[HINT] On Windows, use 'findstr' instead of 'grep'"
+                    elif "'ls'" in command.lower() or "ls " in command.lower():
+                        error_msg += "\n[HINT] On Windows, use 'dir' instead of 'ls'"
+                    elif "'cat'" in command.lower() or "cat " in command.lower():
+                        error_msg += "\n[HINT] On Windows, use 'type' instead of 'cat'"
                 return ToolResult(
                     success=False, 
                     content=output, 
-                    error=f"Command failed (Exit Code {result.returncode})\n{stderr}"
+                    error=error_msg
                 )
             
             return ToolResult(success=True, content=output)

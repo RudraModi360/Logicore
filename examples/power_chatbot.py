@@ -6,8 +6,7 @@ A fully-featured interactive chatbot that uses Logicore's native modules directl
 Under the hood (all happening transparently):
   - logicore.agents.LoopDetector       → prevents infinite tool/content loops
   - logicore.tools.ToolScheduler       → deduplicates tool calls, retries failures
-  - logicore.memory.TokenBudget        → tracks context usage per model
-  - logicore.memory.ContextMiddleware  → auto-compresses history when context fills
+  - logicore.context_engine            → context management with masking/compression
   - logicore.telemetry.TelemetryTracker → token usage, latency, cache stats
 
 Run:
@@ -26,11 +25,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Native Logicore imports ──────────────────────────────────────────────────
 from logicore.agent.base import Agent
-from logicore.context import (
-    TokenBudget, TokenCategory,
-    estimate_message_tokens,
-    get_model_context_window,
+from logicore.context_engine.token_estimator import (
+    get_model_context_window, estimate_tokens, estimate_message_tokens,
 )
+from logicore.runtime.context.token_budget import TokenCategory
 from logicore.runtime.scheduler import ToolScheduler
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -61,7 +59,7 @@ BANNER = r"""
 ║   • LoopDetector   — stops repetitive tool/content loops ║
 ║   • ToolScheduler  — dedup + retry with backoff          ║
 ║   • TokenBudget    — model-aware context tracking        ║
-║   • ContextMiddleware — auto-compresses long history     ║
+║   • ContextEngine  — masking/compression/truncation      ║
 ║   • TelemetryTracker — live latency + token stats        ║
 ╚══════════════════════════════════════════════════════════╝
 """
@@ -124,7 +122,7 @@ class PowerChatSession:
       2. LoopDetector checks content of each response for repetition patterns
       3. ToolScheduler handles dedup/retry for any tool calls fired
       4. TokenBudget estimates context fill after each message
-      5. ContextMiddleware auto-summarises when history gets too long
+      5. ContextEngine auto-compresses when history gets too long
       6. TelemetryTracker provides per-turn token + latency stats
     """
 
@@ -141,9 +139,8 @@ class PowerChatSession:
         )
 
         self.budget = TokenBudget(
+            config=RuntimeConfig.from_settings(),
             model_name=model_name,
-            compression_threshold=0.82,   # compress at 82 % context fill
-            warning_threshold=0.70,        # warn at 70 %
         )
 
         self.scheduler = ToolScheduler(SchedulerConfig(
@@ -213,15 +210,15 @@ class PowerChatSession:
         # ── Token budget update (character-based estimate) ────────────
         user_tokens = estimate_message_tokens([{"role": "user", "content": user_input}])
         asst_tokens = estimate_message_tokens([{"role": "assistant", "content": response}])
-        self.budget.add_usage(TokenCategory.MESSAGES, user_tokens + asst_tokens)
+        self.budget.add_tokens(TokenCategory.MESSAGES, user_tokens + asst_tokens)
 
         if self.budget.should_warn() and not self.budget.should_compress():
-            print(f"\n⚠  [TokenBudget] Context at {self.budget.usage_percent:.1f}% — "
-                  f"{self.budget.remaining:,} tokens remaining.")
+            print(f"\n⚠  [TokenBudget] Context at {self.budget.get_usage_ratio()*100:.1f}% — "
+                  f"{self.budget.get_remaining_tokens():,} tokens remaining.")
 
         if self.budget.should_compress():
-            print(f"\n🔄 [TokenBudget] Context at {self.budget.usage_percent:.1f}% — "
-                  f"ContextMiddleware will summarise on next turn.")
+            print(f"\n🔄 [TokenBudget] Context at {self.budget.get_usage_ratio()*100:.1f}% — "
+                  f"ContextEngine will compress on next turn.")
 
         # ── Mini per-turn stats ───────────────────────────────────────
         latency_ms = (turn_end - turn_start) * 1000
@@ -251,8 +248,8 @@ class PowerChatSession:
 ├─ Context Budget ────────────────────────────────────────
 │  Model          : {self.model_name}
 │  Context window : {self.budget.context_window:,} tokens
-│  Used (est.)    : {self.budget.used:,} tokens  ({self.budget.usage_percent:.1f}%)
-│  Remaining      : {self.budget.remaining:,} tokens
+│  Used (est.)    : {self.budget.get_usage().total:,} tokens  ({self.budget.get_usage_ratio()*100:.1f}%)
+│  Remaining      : {self.budget.get_remaining_tokens():,} tokens
 ├─ Tool Scheduler ────────────────────────────────────────
 │  Total calls    : {sched_stats.get('total', 0)}
 │  Deduped        : {sched_stats.get('skipped_dedup', 0)}
@@ -264,21 +261,21 @@ class PowerChatSession:
 └─────────────────────────────────────────────────────────""")
 
     def show_budget(self) -> None:
-        status = self.budget.get_status()
-        breakdown = status.get("breakdown", {})
-        pct = status.get("breakdown_percent", {})
+        usage = self.budget.get_usage()
+        remaining = self.budget.get_remaining_tokens()
+        ratio = self.budget.get_usage_ratio()
         print(f"""
 Context Window Budget  ({self.model_name})
-  Window    : {status['context_window']:>10,} tokens
-  Used      : {status['used']:>10,} tokens  ({status['usage_percent']:.1f}%)
-  Remaining : {status['remaining']:>10,} tokens
-  Compress? : {status['should_compress']}   Warn? {status['should_warn']}
+  Window    : {self.budget.context_window:>10,} tokens
+  Used      : {usage.total:>10,} tokens  ({ratio*100:.1f}%)
+  Remaining : {remaining:>10,} tokens
+  Compress? : {self.budget.should_compress()}   Warn? {self.budget.should_warn()}
 
   By category:
-    messages     : {breakdown.get('messages', 0):>8,}  ({pct.get('messages', 0):.1f}%)
-    tool_results : {breakdown.get('tool_results', 0):>8,}  ({pct.get('tool_results', 0):.1f}%)
-    system       : {breakdown.get('system', 0):>8,}  ({pct.get('system', 0):.1f}%)
-    other        : {breakdown.get('other', 0):>8,}  ({pct.get('other', 0):.1f}%)""")
+    messages     : {usage.by_category.get(TokenCategory.MESSAGES, 0):>8,}
+    tool_results : {usage.by_category.get(TokenCategory.TOOL_RESULTS, 0):>8,}
+    system       : {usage.by_category.get(TokenCategory.SYSTEM, 0):>8,}
+    tools        : {usage.by_category.get(TokenCategory.TOOLS, 0):>8,}""")
 
     async def show_tools(self) -> None:
         tools = await self.agent.get_all_tools()
@@ -325,7 +322,6 @@ async def main() -> None:
         tools=True,
         telemetry=show_telemetry,
         memory=False,
-        context_compression=True,   # ContextMiddleware auto-summarises long history
         debug=False,
     )
 

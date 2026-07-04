@@ -3,7 +3,7 @@ RuntimeConfig: Centralized configuration for the agentic runtime.
 
 This module consolidates all thresholds previously scattered across the codebase:
 - logicore/agents/agent.py: max_iterations=40, 36000 chars prompt cap, 12000 chars tool result
-- logicore/memory/context_middleware.py: 100000 token threshold
+- logicore/context_engine: context window management with masking/compression/truncation
 - logicore/agents/agent.py: 1s retry delay, HTTP timeout 20s
 - And 8+ other hardcoded values
 
@@ -34,6 +34,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Any, List
 from enum import Enum
+
+
+def _get_canonical_model_windows() -> Dict[str, int]:
+    """Get model context windows from the canonical source."""
+    from logicore.context_engine.token_estimator import MODEL_CONTEXT_WINDOWS
+    return dict(MODEL_CONTEXT_WINDOWS)
 
 
 class RecoveryEscalationLevel(Enum):
@@ -163,6 +169,14 @@ class ToolConfig:
     
     # Deduplication window (consider duplicate if same call within N seconds)
     dedup_window_seconds: int = 5
+    
+    # --- Layer 1: Persistent Result Cache ---
+    result_cache_max_entries: int = 500
+    result_cache_ttl_seconds: int = 600
+    
+    # --- Layer 3: File State Cache ---
+    file_cache_max_entries: int = 100
+    file_cache_max_bytes: int = 25 * 1024 * 1024  # 25MB
 
 
 @dataclass 
@@ -317,52 +331,13 @@ class RuntimeConfig:
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
     
-    # Model-specific context windows (model_name -> token_limit)
-    model_context_windows: Dict[str, int] = field(default_factory=lambda: {
-        # OpenAI
-        "gpt-4": 8192,
-        "gpt-4-32k": 32768,
-        "gpt-4-turbo": 128000,
-        "gpt-4o": 128000,
-        "gpt-4o-mini": 128000,
-        "gpt-3.5-turbo": 16385,
-        # Anthropic
-        "claude-3-opus": 200000,
-        "claude-3-sonnet": 200000,
-        "claude-3-haiku": 200000,
-        "claude-3.5-sonnet": 200000,
-        # Google
-        "gemini-pro": 32000,
-        "gemini-1.5-pro": 1000000,
-        "gemini-1.5-flash": 1000000,
-        # Ollama defaults (conservative)
-        "llama3": 8192,
-        "llama3.1": 128000,
-        "mistral": 8192,
-        "mixtral": 32768,
-        "qwen": 32768,
-        # Default fallback
-        "default": 4096,
-    })
+    # Model-specific context windows (canonical source: context_engine.token_estimator)
+    model_context_windows: Dict[str, int] = field(default_factory=lambda: _get_canonical_model_windows())
     
     def get_model_context_window(self, model_name: str) -> int:
         """Get context window size for a model, with fallback to default."""
-        # Try exact match
-        if model_name in self.model_context_windows:
-            return self.model_context_windows[model_name]
-        
-        # Try prefix match (e.g., "gpt-4-turbo-preview" -> "gpt-4-turbo")
-        for known_model, window in self.model_context_windows.items():
-            if model_name.startswith(known_model):
-                return window
-        
-        # Try contains match (e.g., "my-custom-llama3-model" -> "llama3")
-        model_lower = model_name.lower()
-        for known_model, window in self.model_context_windows.items():
-            if known_model.lower() in model_lower:
-                return window
-        
-        return self.model_context_windows.get("default", 4096)
+        from logicore.context_engine.token_estimator import get_model_context_window
+        return get_model_context_window(model_name)
     
     def get_compression_threshold_for_model(self, model_name: str) -> int:
         """Calculate compression threshold based on model's context window."""
@@ -432,6 +407,10 @@ class RuntimeConfig:
                 execution_timeout_seconds=get_env_int("LOGICORE_TOOL_TIMEOUT", getattr(settings, "TOOL_EXECUTION_TIMEOUT", 60)),
                 default_cooldown_seconds=get_env_int("LOGICORE_TOOL_COOLDOWN", getattr(settings, "TOOL_DEFAULT_COOLDOWN", 60)),
                 enable_deduplication=get_env_bool("LOGICORE_TOOL_DEDUP", getattr(settings, "TOOL_ENABLE_DEDUPLICATION", True)),
+                result_cache_max_entries=get_env_int("LOGICORE_DEDUP_RESULT_CACHE_MAX", getattr(settings, "TOOL_DEDUP_RESULT_CACHE_MAX", 500)),
+                result_cache_ttl_seconds=get_env_int("LOGICORE_DEDUP_RESULT_CACHE_TTL", getattr(settings, "TOOL_DEDUP_RESULT_CACHE_TTL", 600)),
+                file_cache_max_entries=get_env_int("LOGICORE_DEDUP_FILE_CACHE_MAX", getattr(settings, "TOOL_DEDUP_FILE_CACHE_MAX", 100)),
+                file_cache_max_bytes=get_env_int("LOGICORE_DEDUP_FILE_CACHE_MAX_BYTES", getattr(settings, "TOOL_DEDUP_FILE_CACHE_MAX_BYTES", 25 * 1024 * 1024)),
             ),
             retry=RetryConfig(
                 max_attempts=get_env_int("LOGICORE_RETRY_MAX_ATTEMPTS", getattr(settings, "RETRY_MAX_ATTEMPTS", 3)),

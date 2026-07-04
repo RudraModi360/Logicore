@@ -257,6 +257,18 @@ class AgentrySettings:
     TOOL_ENABLE_DEDUPLICATION: bool = field(default_factory=lambda: _get_bool("TOOL_ENABLE_DEDUPLICATION", True, "runtime.tool", "enable_deduplication"))
     """Enable tool call deduplication via content hash"""
     
+    TOOL_DEDUP_RESULT_CACHE_MAX: int = field(default_factory=lambda: _get_int("TOOL_DEDUP_RESULT_CACHE_MAX", 500, "runtime.tool.dedup", "result_cache_max"))
+    """Max entries in persistent result cache (Layer 1)"""
+    
+    TOOL_DEDUP_RESULT_CACHE_TTL: int = field(default_factory=lambda: _get_int("TOOL_DEDUP_RESULT_CACHE_TTL", 600, "runtime.tool.dedup", "result_cache_ttl"))
+    """TTL for persistent result cache entries in seconds (Layer 1)"""
+    
+    TOOL_DEDUP_FILE_CACHE_MAX: int = field(default_factory=lambda: _get_int("TOOL_DEDUP_FILE_CACHE_MAX", 100, "runtime.tool.dedup", "file_cache_max"))
+    """Max entries in file state cache (Layer 3)"""
+    
+    TOOL_DEDUP_FILE_CACHE_MAX_BYTES: int = field(default_factory=lambda: _get_int("TOOL_DEDUP_FILE_CACHE_MAX_BYTES", 26214400, "runtime.tool.dedup", "file_cache_max_bytes"))
+    """Max total bytes for file state cache (Layer 3, default 25MB)"""
+    
     TOOL_DEFAULT_COOLDOWN: int = field(default_factory=lambda: _get_int("TOOL_DEFAULT_COOLDOWN", 60, "runtime.tool", "default_cooldown"))
     """Default cooldown duration in seconds after loop detection"""
     

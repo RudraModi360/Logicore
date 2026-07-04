@@ -45,7 +45,8 @@ from logicore.providers.ollama_provider import OllamaProvider
 from logicore.runtime.scheduler import ToolScheduler
 from logicore.runtime import RuntimeConfig, ToolConfig
 from logicore.runtime.loop_detection import LoopDetectionEngine, LoopDetectionResult
-from logicore.context import TokenBudget, estimate_message_tokens
+from logicore.context_engine.token_estimator import estimate_tokens, estimate_message_tokens
+from logicore.runtime.context.token_budget import TokenBudget, TokenCategory
 
 # === NEW: Runtime Feature Imports ===
 from logicore.runtime.reasoning import ReasoningLevel, ReasoningController, ReasoningConfig
@@ -100,8 +101,8 @@ class ChatSession:
         
         # Token budget
         self.budget = TokenBudget(
+            config=RuntimeConfig.from_settings(),
             model_name=model_name,
-            compression_threshold=0.85,
         )
         
         # Tool scheduler (for future tool execution)
@@ -331,11 +332,11 @@ class ChatSession:
             # (In production, use actual token counts from provider)
             estimated = estimate_message_tokens([{"role": "user", "content": user_input}])
             estimated += estimate_message_tokens([{"role": "assistant", "content": response or ""}])
-            from logicore.context.token_budget import TokenCategory
-            self.budget.add_usage(TokenCategory.MESSAGES, estimated)
+            from logicore.runtime.context.token_budget import TokenCategory
+            self.budget.add_tokens(TokenCategory.MESSAGES, estimated)
             
             if self.budget.should_warn():
-                print(f"[Budget] Warning: {self.budget.usage_percent:.1f}% of context used")
+                print(f"[Budget] Warning: {self.budget.get_usage_ratio()*100:.1f}% of context used")
             
             return response
             
@@ -362,7 +363,7 @@ class ChatSession:
             "reasoning": self.reasoning.get_state_summary(),
             "tasks": task_summary,
             "plan_mode": self._in_plan_mode,
-            "budget": self.budget.get_status(),
+            "budget": self.budget.to_dict(),
             "scheduler": self.scheduler.get_statistics(),
         }
 

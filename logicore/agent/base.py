@@ -8,6 +8,7 @@ from datetime import datetime
 from logicore.providers.base import LLMProvider
 from logicore.gateway.gateway import ProviderGateway, get_gateway_for_provider
 from logicore.tools import ALL_TOOL_SCHEMAS, SAFE_TOOLS, DANGEROUS_TOOLS, execute_tool
+from logicore.tools.dedup import result_cache, semantic_analyzer, hash_tool_call
 from logicore.config.prompts import get_system_prompt
 from logicore.skills import Skill, SkillLoader
 from logicore.telemetry.tracker import TelemetryTracker
@@ -45,7 +46,6 @@ class Agent:
         max_iterations: int = 40,
         telemetry: bool = False,
         memory: bool = False,
-        context_compression: bool = False,
         skills: list = None,
         workspace_root: str = None,
         reasoning_level: str = "medium",
@@ -80,12 +80,16 @@ class Agent:
         
         self.memory_enabled = False  # Memory removed
 
-        # Context compression middleware (summarizes old messages when context grows long)
-        self.context_compression = context_compression
-        self.context_middleware = None
-        if context_compression:
-            from logicore.context.compressor import ContextMiddleware
-            self.context_middleware = ContextMiddleware(self.provider)
+        # Context engine — unified context management (replaces legacy ContextMiddleware)
+        from logicore.context_engine import ContextEngine
+        from logicore.runtime.config import RuntimeConfig
+        _rt_config = RuntimeConfig.from_settings()
+        self.context_engine = ContextEngine(
+            config=_rt_config,
+            llm_provider=self.provider,
+            model_name=getattr(self, 'model_name', 'default'),
+            debug=debug,
+        )
 
         # === Reasoning Level Control ===
         # Supports: "minimal", "low", "medium", "high", "deep"
@@ -340,12 +344,9 @@ class Agent:
 
         max_prompt_chars = 36000
         if len(self.default_system_message) > max_prompt_chars:
-            self.default_system_message = (
-                self.default_system_message[:max_prompt_chars]
-                + "\n\n[System prompt truncated for context efficiency.]"
+            self.default_system_message = self.context_engine.prompt_assembler.assemble(
+                self.default_system_message, "", "", 0
             )
-            if self.debug:
-                print(f"[Agent] ⚠️ System prompt exceeded {max_prompt_chars} chars and was truncated")
         
         # Update system message in all existing sessions
         for session in self.sessions.values():
@@ -473,43 +474,12 @@ class Agent:
         }
 
     def _tool_signature(self, name: str, args: Dict[str, Any]) -> str:
-        """Create a stable signature for tool deduplication checks."""
-        try:
-            args_json = json.dumps(args or {}, sort_keys=True, ensure_ascii=False)
-        except Exception:
-            args_json = str(args)
-        return f"{name}::{args_json}"
+        """Create a stable SHA-256 signature for tool deduplication checks."""
+        return hash_tool_call(name, args)
 
     def _serialize_tool_result_for_model(self, tool_name: str, result: Dict[str, Any], reused: bool = False) -> str:
-        """Serialize tool output for model context while keeping payload bounded and explicit."""
-        payload = {
-            "tool": tool_name,
-            "success": bool(result.get("success", False)),
-            "reused_cached_result": reused,
-        }
-
-        if result.get("error"):
-            payload["error"] = str(result.get("error"))
-
-        if "content" in result:
-            payload["content"] = result.get("content")
-
-        serialized = json.dumps(payload, ensure_ascii=False)
-        max_chars = 12000
-        if len(serialized) <= max_chars:
-            return serialized
-
-        content_preview = str(result.get("content", ""))[:4000]
-        compact_payload = {
-            "tool": tool_name,
-            "success": bool(result.get("success", False)),
-            "reused_cached_result": reused,
-            "error": str(result.get("error")) if result.get("error") else None,
-            "content_preview": content_preview,
-            "_truncated": True,
-            "_note": "Tool output truncated for context efficiency. Use this result before recalling the same tool with identical arguments.",
-        }
-        return json.dumps(compact_payload, ensure_ascii=False)
+        """Serialize tool output for model context. Delegates to ContextEngine."""
+        return self.context_engine.distill_tool_result(tool_name, result, reused)
 
     def _normalize_tool_paths(self, session: AgentSession, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize bare file paths against recent tool directory context."""
@@ -1169,18 +1139,19 @@ class Agent:
         reminder_hint = self._build_reminder_routing_hint(text_for_memory, tool_names)
         reminder_hint_added = False
         if reminder_hint:
-            session.messages.insert(-1, {
-                "role": "system",
-                "content": reminder_hint
-            })
+            self.context_engine.inject_hint(session.messages, reminder_hint)
             reminder_hint_added = True
 
-        tool_result_cache: Dict[str, Dict[str, Any]] = {}
+        # Layer 1: Persistent result cache (replaces ephemeral per-chat dict)
+        # Shared across chat() calls within the same process for cross-turn reuse
+        local_result_cache: Dict[str, Dict[str, Any]] = {}  # fallback for non-success results
 
         # Pre-compute system chars once (system messages don't change)
-        _system_chars = sum(len(str(m.get("content", ""))) for m in session.messages if m.get("role") == "system")
+        _system_chars = self.context_engine.token_estimator.count_tokens(
+            " ".join(str(m.get("content", "")) for m in session.messages if m.get("role") == "system")
+        )
         _message_chars = 0
-        _tools_chars = len(json.dumps(all_tools)) if all_tools else 0
+        _tools_chars = self.context_engine.token_estimator.count_tokens(json.dumps(all_tools)) if all_tools else 0
         _last_msg_count = 0
 
         for i in range(self.max_iterations):
@@ -1199,9 +1170,10 @@ class Agent:
                 # Prepare messages for provider: strip images if vision not supported
                 llm_messages = session.messages
 
-                # Apply context compression if enabled (summarizes old messages when context grows long)
-                if self.context_compression and self.context_middleware:
-                    llm_messages = await self.context_middleware.manage_context(llm_messages)
+                # Apply context management pipeline (masking → compression → truncation)
+                _ctx_result, llm_messages = await self.context_engine.prepare_messages(
+                    llm_messages, session_id=session_id
+                )
 
 
 
@@ -1307,6 +1279,35 @@ class Agent:
                     content = getattr(response, 'content', str(response))
                     tool_calls = getattr(response, 'tool_calls', [])
                 
+                # RECOVERY: If response is empty but we've been doing tool calls, prompt to continue
+                if (not content or content.strip() == "") and not tool_calls and i > 0 and self.execution_log:
+                    if self.debug:
+                        print(f"[Agent] ⚠️ Empty response at iteration {i+1}. Injecting continuation prompt...")
+                    
+                    # Inject a prompt asking the LLM to continue or summarize
+                    continuation_prompt = (
+                        "You were exploring the codebase and executing tools. Please continue your analysis "
+                        "or provide a summary of your findings so far. Do not leave the response empty."
+                    )
+                    session.add_message({"role": "user", "content": continuation_prompt})
+                    
+                    # Get a new response
+                    try:
+                        continuation_response = await self.gateway.chat(session.messages, tools=all_tools)
+                        if isinstance(continuation_response, NormalizedMessage):
+                            content = continuation_response.content
+                            tool_calls = continuation_response.tool_calls
+                        else:
+                            content = getattr(continuation_response, 'content', str(continuation_response))
+                            tool_calls = getattr(continuation_response, 'tool_calls', [])
+                        
+                        if self.debug and content:
+                            print(f"[Agent] 📝 Continuation response: {len(content)} chars")
+                    except Exception as cont_err:
+                        if self.debug:
+                            print(f"[Agent] ⚠️ Continuation failed: {cont_err}")
+                        # If continuation fails, we'll handle empty response in final handling
+                
                 if self.debug:
                     print(f"[Agent] Response parsed - Content length: {len(content) if content else 0}, Tool calls: {len(tool_calls) if tool_calls else 0}")
                     if content:
@@ -1381,11 +1382,7 @@ class Agent:
             # 3. Handle Final Response
             if not tool_calls:
                 if reminder_hint_added:
-                    for idx in range(len(session.messages) - 1, -1, -1):
-                        msg = session.messages[idx]
-                        if msg.get("role") == "system" and msg.get("content") == reminder_hint:
-                            del session.messages[idx]
-                            break
+                    self.context_engine.remove_hint(session.messages, reminder_hint)
 
                 if (
                     self._is_reminder_like_request(text_for_memory)
@@ -1398,6 +1395,42 @@ class Agent:
                     )
 
                 # Memory system has been removed
+
+                # RECOVERY: If response is empty after extensive tool use, synthesize findings
+                if (not content or content.strip() == "") and self.execution_log and len(self.execution_log) > 3:
+                    if self.debug:
+                        print(f"[Agent] ⚠️ Empty response after {len(self.execution_log)} execution steps. Synthesizing findings...")
+                    
+                    # Try to get LLM to synthesize findings
+                    try:
+                        synthesis_prompt = (
+                            "You have completed exploring the codebase. Based on your execution history below, "
+                            "provide a comprehensive summary of your findings. Include:\n"
+                            "1. What you discovered about the codebase structure\n"
+                            "2. Key files and their purposes\n"
+                            "3. Any issues or patterns you noticed\n"
+                            "4. Answers to the user's original question\n\n"
+                            f"Execution History:\n" + "\n".join(self.execution_log[-30:])
+                        )
+                        session.add_message({"role": "user", "content": synthesis_prompt})
+                        synthesis_response = await self.gateway.chat(session.messages, tools=None)
+                        
+                        if isinstance(synthesis_response, NormalizedMessage):
+                            content = synthesis_response.content
+                        else:
+                            content = getattr(synthesis_response, 'content', str(synthesis_response))
+                        
+                        if self.debug:
+                            print(f"[Agent] 📝 Synthesized response: {len(content)} chars")
+                    except Exception as synth_err:
+                        if self.debug:
+                            print(f"[Agent] ⚠️ Synthesis failed: {synth_err}")
+                        # Fall back to execution log summary
+                        content = self._generate_execution_summary()
+                
+                # If still empty, generate from execution log
+                if not content or content.strip() == "":
+                    content = self._generate_execution_summary()
 
                 if self.debug:
                         print(f"[Agent] 🧠 Memory stored for session '{session_id}'")
@@ -1546,14 +1579,31 @@ class Agent:
                     # Track denied tool call in summary
                     self.execution_log.append(f"Tool {name} was denied. Reason: {result.get('error', 'Denied by user')}")
                 else:
-                    cached_result = tool_result_cache.get(signature)
+                    # Layer 1: Check persistent result cache (exact signature match)
+                    cached_result = result_cache.get(signature)
                     reused_cached_result = bool(cached_result and cached_result.get("success"))
+
+                    # Layer 2: Semantic fallback — if no exact match, check semantic equivalence
+                    if not reused_cached_result:
+                        semantic_key = semantic_analyzer.get_semantic_key(name, args)
+                        if semantic_key:
+                            # Search local cache for semantic match
+                            for cached_sig, cached_val in local_result_cache.items():
+                                if (
+                                    cached_val.get("success")
+                                    and semantic_analyzer.get_semantic_key(name, cached_val.get("_args", {})) == semantic_key
+                                ):
+                                    cached_result = cached_val
+                                    reused_cached_result = True
+                                    if self.debug:
+                                        print(f"[Agent] 🔍 Semantic dedup: '{name}' matches earlier call (different args, same meaning)")
+                                    break
 
                     if reused_cached_result:
                         result = cached_result
                         if self.debug:
                             print(f"[Agent] ♻️ Reusing cached tool result for '{name}' with identical arguments")
-                        self.execution_log.append(f"Tool {name} reused cached result for identical arguments")
+                        self.execution_log.append(f"Tool {name} reused cached result (dedup)")
                     else:
                         # Record tool call start time
                         start_time_tool = time.time()
@@ -1586,7 +1636,9 @@ class Agent:
                             # Retry edit once with original args
                             result = self._normalize_tool_result(name, await self._execute_tool(name, args, session_id))
 
-                        tool_result_cache[signature] = result
+                        # Store in persistent cache (cross-turn) and local cache (semantic lookup)
+                        result_cache.set(signature, result)
+                        local_result_cache[signature] = {**result, "_args": args}
                     
                     # Check if tool execution was successful
                     is_error = not bool(result.get("success", True))
@@ -1826,6 +1878,53 @@ class Agent:
         if not self.execution_log:
             return None
         return json.dumps({"log": self.execution_log}, indent=2)
+
+    def _generate_execution_summary(self) -> str:
+        """Generate a human-readable summary from the execution log when LLM fails to respond."""
+        if not self.execution_log:
+            return "No execution steps were recorded."
+        
+        summary_parts = [
+            "## Execution Summary",
+            "",
+            f"I completed **{len(self.execution_log)} execution steps** but encountered an issue generating the final response. Here's what was accomplished:",
+            ""
+        ]
+        
+        # Group execution steps by type
+        tool_calls = [log for log in self.execution_log if "TOOL CALL" in log or "SUCCEEDED" in log or "FAILED" in log]
+        errors = [log for log in self.execution_log if "FAILED" in log or "Error" in log]
+        
+        if tool_calls:
+            summary_parts.append("### Tools Used")
+            summary_parts.append("```")
+            # Show last 20 tool-related entries
+            for entry in tool_calls[-20:]:
+                summary_parts.append(entry)
+            summary_parts.append("```")
+            summary_parts.append("")
+        
+        if errors:
+            summary_parts.append("### Issues Encountered")
+            summary_parts.append("```")
+            for entry in errors[-10:]:
+                summary_parts.append(entry)
+            summary_parts.append("```")
+            summary_parts.append("")
+        
+        # Add execution log
+        summary_parts.append("### Full Execution Log")
+        summary_parts.append("```")
+        # Show last 30 entries
+        for entry in self.execution_log[-30:]:
+            summary_parts.append(entry)
+        summary_parts.append("```")
+        
+        summary_parts.append("")
+        summary_parts.append("---")
+        summary_parts.append("*Note: The LLM failed to generate a synthesis. This summary was auto-generated from the execution log.*")
+        
+        return "\n".join(summary_parts)
 
     async def cleanup(self):
         """Clean up resources."""
