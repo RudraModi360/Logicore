@@ -21,7 +21,7 @@ class OpenAIProvider(LLMProvider):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OpenAI API key is required. Set api_key or OPENAI_API_KEY env var.")
-        self.client = OpenAI(api_key=self.api_key, **kwargs)
+        self.client = OpenAI(api_key=self.api_key, timeout=120.0, **kwargs)
 
     def get_model_name(self) -> str:
         return self.model_name

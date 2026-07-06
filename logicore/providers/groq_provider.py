@@ -18,7 +18,7 @@ class GroqProvider(LLMProvider):
         self.api_key = api_key or os.environ.get("GROQ_API_KEY")
         if not self.api_key:
             raise ValueError("Groq API key is required.")
-        self.client = Groq(api_key=self.api_key)
+        self.client = Groq(api_key=self.api_key, timeout=120.0)
 
     def get_model_name(self) -> str:
         return self.model_name

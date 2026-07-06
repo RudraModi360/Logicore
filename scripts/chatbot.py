@@ -44,6 +44,7 @@ BANNER = """
 HELP_TEXT = """
 Commands (type in chat or use /):
   /agent [type]        — Switch agent (smart, basic, copilot, mcp, base)
+  /provider           — Configure LLM provider (ollama, openai, azure, groq, gemini, custom)
   /tools               — List all loaded tools
   /tool <name>         — Test a tool (e.g., /tool datetime)
   /skills              — Show loaded skills
@@ -54,6 +55,10 @@ Commands (type in chat or use /):
   /new                 — Start a new session
   /mode <solo|project> — Switch agent mode (SmartAgent only)
   /raw <text>          — Send raw text bypassing enrichment
+
+  --- Agent Progress (Auto-managed by Agent) ---
+  /tasks               — List all tasks agent is working on
+  /plan                — View current plan (if agent is in plan mode)
 
   --- MCP Integration ---
   /mcp load <path>     — Load MCP servers from mcp.json
@@ -85,12 +90,27 @@ Commands (type in chat or use /):
   /help                — Show this help
   /quit                — Exit
 
+Keyboard shortcuts:
+  Ctrl+C               — Cancel current interaction (keeps program running)
+  Ctrl+D               — Exit program
+
 Agent Types:
-  smart   — SmartAgent: General reasoning with web search, notes, datetime, bash, cron
+  smart   — SmartAgent: Full agentic toolkit (auto-thinks, auto-creates tasks, auto-tracks progress)
   basic   — BasicAgent: Generic customizable agent (minimal tools)
   copilot — CopilotAgent: Coding-focused with filesystem & execution tools
   mcp     — MCPAgent: MCP-enhanced with deferred tool loading
   base    — Agent: Base agent with full tool support
+
+Providers:
+  ollama   — Local Ollama server (default). Needs: model_name
+  openai   — OpenAI API. Needs: model_name, api_key
+  azure    — Azure OpenAI/AI. Needs: model_name, api_key, endpoint
+  groq     — Groq API. Needs: model_name, api_key
+  gemini   — Google Gemini. Needs: model_name, api_key
+  custom   — Any OpenAI-compatible API. Needs: model_name, endpoint
+
+  Quick setup:
+    /provider quick custom mimo-v2.5-free https://opencode.ai/zen/v1 sk-xxx
 """
 
 
@@ -257,6 +277,8 @@ class Chatbot:
         self.sandbox_active = False
         self.sandbox_trusted_paths: List[str] = []
         self.sandbox_deny_all_local = False
+        # Provider configuration (for custom/azure endpoints)
+        self.provider_config: Dict[str, Any] = {}
         self._init_agent()
         self._init_subsystems()
 
@@ -275,8 +297,11 @@ class Chatbot:
         config = self.AGENT_TYPES[agent_type]
         agent_class_name = config["class"]
 
+        # Build LLM - instantiate actual provider class if config exists
+        llm = self._build_provider()
+
         common_kwargs = {
-            "llm": self.provider_name,
+            "llm": llm,
             "model": self.model_name,
             "debug": True,
             "telemetry": True,
@@ -290,7 +315,7 @@ class Chatbot:
             agent = BasicAgent(
                 name="TestBot",
                 description="A test agent for validation",
-                provider=self.provider_name,
+                provider=llm,
                 model=self.model_name,
                 debug=True,
                 telemetry=True,
@@ -299,7 +324,7 @@ class Chatbot:
             )
         elif agent_class_name == "CopilotAgent":
             agent = CopilotAgent(
-                llm=self.provider_name,
+                llm=llm,
                 model=self.model_name,
                 debug=True,
                 telemetry=True,
@@ -307,7 +332,7 @@ class Chatbot:
             )
         elif agent_class_name == "MCPAgent":
             agent = MCPAgent(
-                provider=self.provider_name,
+                provider=llm,
                 model=self.model_name,
                 debug=True,
                 telemetry=True,
@@ -315,7 +340,7 @@ class Chatbot:
             )
         elif agent_class_name == "Agent":
             agent = Agent(
-                llm=self.provider_name,
+                llm=llm,
                 model=self.model_name,
                 debug=True,
                 telemetry=True,
@@ -332,6 +357,64 @@ class Chatbot:
 
         self.current_agent_type = agent_type
         return agent
+
+    def _build_provider(self):
+        """
+        Build and return an LLM provider instance.
+        
+        If provider_config has settings, instantiates the actual provider class.
+        Otherwise, returns the provider name string (let agent resolve it).
+        """
+        if not self.provider_config:
+            return self.provider_name
+
+        provider_name = self.provider_name.lower()
+
+        try:
+            if provider_name == "custom":
+                from logicore.providers.custom_provider import CustomProvider
+                return CustomProvider(
+                    model_name=self.provider_config.get("model_name", self.model_name),
+                    api_key=self.provider_config.get("api_key"),
+                    endpoint=self.provider_config["endpoint"],
+                )
+            elif provider_name == "azure":
+                from logicore.providers.azure_provider import AzureProvider
+                return AzureProvider(
+                    model_name=self.provider_config.get("model_name", self.model_name),
+                    api_key=self.provider_config.get("api_key"),
+                    endpoint=self.provider_config.get("endpoint"),
+                    api_version=self.provider_config.get("api_version"),
+                )
+            elif provider_name == "openai":
+                from logicore.providers.openai_provider import OpenAIProvider
+                return OpenAIProvider(
+                    model_name=self.provider_config.get("model_name", self.model_name),
+                    api_key=self.provider_config.get("api_key"),
+                )
+            elif provider_name == "groq":
+                from logicore.providers.groq_provider import GroqProvider
+                return GroqProvider(
+                    model_name=self.provider_config.get("model_name", self.model_name),
+                    api_key=self.provider_config.get("api_key"),
+                )
+            elif provider_name == "gemini":
+                from logicore.providers.gemini_provider import GeminiProvider
+                return GeminiProvider(
+                    model_name=self.provider_config.get("model_name", self.model_name),
+                    api_key=self.provider_config.get("api_key"),
+                )
+            elif provider_name == "ollama":
+                from logicore.providers.ollama_provider import OllamaProvider
+                return OllamaProvider(
+                    model_name=self.provider_config.get("model_name", self.model_name),
+                )
+            else:
+                return self.provider_name
+        except Exception as e:
+            print(f"\n[Provider Error] Failed to initialize {provider_name}: {e}")
+            print("Falling back to default provider resolution.")
+            return self.provider_name
 
     def _apply_custom_tool(self, agent, tool_info: Dict[str, Any]):
         """Apply a custom tool definition to an agent instance."""
@@ -583,10 +666,18 @@ class Chatbot:
                 sandbox_status += f" | Trusted: {len(self.sandbox_trusted_paths)} paths"
         else:
             sandbox_status = "inactive"
+
+        # Provider details
+        provider_type = self.provider_name
+        if self.provider_config:
+            endpoint = self.provider_config.get("endpoint", "N/A")
+            if endpoint and endpoint != "N/A":
+                provider_type += f" @ {endpoint}"
+
         return (
             f"\n--- Agent Config ---\n"
             f"  Agent type: {self.current_agent_type} ({agent_config.get('name', type(self.agent).__name__)})\n"
-            f"  Provider: {self.provider_name}\n"
+            f"  Provider: {provider_type}\n"
             f"  Model: {self.model_name}\n"
             f"  Session: {self.session_id}\n"
             f"  Tools loaded: {self._get_agent_tool_count()}\n"
@@ -836,6 +927,14 @@ class Chatbot:
 
     # --- Main Loop ---
 
+    def _cleanup(self):
+        """Centralized cleanup for exit."""
+        self.sandbox_active = False
+        self.sandbox_trusted_paths = []
+        self.sandbox_deny_all_local = False
+        self._clear_sandbox_callbacks()
+        self.sandbox.cleanup()
+
     async def start(self):
         print(BANNER)
         print(HELP_TEXT)
@@ -845,21 +944,29 @@ class Chatbot:
                 user_input = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: input("\nYou: ").strip()
                 )
-            except (EOFError, KeyboardInterrupt):
-                print("\nCleaning up...")
-                self.sandbox_active = False
-                self.sandbox_trusted_paths = []
-                self.sandbox_deny_all_local = False
-                self._clear_sandbox_callbacks()
-                self.sandbox.cleanup()
+            except EOFError:
+                # Ctrl+D — exit program
+                print("\n")
+                self._cleanup()
                 print("Bye!")
-                break
+                sys.exit(0)
+            except KeyboardInterrupt:
+                # Ctrl+C during input — cancel input, show fresh prompt
+                print("\n^C")
+                continue
 
             if not user_input:
                 continue
 
             if user_input.startswith("/"):
-                await self._handle_command(user_input)
+                try:
+                    await self._handle_command(user_input)
+                except KeyboardInterrupt:
+                    print("\n^C")
+                except EOFError:
+                    self._cleanup()
+                    print("Bye!")
+                    sys.exit(0)
                 continue
 
             # Inject sandbox context if sandbox mode is active
@@ -879,6 +986,13 @@ class Chatbot:
                     streaming_funct=lambda token: print(token, end="", flush=True),
                 )
                 print()
+            except KeyboardInterrupt:
+                # Ctrl+C during agent execution — cancel current interaction
+                print("\n^C — interaction cancelled.")
+            except EOFError:
+                self._cleanup()
+                print("Bye!")
+                sys.exit(0)
             except Exception as e:
                 print(f"\n[Error] {e}")
 
@@ -973,6 +1087,10 @@ class Chatbot:
                 print(f"\nUsage: /agent <type>")
                 print(f"Types: {', '.join(self.AGENT_TYPES.keys())}")
 
+        # --- Provider Configuration ---
+        elif command == "/provider":
+            await self._handle_provider(arg)
+
         # --- MCP Integration ---
         elif command == "/mcp":
             sub = arg.strip().lower()
@@ -1018,11 +1136,252 @@ class Chatbot:
             result = self._add_custom_tool_from_file(arg.strip())
             print(result)
 
+        # --- Agent Progress (View Only) ---
+        elif command == "/tasks":
+            await self._handle_tasks_view()
+        elif command == "/plan":
+            await self._handle_plan_view()
+
         # --- Sandbox ---
         elif command == "/sandbox":
             await self._handle_sandbox(arg)
         else:
             print(f"Unknown command: {command}. Type /help for available commands.")
+
+    # --- Provider Handler ---
+
+    async def _handle_provider(self, arg: str):
+        """Interactive provider configuration."""
+        sub = arg.strip().lower()
+
+        # Show current config
+        if sub == "show" or sub == "":
+            print("\n--- Provider Configuration ---")
+            print(f"  Active provider: {self.provider_name}")
+            print(f"  Model: {self.model_name}")
+            if self.provider_config:
+                print(f"  Custom config:")
+                for k, v in self.provider_config.items():
+                    # Mask API keys
+                    if "key" in k.lower() and v:
+                        display = v[:4] + "****" if len(v) > 4 else "****"
+                    else:
+                        display = v
+                    print(f"    {k}: {display}")
+            else:
+                print("  Using defaults (no custom config)")
+            print("\nProviders: ollama, openai, azure, groq, gemini, custom")
+            print("Usage:")
+            print("  /provider              — Show current config")
+            print("  /provider <name>       — Configure interactively")
+            print("  /provider reset        — Reset to defaults")
+            print("  /provider quick <name> <model> <endpoint> <key> — Quick setup")
+            return
+
+        # Reset to defaults
+        if sub == "reset":
+            self.provider_name = "ollama"
+            self.model_name = "gpt-oss:20b-cloud"
+            self.provider_config = {}
+            self._rebuild_agent()
+            print("Provider reset to defaults (ollama / gpt-oss:20b-cloud)")
+            return
+
+        # Quick setup: /provider quick <name> <model> <endpoint> <key>
+        if sub.startswith("quick"):
+            parts = arg.strip().split(maxsplit=4)
+            if len(parts) < 3:
+                print("Usage: /provider quick <name> <model> <endpoint> [api_key]")
+                print("Example: /provider quick custom mimo-v2.5-free https://opencode.ai/zen/v1 sk-xxx")
+                return
+            provider_name = parts[1]
+            model = parts[2]
+            endpoint = parts[3] if len(parts) > 3 else None
+            api_key = parts[4] if len(parts) > 4 else "not-needed"
+
+            config = {"model_name": model}
+            if endpoint:
+                config["endpoint"] = endpoint
+            if api_key:
+                config["api_key"] = api_key
+
+            self.provider_name = provider_name
+            self.model_name = model
+            self.provider_config = config
+
+            print(f"\nSwitching to {provider_name}...")
+            success = self._rebuild_agent()
+            if success:
+                print(f"Provider: {provider_name}")
+                print(f"Model: {self.model_name}")
+                if endpoint:
+                    print(f"Endpoint: {endpoint}")
+                print(f"Tools: {self._get_agent_tool_count()}")
+                print(f"Streaming: enabled")
+            else:
+                print("Failed to initialize provider.")
+            return
+
+        # Select a provider
+        valid_providers = ["ollama", "openai", "azure", "groq", "gemini", "custom"]
+        if sub not in valid_providers:
+            print(f"Invalid provider: {sub}")
+            print(f"Valid options: {', '.join(valid_providers)}")
+            return
+
+        # Interactively collect required params
+        config = {}
+        provider_name = sub
+
+        try:
+            if provider_name == "ollama":
+                model = await self._prompt_user("Model name", default=self.model_name)
+                config["model_name"] = model
+
+            elif provider_name == "openai":
+                model = await self._prompt_user("Model name", default=self.model_name)
+                api_key = await self._prompt_user("API key", required=True)
+                config["model_name"] = model
+                config["api_key"] = api_key
+
+            elif provider_name == "azure":
+                model = await self._prompt_user("Deployment name", default=self.model_name)
+                api_key = await self._prompt_user("API key", required=True)
+                endpoint = await self._prompt_user("Endpoint URL", required=True)
+                api_version = await self._prompt_user("API version (optional)", default="")
+                config["model_name"] = model
+                config["api_key"] = api_key
+                config["endpoint"] = endpoint
+                if api_version:
+                    config["api_version"] = api_version
+
+            elif provider_name == "groq":
+                model = await self._prompt_user("Model name", default=self.model_name)
+                api_key = await self._prompt_user("API key", required=True)
+                config["model_name"] = model
+                config["api_key"] = api_key
+
+            elif provider_name == "gemini":
+                model = await self._prompt_user("Model name", default=self.model_name)
+                api_key = await self._prompt_user("API key", required=True)
+                config["model_name"] = model
+                config["api_key"] = api_key
+
+            elif provider_name == "custom":
+                model = await self._prompt_user("Model name", default=self.model_name)
+                endpoint = await self._prompt_user("Endpoint URL (e.g. http://localhost:1234/v1)", required=True)
+                api_key = await self._prompt_user("API key (leave blank if not needed)", default="not-needed")
+                config["model_name"] = model
+                config["endpoint"] = endpoint
+                config["api_key"] = api_key
+
+        except (EOFError, KeyboardInterrupt):
+            print("\nProvider configuration cancelled.")
+            return
+
+        # Apply configuration
+        self.provider_name = provider_name
+        self.model_name = config.get("model_name", self.model_name)
+        self.provider_config = config
+
+        # Rebuild agent with new provider
+        print(f"\nSwitching to {provider_name}...")
+        success = self._rebuild_agent()
+        if success:
+            print(f"Provider: {provider_name}")
+            print(f"Model: {self.model_name}")
+            if "endpoint" in config:
+                print(f"Endpoint: {config['endpoint']}")
+            print(f"Tools: {self._get_agent_tool_count()}")
+            print(f"Streaming: enabled")
+        else:
+            print("Failed to initialize provider. Check your configuration.")
+
+    async def _prompt_user(self, prompt: str, default: str = None, required: bool = False) -> str:
+        """Prompt user for input with optional default."""
+        suffix = f" [{default}]" if default else ""
+        req = " (required)" if required else ""
+        
+        try:
+            value = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: input(f"  {prompt}{req}{suffix}: ").strip()
+            )
+        except (EOFError, KeyboardInterrupt):
+            raise
+
+        if not value and default:
+            return default
+        if not value and required:
+            print(f"  This field is required.")
+            return await self._prompt_user(prompt, default, required)
+        return value
+
+    def _rebuild_agent(self) -> bool:
+        """Rebuild the current agent with updated provider config, preserving state."""
+        try:
+            # Preserve session state
+            old_session_id = self.session_id
+            old_session = None
+            if hasattr(self, 'agent') and self.agent:
+                try:
+                    old_session = self.agent.get_session(old_session_id)
+                except Exception:
+                    pass
+
+            # Build new agent
+            self.agent = self._create_agent(self.current_agent_type)
+            self.session_id = old_session_id
+
+            # Restore session messages if we had them
+            if old_session and old_session.messages:
+                new_session = self.agent.get_session(old_session_id)
+                new_session.messages = old_session.messages
+
+            # Re-attach sandbox callbacks if active
+            if self.sandbox_active:
+                self._setup_sandbox_callbacks()
+
+            return True
+        except Exception as e:
+            print(f"  Error: {e}")
+            return False
+
+    # --- Task Tracking Handler ---
+
+    async def _handle_tasks_view(self):
+        """View tasks created by the agent (read-only)."""
+        try:
+            from logicore.tools.tracker import get_tracker
+            tracker = get_tracker()
+            tasks = tracker.list_tasks()
+            if not tasks:
+                print("No tasks yet. The agent will create tasks automatically for complex work.")
+            else:
+                print(f"\n--- Agent Tasks ({len(tasks)}) ---")
+                for task in tasks:
+                    status_icon = {"todo": "[ ]", "in_progress": "[>]", "done": "[x]", "open": "[ ]", "closed": "[x]"}.get(task.status, "[?]")
+                    print(f"  {status_icon} {task.id}: {task.title} ({task.status})")
+        except Exception as e:
+            print(f"Error: {e}")
+
+    async def _handle_plan_view(self):
+        """View current plan (read-only)."""
+        try:
+            from logicore.tools.plan import get_planner
+            planner = get_planner()
+            if planner.current_plan:
+                plan = planner.current_plan
+                print(f"\n--- Current Plan ---")
+                print(f"Title: {plan.title}")
+                print(f"Status: {plan.status}")
+                if plan.steps:
+                    for i, step in enumerate(plan.steps, 1):
+                        status_icon = {"pending": "[ ]", "in_progress": "[>]", "done": "[x]"}.get(step.status, "[?]")
+                        print(f"  {status_icon} {i}. {step.description}")
+            else:
+                print("No active plan. The agent will enter plan mode automatically for complex tasks.")
+        except Exception as e:
+            print(f"Error: {e}")
 
     # --- Sandbox Handler ---
 

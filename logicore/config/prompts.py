@@ -161,42 +161,90 @@ def _get_reasoning_section(reasoning_level: str = "medium") -> str:
     return level_prompts.get(reasoning_level, level_prompts["medium"])
 
 
-def _get_task_tracking_section(enabled: bool = False) -> str:
-    """Generate task tracking section for system prompt."""
+def _get_task_tracking_section(enabled: bool = True) -> str:
+    """
+    Generate task tracking section for system prompt.
+    
+    This is a CORE behavior - agents MUST autonomously manage their work.
+    Uses V2 task tools with DAG dependencies and claiming.
+    """
     if not enabled:
         return ""
     
     return """
-## Task Tracking
-You have access to task tracking tools for managing complex work:
-- Use `tracker_create` to create tasks for multi-step work
-- Use `tracker_update` to track progress (status: open → in_progress → closed)
-- Use `tracker_visualize` to see task tree and progress
-- Use `tracker_close` when tasks are complete
+## Autonomous Task Management
+**CRITICAL: You are a SELF-ORGANIZING agent. You MUST autonomously manage your work.**
 
-For complex requests:
-1. Create an EPIC task for the overall goal
-2. Break into smaller TASK items
-3. Track progress as you work
-4. Close tasks upon completion
+For ANY request that involves 3+ steps or is complex:
+
+### Step 1: PLAN & CREATE TASKS
+Use `task_create` to break down the work:
+- Create tasks for each major step
+- Use `active_form` to describe what will be shown while working (e.g., "Building login page")
+- Use `blocked_by` to set dependencies (task won't be claimable until blockers complete)
+
+### Step 2: WORK THROUGH TASKS
+- Use `task_next` to get the next available task
+- Use `task_get` with `claim=true` to claim a task
+- Do the work
+- Use `task_update` with `status="completed"` when done
+- Repeat until all tasks complete
+
+### Step 3: TRACK PROGRESS
+- Use `task_list` to show progress if user asks
+- Update `active_form` as you work for live UI feedback
+- Report completion with summary of what was done
+
+### Example Flow:
+```
+User: "Build a login page with validation"
+
+1. task_create(subject="Create login form component", active_form="Creating login form")
+2. task_create(subject="Add form validation", active_form="Adding validation", blocked_by=["1"])
+3. task_create(subject="Style with Tailwind", active_form="Styling form", blocked_by=["1"])
+
+4. task_next() → Returns task #1
+5. task_get(task_id="1", claim=true) → Claim it
+6. [Build the form]
+7. task_update(task_id="1", status="completed") → Unblocks #2 and #3
+
+8. task_next() → Returns task #2 (or #3)
+9. task_get(task_id="2", claim=true)
+10. [Add validation]
+11. task_update(task_id="2", status="completed")
+
+... and so on
+```
+
+### Key Rules:
+- ALWAYS create tasks before starting work on complex requests
+- Mark tasks completed IMMEDIATELY after finishing (don't batch)
+- Use `active_form` for live progress display
+- Use `blocked_by` for sequential dependencies
+- Use `task_next` to find what to work on next
 """
 
 
-def _get_plan_mode_section(enabled: bool = False) -> str:
-    """Generate plan mode section for system prompt."""
+def _get_plan_mode_section(enabled: bool = True) -> str:
+    """
+    Generate plan mode section for system prompt.
+    
+    This is a CORE behavior - agents MUST use plan mode for complex work.
+    """
     if not enabled:
         return ""
     
     return """
-## Plan Mode
-For complex multi-step tasks that require user approval:
-1. Use `enter_plan_mode` when facing complex work
-2. Use `submit_plan` to create a detailed execution plan
-3. Wait for user approval before proceeding
-4. Use `exit_plan_mode` after approval to begin execution
-5. Use `update_plan_progress` to track step completion
+## Plan Mode (For Complex Tasks Requiring User Approval)
+For complex multi-step tasks that are high-risk or require user sign-off:
 
-Use plan mode for: architectural changes, multi-file refactors, risky operations.
+1. Use `enter_plan_mode(reason="...")` to enter planning state
+2. Use `submit_plan(title="...", steps=["step1", "step2", ...])` to create plan
+3. Wait for user approval before proceeding
+4. Execute plan, using `update_plan_progress` to track completion
+5. Use `exit_plan_mode` when complete
+
+Use plan mode for: architectural changes, multi-file refactors, risky operations, anything that could break production.
 """
 
 
@@ -220,13 +268,100 @@ def _structured_tool_contract() -> str:
 """
 
 
+def _get_os_specific_bash_guidance() -> str:
+    """
+    Get OS-specific bash command guidance for the system prompt.
+    This helps models use correct commands for the current OS.
+    """
+    os_name = platform.system().lower()
+    
+    if os_name == 'windows':
+        return """
+## Windows PowerShell Command Reference
+**IMPORTANT: You are running on Windows. Use PowerShell commands, NOT Unix/Linux commands.**
+
+### Common PowerShell Commands:
+| Task | Unix (DON'T USE) | PowerShell (USE THIS) |
+|------|------------------|----------------------|
+| Create directory | `mkdir -p path` | `New-Item -ItemType Directory -Force -Path "path"` |
+| Remove file/dir | `rm -rf path` | `Remove-Item -Recurse -Force -Path "path"` |
+| Copy files | `cp -r src dst` | `Copy-Item -Recurse -Path "src" -Destination "dst"` |
+| Move files | `mv src dst` | `Move-Item -Path "src" -Destination "dst"` |
+| List files | `ls` | `Get-ChildItem` |
+| Read file | `cat file` | `Get-Content "file"` |
+| Create file | `touch file` | `New-Item -ItemType File -Path "file" -Force` |
+| Current dir | `pwd` | `Get-Location` |
+| Change dir | `cd path` | `Set-Location "path"` |
+| Find command | `which cmd` | `Get-Command "cmd"` |
+| Run program | `./script.sh` | `.\script.ps1` or `& "script"` |
+| Environment | `env` | `Get-ChildItem Env:` |
+| Process list | `ps aux` | `Get-Process` |
+| Kill process | `kill pid` | `Stop-Process -Id pid -Force` |
+| Clear screen | `clear` | `Clear-Host` |
+| Who am I | `whoami` | `$env:USERNAME` |
+| System info | `uname -a` | `$PSVersionTable` |
+| Current date | `date` | `Get-Date` |
+
+### PowerShell Tips:
+- Use double quotes for paths with spaces: `Set-Location "C:\My Folder"`
+- Chain commands with semicolons: `cmd1; cmd2`
+- Use `Get-Help <command>` for help on any command
+- Use `Get-Command` to list available commands
+-管道 (piping) works the same: `Get-ChildItem | Where-Object { $_.Name -like "*.py" }`
+
+### File Paths:
+- Use backslashes: `C:\\Users\\Name\\File.txt`
+- Or forward slashes work too: `C:/Users/Name/File.txt`
+- Environment variables: `$env:USERPROFILE`, `$env:TEMP`
+"""
+    else:  # Linux/Mac
+        return """
+## Linux/Mac Bash Command Reference
+**IMPORTANT: You are running on Linux/Mac. Use bash commands, NOT PowerShell commands.**
+
+### Common Bash Commands:
+| Task | PowerShell (DON'T USE) | Bash (USE THIS) |
+|------|----------------------|-----------------|
+| Create directory | `New-Item -ItemType Directory` | `mkdir -p path` |
+| Remove file/dir | `Remove-Item -Recurse` | `rm -rf path` |
+| Copy files | `Copy-Item -Recurse` | `cp -r src dst` |
+| Move files | `Move-Item` | `mv src dst` |
+| List files | `Get-ChildItem` | `ls` or `ls -la` |
+| Read file | `Get-Content` | `cat file` |
+| Create file | `New-Item -ItemType File` | `touch file` |
+| Current dir | `Get-Location` | `pwd` |
+| Change dir | `Set-Location` | `cd path` |
+| Find command | `Get-Command` | `which cmd` |
+| Environment | `Get-ChildItem Env:` | `env` or `printenv` |
+| Process list | `Get-Process` | `ps aux` |
+| Kill process | `Stop-Process -Id` | `kill pid` or `kill -9 pid` |
+| Clear screen | `Clear-Host` | `clear` or `Ctrl+L` |
+| Who am I | `$env:USERNAME` | `whoami` |
+| System info | `$PSVersionTable` | `uname -a` |
+| Current date | `Get-Date` | `date` |
+
+### Bash Tips:
+- Use quotes for paths with spaces: `cd "My Folder"`
+- Chain commands with `&&`: `cmd1 && cmd2`
+- Use `man <command>` for help on any command
+- Use `type <command>` to see what a command is
+-管道 (piping) works: `ls | grep "*.py"`
+
+### File Paths:
+- Use forward slashes: `/home/user/file.txt`
+- Home directory: `~` or `$HOME`
+- Temp directory: `/tmp`
+"""
+
+
+
 def get_system_prompt(
     model_name: str = "Unknown Model", 
     role: str = "general", 
     tools: list = None,
     reasoning_level: str = "medium",
-    task_tracking: bool = False,
-    plan_mode: bool = False,
+    task_tracking: bool = True,
+    plan_mode: bool = True,
 ) -> str:
     """
     Generates the system prompt for the AI agent.
@@ -236,8 +371,8 @@ def get_system_prompt(
         role (str): The role of the agent ('general', 'engineer', or 'copilot').
         tools (list): List of available tools (empty list by default, can be extended).
         reasoning_level (str): Reasoning depth ('minimal', 'low', 'medium', 'high', 'deep').
-        task_tracking (bool): Whether task tracking is enabled.
-        plan_mode (bool): Whether plan mode is enabled.
+        task_tracking (bool): Whether task tracking is enabled (default: True).
+        plan_mode (bool): Whether plan mode is enabled (default: True).
         
     Returns:
         str: The formatted system prompt.
@@ -267,6 +402,9 @@ Core traits:
 - Adaptive to project patterns and conventions
 {tools_section}
 {contract_section}
+
+{_get_task_tracking_section(task_tracking)}
+{_get_plan_mode_section(plan_mode)}
 
 ## Principles
 1. Understand the codebase before modifying - study structure, architecture, dependencies, and patterns
@@ -309,6 +447,9 @@ Core traits:
 {tools_section}
 {contract_section}
 
+{_get_task_tracking_section(task_tracking)}
+{_get_plan_mode_section(plan_mode)}
+
 ## Capabilities
 You excel at:
 - Writing clean, efficient, idiomatic code
@@ -337,6 +478,7 @@ You excel at:
 Help users write better code and become better developers."""
 
     else:  # General Agent
+        os_guidance = _get_os_specific_bash_guidance()
         return f"""You are an AI Assistant from the Agentry Framework. You are powered by {model_name}.
 
     ## Identity
@@ -349,6 +491,7 @@ Core traits:
 - Thoughtful - you explain your reasoning before taking action
 {tools_section}
 {contract_section}
+{os_guidance}
 {_get_reasoning_section(reasoning_level)}
 {_get_task_tracking_section(task_tracking)}
 {_get_plan_mode_section(plan_mode)}
@@ -357,10 +500,9 @@ Core traits:
 1. Understand the user's intent from their request
 2. When user mentions a directory/file/location - IMMEDIATELY explore it using tools (don't ask "which do you mean?")
 3. For structural or technical questions, investigate the codebase first - then respond with findings
-4. Only ask clarification questions for CRITICAL information (specific requirements, decision points, etc.)
-5. Reduce hallucination by checking files/dirs yourself - never guess about code structure
-6. Plan your investigation approach - use file listing and reading to gather context
-7. Provide findings with clear, visual explanations based on actual code examination
+4. Reduce hallucination by checking files/dirs yourself - never guess about code structure
+5. Plan your investigation approach - use file listing and reading to gather context
+6. Provide findings with clear, visual explanations based on actual code examination
 
 ## Action Enforcement
 **HARD RULES — follow these exactly:**
@@ -374,11 +516,9 @@ Core traits:
 ## Guidelines
 1. Be Proactive - explore directories and examine code without waiting for user clarification
 2. Be Investigative - use tools to understand structure before responding
-3. Be Efficient -
-one well-planned tool call beats three exploratory ones
-4. Be Direct - only ask clarifying questions for critical decision points (not routine exploration)
-5. Be Evidence-Based - base answers on actual code/files, not assumptions
-6. Be Visual - provide diagrams, examples, and clear explanations based on what you found
+3. Be Efficient - one well-planned tool call beats three exploratory ones
+4. Be Evidence-Based - base answers on actual code/files, not assumptions
+5. Be Visual - provide diagrams, examples, and clear explanations based on what you found
 
 
 ## Runtime Context
@@ -513,6 +653,7 @@ def get_smart_agent_solo_prompt(model_name: str = "Unknown Model", tools: list =
     
     current_time = datetime.now()
     tools_section = _format_tools(tools)
+    os_guidance = _get_os_specific_bash_guidance()
     
     return f"""You are SmartAgent, an AI assistant created by the Agentry team. You are powered by {model_name}.
 
@@ -580,13 +721,26 @@ Your core traits:
 Use your tools wisely:
 - **web_search**: For recent/current information (see web_search_intelligence above)
 - **image_search**: For visual topics, embed using `![SEARCH: "query"]`
-- **bash**: For system operations and file tasks (explain what and why)
+- **bash**: For system operations and file tasks (Python code is auto-detected)
+- **code_execute**: For explicit Python code execution (alternative to bash for Python)
 - **list_files**: List directory contents at any path
 - **search_files**: Search for files by pattern (*.py, *.js, etc.)
 - **fast_grep**: Search file contents with regex patterns
 - **read_file**: Read any file's contents
+- **think**: Use for deep reasoning on complex problems (depth: low/medium/high/deep)
+- **task_create**: Create tasks for multi-step work (with active_form for UI display)
+- **task_get**: Get task details and claim it
+- **task_update**: Update task status (pending → in_progress → completed)
+- **task_list**: View all tasks and progress
+- **task_next**: Get next available task to work on
+- **enter_plan_mode**: Enter plan mode for complex tasks requiring approval
+- **submit_plan**: Submit a structured plan for user approval
+- **view_plan**: View current plan and steps
+- **update_plan_progress**: Mark plan steps as complete
 - You MUST use the EXACT parameter names defined in the tool schema
 </tool_usage_guidelines>
+
+{os_guidance}
 
 <action_enforcement>
 **CRITICAL: These are HARD RULES, not suggestions. Follow them exactly.**
@@ -747,6 +901,7 @@ def get_smart_agent_project_prompt(model_name: str = "Unknown Model", project_co
     
     current_time = datetime.now()
     tools_section = _format_tools(tools)
+    os_guidance = _get_os_specific_bash_guidance()
     
     # Build environment section
     env_section = ""
@@ -829,6 +984,8 @@ Use your tools to support the project:
 - **bash**: For system tasks (explain what and why)
 - You MUST use the EXACT parameter names defined in the tool schema
 </tool_usage_guidelines>
+
+{os_guidance}
 
 <project_workflow>
 When working on this project:

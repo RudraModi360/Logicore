@@ -87,6 +87,8 @@ class BasicAgent:
         max_iterations: int = 20,
         skills: list = None,
         workspace_root: str = None,
+        tool_preset: str = None,
+        task_tracking: bool = True,
         **kwargs
     ):
         """
@@ -103,6 +105,8 @@ class BasicAgent:
             memory_enabled: Whether to use memory middleware
             debug: Enable debug logging
             max_iterations: Maximum tool call iterations per chat
+            tool_preset: Tool preset to use ("lightweight", "minimal", "webdev", "smart", "copilot", "full")
+                         If provided, loads preset tools IN ADDITION to custom tools.
         """
         self.name = name
         self.description = description
@@ -118,7 +122,7 @@ class BasicAgent:
         else:
             self._system_prompt = self._build_system_prompt()
         
-        # Create the underlying agent
+        # Create the underlying agent with tool_preset
         self._agent = Agent(
             llm=provider,
             model=model,
@@ -129,14 +133,16 @@ class BasicAgent:
             memory=memory_enabled,
             max_iterations=max_iterations,
             skills=skills,
-            workspace_root=workspace_root
+            workspace_root=workspace_root,
+            tool_preset=tool_preset,
+            task_tracking=task_tracking,
         )
         
         # Register custom tools
         self._register_tools()
         
         # Enable tool support if we have tools
-        if self.custom_tools:
+        if self.custom_tools or self._agent.supports_tools:
             self._agent.supports_tools = True
     
     def _build_system_prompt(self) -> str:

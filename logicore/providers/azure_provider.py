@@ -99,6 +99,7 @@ class AzureProvider(LLMProvider):
                     api_key=self.api_key,
                     api_version=self.api_version,
                     azure_endpoint=base_url,
+                    timeout=120.0,
                 )
             except ImportError:
                 logger.warning("OpenAI SDK not installed. OpenAI deployments may fail.")
@@ -113,6 +114,7 @@ class AzureProvider(LLMProvider):
                     api_key=self.api_key,
                     api_version=self.api_version,
                     azure_endpoint=base_ep,
+                    timeout=120.0,
                 )
             except ImportError:
                 logger.warning("OpenAI SDK not installed. Inference deployments may fail.")

@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 from logicore.providers.base import LLMProvider
 from logicore.agent.base import Agent
+from logicore.tools import SMART_TOOL_SCHEMAS
 from logicore.tools.datetime import get_smart_agent_tools, get_smart_agent_tool_schemas
 from logicore.tools.datetime import DateTimeTool
 from logicore.tools.notes import NotesTool
@@ -35,6 +36,11 @@ class SmartAgent(Agent):
     - Essential tools (web, bash, notes, datetime, memory)
     - Mode switching (project/solo)
     - Automatic learning capture
+    
+    Tool Loading Strategy:
+    - Uses 'smart' preset by default (~30 tools)
+    - Includes: bash, datetime, notes, think, filesystem, web, cron, tracker, plan tools
+    - Can be customized via tool_preset parameter
     """
     
     def __init__(
@@ -50,9 +56,11 @@ class SmartAgent(Agent):
         max_iterations: int = 40,
         capabilities: Any = None,
         skills: list = None,
-        workspace_root: str = None
+        workspace_root: str = None,
+        tool_preset: str = "smart",
+        task_tracking: bool = True,
     ):
-        # Initialize base agent
+        # Initialize base agent with tool_preset
         super().__init__(
             llm=llm,
             model=model,
@@ -63,9 +71,10 @@ class SmartAgent(Agent):
             telemetry=telemetry,
             memory=memory,
             max_iterations=max_iterations,
-            # capabilities=capabilities,
             skills=skills,
-            workspace_root=workspace_root
+            workspace_root=workspace_root,
+            tool_preset=tool_preset,
+            task_tracking=task_tracking,
         )
         
         # Smart Agent specific
@@ -79,8 +88,9 @@ class SmartAgent(Agent):
         # Set appropriate system message
         self._update_system_message()
         
-        # Load Smart Agent tools
-        self._load_smart_tools()
+        # If preset didn't load tools, load them manually (backward compatibility)
+        if not self.supports_tools or len(self.internal_tools) == 0:
+            self._load_smart_tools()
     
     def _update_system_message(self):
         """Update system message based on mode and project context."""
@@ -101,33 +111,28 @@ class SmartAgent(Agent):
 
     
     def _load_smart_tools(self):
-        """Load only essential Smart Agent tools - lean and focused."""
-        # DO NOT load default tools - SmartAgent is lean by design
-        # Curated tools include:
-        # web_search, image_search, memory, notes, datetime, bash, cron scheduling
-        
+        """
+        Load Smart Agent tools manually (fallback if preset didn't load them).
+        This method maintains backward compatibility with existing code.
+        """
         # Get Smart Agent specific tools
         smart_tools = get_smart_agent_tools()  # datetime, notes, memory, bash, think
         
         for tool in smart_tools:
-            # Skip 'think' tool - not in the required toolkit
-            if tool.name == 'think':
-                continue
             self.internal_tools.append(tool.schema)
             self.custom_tool_executors[tool.name] = tool.run
         
-        # Add web_search from web tools
+        # Add web_search and image_search
         from logicore.tools.web import WebSearchTool, ImageSearchTool
         web_tool = WebSearchTool()
         self.internal_tools.append(web_tool.schema)
         self.custom_tool_executors[web_tool.name] = web_tool.run
         
-        # Add image_search tool for inline image responses
         image_tool = ImageSearchTool()
         self.internal_tools.append(image_tool.schema)
         self.custom_tool_executors[image_tool.name] = image_tool.run
 
-        # Add cron scheduling tools (persistent + missed-job recovery + notifications)
+        # Add cron scheduling tools
         cron_tools = [
             AddCronJobTool(),
             ListCronJobsTool(),
@@ -137,6 +142,88 @@ class SmartAgent(Agent):
         for tool in cron_tools:
             self.internal_tools.append(tool.schema)
             self.custom_tool_executors[tool.name] = tool.run
+        
+        # Add code_execute tool
+        from logicore.tools.execution import CodeExecuteTool
+        code_exec_tool = CodeExecuteTool()
+        self.internal_tools.append(code_exec_tool.schema)
+        self.custom_tool_executors[code_exec_tool.name] = code_exec_tool.run
+        
+        # Add filesystem tools
+        from logicore.tools.filesystem import (
+            ReadFileTool, CreateFileTool, EditFileTool, DeleteFileTool,
+            ListFilesTool, SearchFilesTool, FastGrepTool
+        )
+        filesystem_tools = [
+            ReadFileTool(), CreateFileTool(), EditFileTool(), DeleteFileTool(),
+            ListFilesTool(), SearchFilesTool(), FastGrepTool()
+        ]
+        for tool in filesystem_tools:
+            self.internal_tools.append(tool.schema)
+            self.custom_tool_executors[tool.name] = tool.run
+        
+        # Add document tools
+        from logicore.tools.document import ReadDocumentTool
+        from logicore.tools.convert import ConvertDocumentTool
+        doc_tools = [ReadDocumentTool(), ConvertDocumentTool()]
+        for tool in doc_tools:
+            self.internal_tools.append(tool.schema)
+            self.custom_tool_executors[tool.name] = tool.run
+        
+        # Add office tools
+        from logicore.tools.office import (
+            EditPPTXTool, CreatePPTXTool, AppendSlideTool,
+            EditDOCXTool, CreateDOCXTool,
+            EditExcelTool, CreateExcelTool
+        )
+        office_tools = [
+            EditPPTXTool(), CreatePPTXTool(), AppendSlideTool(),
+            EditDOCXTool(), CreateDOCXTool(),
+            EditExcelTool(), CreateExcelTool()
+        ]
+        for tool in office_tools:
+            self.internal_tools.append(tool.schema)
+            self.custom_tool_executors[tool.name] = tool.run
+        
+        # Add PDF tools
+        from logicore.tools.pdf import MergePDFTool, SplitPDFTool
+        pdf_tools = [MergePDFTool(), SplitPDFTool()]
+        for tool in pdf_tools:
+            self.internal_tools.append(tool.schema)
+            self.custom_tool_executors[tool.name] = tool.run
+        
+        # Add git tool
+        from logicore.tools.git import GitCommandTool
+        git_tool = GitCommandTool()
+        self.internal_tools.append(git_tool.schema)
+        self.custom_tool_executors[git_tool.name] = git_tool.run
+        
+        # Add interaction tools
+        from logicore.tools.interactions import AskUserTool, ConfirmActionTool
+        interaction_tools = [AskUserTool(), ConfirmActionTool()]
+        for tool in interaction_tools:
+            self.internal_tools.append(tool.schema)
+            self.custom_tool_executors[tool.name] = tool.run
+        
+        # Add tracker tools
+        from logicore.tools.tracker import TrackerCreateTool, TrackerUpdateTool, TrackerListTool
+        tracker_tools = [TrackerCreateTool(), TrackerUpdateTool(), TrackerListTool()]
+        for tool in tracker_tools:
+            self.internal_tools.append(tool.schema)
+            self.custom_tool_executors[tool.name] = tool.run
+        
+        # Add plan tools
+        from logicore.tools.plan import EnterPlanModeTool, SubmitPlanTool, ViewPlanTool
+        plan_tools = [EnterPlanModeTool(), SubmitPlanTool(), ViewPlanTool()]
+        for tool in plan_tools:
+            self.internal_tools.append(tool.schema)
+            self.custom_tool_executors[tool.name] = tool.run
+        
+        # Add media search tool
+        from logicore.tools.media import MediaSearchTool
+        media_tool = MediaSearchTool()
+        self.internal_tools.append(media_tool.schema)
+        self.custom_tool_executors[media_tool.name] = media_tool.run
         
         # IMPORTANT: Mark that tools are loaded and supported
         self.supports_tools = True
@@ -149,7 +236,7 @@ class SmartAgent(Agent):
         
         if self.debug:
             tool_names = [t.get("function", {}).get("name") for t in self.internal_tools]
-            print(f"[SmartAgent] Loaded tools: {tool_names}")
+            print(f"[SmartAgent] Loaded tools (manual): {tool_names}")
     
     def set_mode(self, mode: str, project_id: str = None):
         """Switch agent mode and regenerate system prompt with tools."""

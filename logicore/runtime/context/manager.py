@@ -18,11 +18,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Callable
+import logging
 
 from logicore.runtime.config import RuntimeConfig
 from logicore.runtime.context.token_budget import TokenBudget, TokenCategory
 from logicore.runtime.context.compression import CompressionService, CompressionResult, CompressionStatus
 from logicore.runtime.context.masking import ToolOutputMaskingService, MaskingResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -95,7 +98,7 @@ class ContextWindowManager:
         """
         Args:
             config: Runtime configuration
-            llm_provider: LLM for compression
+            llm_provider: LLM for compression (also used for context_window override)
             model_name: Model name for context window lookup
             token_counter: Optional custom token counter
         """
@@ -103,8 +106,8 @@ class ContextWindowManager:
         self.model_name = model_name
         self._token_counter = token_counter or (lambda x: len(x) // 4)
         
-        # Initialize sub-services
-        self.budget = TokenBudget(config, model_name, token_counter)
+        # Initialize sub-services (pass llm_provider for context_window override)
+        self.budget = TokenBudget(config, model_name, token_counter, provider=llm_provider)
         self.compression_service = CompressionService(config, llm_provider, token_counter)
         self.masking_service = ToolOutputMaskingService(config, token_counter)
         
@@ -194,6 +197,17 @@ class ContextWindowManager:
             result.final_tokens = result.original_tokens
             return result, current_messages
         
+        logger.info(
+            f"[ContextWindowManager] Token budget exceeded: "
+            f"{result.original_tokens}/{self.budget.compression_threshold} tokens. "
+            f"Starting context management pipeline..."
+        )
+        print(
+            f"\n[ContextWindowManager] ⚠️ Token budget exceeded: "
+            f"{result.original_tokens}/{self.budget.compression_threshold} tokens. "
+            f"Starting context management..."
+        )
+        
         # Stage 1: Tool output masking (fast, doesn't need LLM)
         if self.budget.should_mask_tool_outputs():
             masking_result, current_messages = self.masking_service.mask(
@@ -221,6 +235,7 @@ class ContextWindowManager:
             return result, current_messages
         
         # Stage 2: Compression (needs LLM)
+        print("[ContextWindowManager] 🔄 Running context compression (this may take a moment)...")
         compression_result = await self.compression_service.compress(
             current_messages,
             session_id,
@@ -234,6 +249,15 @@ class ContextWindowManager:
             result.compressed = True
             result.compression_result = compression_result
             result.tokens_saved += compression_result.tokens_saved
+            print(
+                f"[ContextWindowManager] ✅ Compression complete: "
+                f"{result.original_tokens} → {self._estimate_messages_tokens(current_messages)} tokens"
+            )
+        else:
+            print(
+                f"[ContextWindowManager] ⚠️ Compression {compression_result.status.value}: "
+                f"{compression_result.error or 'unknown reason'}"
+            )
         
         # Stage 3: Emergency truncation if still over budget
         current_tokens = self._estimate_messages_tokens(current_messages)

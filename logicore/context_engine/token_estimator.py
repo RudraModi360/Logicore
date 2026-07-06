@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional, Callable
 
 # === Model context windows ===
 MODEL_CONTEXT_WINDOWS = {
+    # OpenAI
     "gpt-4": 8192,
     "gpt-4-32k": 32768,
     "gpt-4-turbo": 128000,
@@ -18,41 +19,85 @@ MODEL_CONTEXT_WINDOWS = {
     "gpt-4o-mini": 128000,
     "gpt-4.1": 128000,
     "gpt-3.5-turbo": 16385,
+    "o1": 200000,
+    "o1-mini": 128000,
+    "o3": 200000,
+    # Anthropic
     "claude-3-opus": 200000,
     "claude-3-sonnet": 200000,
     "claude-3-haiku": 200000,
     "claude-3.5-sonnet": 200000,
     "claude-4-opus": 200000,
+    # Google
     "gemini-pro": 32000,
     "gemini-1.5-pro": 1000000,
     "gemini-1.5-flash": 1000000,
     "gemini-2.5-pro": 1000000,
+    "gemini-2.5-flash": 1000000,
+    # Meta
     "llama3": 8192,
     "llama3.1": 128000,
     "llama3.2": 128000,
+    "llama-3": 8192,
+    "llama-3.1": 128000,
+    "llama-3.2": 128000,
+    # Mistral
     "mistral": 8192,
     "mixtral": 32768,
+    "mistral-large": 128000,
+    # Qwen
     "qwen": 32768,
+    "qwen-2.5": 128000,
+    "qwen3": 128000,
+    "qwen3:0.6b": 4096,
+    # DeepSeek
+    "deepseek-chat": 128000,
+    "deepseek-coder": 128000,
+    "deepseek-v2": 128000,
+    "deepseek-v3": 128000,
+    "deepseek-v4": 128000,
+    # Ollama / Local
     "gpt-oss": 128000,
     "gpt-oss:20b-cloud": 128000,
-    "default": 4096,
+    # Fallback
+    "default": 256000,
 }
 
 
-def get_model_context_window(model_name: str) -> int:
+def get_model_context_window(model_name: str, provider=None) -> int:
     """
     Get context window size for a model.
-    Tries: exact match → prefix match → contains match → default.
+    Tries: provider.get_context_window() → exact match → prefix match → contains match → default.
     """
+    # Check if provider has explicit context window setting
+    if provider and hasattr(provider, 'get_context_window'):
+        ctx = provider.get_context_window()
+        if ctx and ctx > 0:
+            return ctx
+    
     if model_name in MODEL_CONTEXT_WINDOWS:
         return MODEL_CONTEXT_WINDOWS[model_name]
+    
+    # Prefix match (e.g., "gpt-4o-2024-01" matches "gpt-4o")
     for known, window in MODEL_CONTEXT_WINDOWS.items():
         if model_name.startswith(known):
             return window
+    
+    # Contains match (e.g., "deepseek-v4-flash-free" contains "deepseek-v4")
     model_lower = model_name.lower()
     for known, window in MODEL_CONTEXT_WINDOWS.items():
         if known.lower() in model_lower:
             return window
+    
+    # Partial prefix match for versioned models (e.g., "deepseek-v4" matches "deepseek-v3")
+    for known, window in MODEL_CONTEXT_WINDOWS.items():
+        known_parts = known.lower().split("-")
+        model_parts = model_lower.split("-")
+        # Check if first 2 parts match (e.g., "deepseek-v" matches)
+        if len(known_parts) >= 2 and len(model_parts) >= 2:
+            if known_parts[0] == model_parts[0] and known_parts[1] == model_parts[1]:
+                return window
+    
     return MODEL_CONTEXT_WINDOWS["default"]
 
 

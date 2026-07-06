@@ -15,6 +15,7 @@ Also provides:
   - distill_tool_result() — per-tool-call truncation
   - assemble_prompt() — system prompt construction
   - inject_hint() / remove_hint() — message injection utilities
+  - Prompt caching for reduced latency and cost
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from logicore.context_engine.token_estimator import TokenEstimator
 from logicore.context_engine.prompt_assembler import PromptAssembler
 from logicore.context_engine.message_pipeline import MessagePipeline
 from logicore.context_engine.tool_output_distiller import ToolOutputDistiller
+from logicore.caching import PromptCacheManager, get_prompt_cache_manager
 
 
 @dataclass
@@ -90,9 +92,11 @@ class ContextEngine:
         model_name: str = "default",
         token_counter: Optional[Callable[[str], int]] = None,
         debug: bool = False,
+        telemetry_tracker: Optional[Any] = None,
     ):
         self.config = config
         self.debug = debug
+        self.telemetry_tracker = telemetry_tracker
 
         # Sub-components
         self.token_estimator = TokenEstimator(token_counter)
@@ -114,6 +118,15 @@ class ContextEngine:
             token_counter=token_counter,
         )
 
+        # Prompt caching for reduced latency and cost
+        prompt_cache_config = getattr(config, 'prompt_cache', None)
+        self._prompt_cache = get_prompt_cache_manager(
+            enabled=getattr(prompt_cache_config, 'enabled', True) if prompt_cache_config else True,
+            ttl_seconds=getattr(prompt_cache_config, 'ttl_seconds', 300) if prompt_cache_config else 300,
+            max_entries=getattr(prompt_cache_config, 'max_entries', 100) if prompt_cache_config else 100,
+            debug=debug,
+        )
+
         # Per-session results history
         self._results: Dict[str, List[EngineResult]] = {}
 
@@ -121,6 +134,7 @@ class ContextEngine:
         self,
         messages: List[Dict[str, Any]],
         session_id: str = "default",
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> tuple[EngineResult, List[Dict[str, Any]]]:
         """
         Prepare messages for an LLM call.
@@ -128,7 +142,8 @@ class ContextEngine:
         Runs the full context management pipeline:
         1. Estimate current token usage
         2. If over budget, run masking → compression → truncation
-        3. Return managed messages ready for the API
+        3. Add cache annotations for prompt caching
+        4. Return managed messages ready for the API
 
         This is the MAIN ENTRY POINT called before each LLM call.
         """
@@ -138,9 +153,16 @@ class ContextEngine:
         result.original_tokens = self.token_estimator.count_messages_tokens(messages)
 
         # Delegate to ContextWindowManager for the actual pipeline
-        raw_result, managed_messages = await self._window_manager.manage(
-            messages, session_id
-        )
+        try:
+            raw_result, managed_messages = await self._window_manager.manage(
+                messages, session_id
+            )
+        except Exception as e:
+            # If context management fails (e.g., compression timeout), return original messages
+            if self.debug:
+                print(f"[ContextEngine] ⚠️ Context management failed: {e}. Using original messages.")
+            result.final_tokens = result.original_tokens
+            return result, messages
 
         # Map raw result to our EngineResult
         result._raw = raw_result
@@ -156,6 +178,14 @@ class ContextEngine:
                 f"(saved {result.tokens_saved}). "
                 f"masked={result.masked} compressed={result.compressed} truncated={result.truncated}"
             )
+
+        # Stage 4: Add prompt cache annotations
+        # Update cache state with current system messages and tools
+        system_messages = [m for m in managed_messages if m.get("role") == "system"]
+        self._prompt_cache.update_prefix_state(system_messages, tools)
+        
+        # Annotate messages with cache control metadata
+        managed_messages = self._prompt_cache.annotate_messages(managed_messages)
 
         # Store result for telemetry
         self._store_result(session_id, result)
@@ -230,6 +260,38 @@ class ContextEngine:
         """Clear all state for a session."""
         self._results.pop(session_id, None)
         self._window_manager.clear_session(session_id)
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get prompt cache statistics."""
+        return self._prompt_cache.get_stats()
+
+    def record_cache_hit(self, session_id: str, tokens_saved: int = 0, cost_saved: float = 0.0) -> None:
+        """Record a cache hit for telemetry."""
+        self._prompt_cache.record_request(
+            tokens_saved=tokens_saved,
+            cost_saved=cost_saved,
+            cache_hit=True,
+        )
+        
+        # Also record in telemetry tracker if available
+        if self.telemetry_tracker:
+            self.telemetry_tracker.record_cache_hit(
+                session_id=session_id,
+                tokens_saved=tokens_saved,
+                cost_saved=cost_saved,
+            )
+
+    def record_cache_miss(self, session_id: str) -> None:
+        """Record a cache miss for telemetry."""
+        self._prompt_cache.record_request(cache_hit=False)
+        
+        # Also record in telemetry tracker if available
+        if self.telemetry_tracker:
+            self.telemetry_tracker.record_cache_miss(session_id=session_id)
+
+    def clear_cache(self) -> None:
+        """Clear prompt cache."""
+        self._prompt_cache.clear_cache()
 
     def _store_result(self, session_id: str, result: EngineResult) -> None:
         """Store result in history."""

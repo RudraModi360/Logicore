@@ -126,6 +126,34 @@ async def _dispatch_stream_text(on_token, text: str):
     await _dispatch_token(on_token, text)
 
 
+def _extract_cache_control(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Extract cache control information from annotated messages.
+    
+    Returns cache control metadata for the last message with cache_control,
+    or None if no cache control is present.
+    """
+    for msg in reversed(messages):
+        cache_control = msg.get("_cache_control")
+        if cache_control:
+            return cache_control
+    return None
+
+
+def _strip_cache_annotations(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Remove cache control annotations from messages before sending to provider.
+    
+    Returns a new list with _cache_control keys removed.
+    """
+    cleaned = []
+    for msg in messages:
+        if "_cache_control" in msg:
+            msg = {k: v for k, v in msg.items() if k != "_cache_control"}
+        cleaned.append(msg)
+    return cleaned
+
+
 def _convert_local_images_to_base64(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Convert local image file paths to base64 data URLs (OpenAI-compatible APIs)."""
     import os
@@ -208,6 +236,11 @@ class OpenAIGateway(ProviderGateway):
     """Gateway for OpenAI-compatible APIs (OpenAI, Groq)."""
 
     async def chat(self, messages, tools=None) -> NormalizedMessage:
+        # Extract cache control info before stripping annotations
+        cache_control = _extract_cache_control(messages)
+        
+        # Strip cache annotations before sending to provider
+        messages = _strip_cache_annotations(messages)
         messages = _convert_local_images_to_base64(messages)
 
         kwargs = {"model": self.model_name, "messages": messages}
@@ -215,7 +248,11 @@ class OpenAIGateway(ProviderGateway):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        _gateway_debug(self, f"chat request: messages={len(messages)}, tools={len(tools) if tools else 0}")
+        # Add cache control if present (for providers that support it)
+        # Note: OpenAI uses automatic prefix caching, no explicit control needed
+        # This is here for future provider-specific implementations
+
+        _gateway_debug(self, f"chat request: messages={len(messages)}, tools={len(tools) if tools else 0}, cache_control={cache_control}")
 
         try:
             response = self.provider.client.chat.completions.create(**kwargs)
@@ -232,6 +269,18 @@ class OpenAIGateway(ProviderGateway):
             )
         except Exception as e:
             error_msg = str(e).lower()
+            
+            # Provide helpful context about what was sent
+            provider_endpoint = getattr(self.provider, 'endpoint', 'default')
+            provider_model = getattr(self.provider, 'model_name', 'unknown')
+            
+            if "400" in str(e) or "upstream" in error_msg:
+                raise ValueError(
+                    f"Provider returned 400 error. "
+                    f"Endpoint: {provider_endpoint}, Model: {provider_model}. "
+                    f"Check if model name is correct for this endpoint. "
+                    f"Original: {e}"
+                ) from e
             if "output text or tool calls" in error_msg:
                 raise ValueError(f"Model returned empty response. Original: {e}")
             if "validation" in error_msg and "image" in error_msg:
@@ -241,6 +290,11 @@ class OpenAIGateway(ProviderGateway):
             raise
 
     async def chat_stream(self, messages, tools=None, on_token=None) -> NormalizedMessage:
+        # Extract cache control info before stripping annotations
+        cache_control = _extract_cache_control(messages)
+        
+        # Strip cache annotations before sending to provider
+        messages = _strip_cache_annotations(messages)
         messages = _convert_local_images_to_base64(messages)
 
         kwargs = {"model": self.model_name, "messages": messages, "stream": True}
@@ -248,12 +302,23 @@ class OpenAIGateway(ProviderGateway):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        _gateway_debug(self, f"chat_stream request: messages={len(messages)}, tools={len(tools) if tools else 0}")
+        _gateway_debug(self, f"chat_stream request: messages={len(messages)}, tools={len(tools) if tools else 0}, cache_control={cache_control}")
 
         try:
             stream = self.provider.client.chat.completions.create(**kwargs)
         except Exception as e:
+            # Provide helpful context about what was sent
+            provider_endpoint = getattr(self.provider, 'endpoint', 'default')
+            provider_model = getattr(self.provider, 'model_name', 'unknown')
             error_msg = str(e).lower()
+            
+            if "400" in str(e) or "upstream" in error_msg:
+                raise ValueError(
+                    f"Provider returned 400 error. "
+                    f"Endpoint: {provider_endpoint}, Model: {provider_model}. "
+                    f"Check if model name is correct for this endpoint. "
+                    f"Original: {e}"
+                ) from e
             if "validation" in error_msg and "image" in error_msg:
                 raise ValueError("Model does not support the given data type") from e
             if "must be a string" in error_msg and "content" in error_msg:
@@ -497,11 +562,23 @@ class GeminiGateway(ProviderGateway):
     async def chat(self, messages, tools=None) -> NormalizedMessage:
         from google.genai import types
 
+        # Extract cache control info before processing
+        cache_control = _extract_cache_control(messages)
+        
+        # Strip cache annotations before sending to provider
+        messages = _strip_cache_annotations(messages)
+        
         contents, system_instruction = self._build_contents(messages)
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             tools=self._build_tools(tools),
         )
+
+        # Add cache control if present (for Gemini context caching)
+        # Note: Gemini has its own context caching API, this is a placeholder
+        # for future implementation
+
+        _gateway_debug(self, f"chat request: messages={len(messages)}, tools={len(tools) if tools else 0}, cache_control={cache_control}")
 
         try:
             response = self.provider.client.models.generate_content(
@@ -520,6 +597,12 @@ class GeminiGateway(ProviderGateway):
     async def chat_stream(self, messages, tools=None, on_token=None) -> NormalizedMessage:
         from google.genai import types
 
+        # Extract cache control info before processing
+        cache_control = _extract_cache_control(messages)
+        
+        # Strip cache annotations before sending to provider
+        messages = _strip_cache_annotations(messages)
+        
         contents, system_instruction = self._build_contents(messages)
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
@@ -682,9 +765,19 @@ class OllamaGateway(ProviderGateway):
             if not message.get("content") and not message.get("tool_calls"):
                 raise ValueError("Ollama returned empty message with no content or tool calls")
 
+            # Extract thinking tokens separately - don't pollute content
+            thinking = message.get("thinking", "")
+            content = message.get("content", "")
+            
+            # If model only has thinking but no content, log it but don't use it as response
+            if thinking and not content:
+                _gateway_debug(self, f"Model returned thinking only ({len(thinking)} chars), no content")
+                # Set content to empty - thinking is internal reasoning, not user-facing
+                content = ""
+
             return NormalizedMessage(
                 role=message.get("role", "assistant"),
-                content=message.get("content", ""),
+                content=content,
                 tool_calls=message.get("tool_calls", []),
             )
         except Exception as e:
@@ -760,8 +853,9 @@ class OllamaGateway(ProviderGateway):
 
                         think_token = msg.get("thinking") if isinstance(msg, dict) else getattr(msg, "thinking", None)
                         if think_token:
-                            full_content += think_token
-                            asyncio.run_coroutine_threadsafe(token_queue.put(think_token), loop)
+                            # Store thinking separately - don't add to full_content
+                            # Thinking is internal reasoning, not user-facing
+                            pass
 
                         tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
                         if tc:
@@ -1088,7 +1182,8 @@ def get_gateway_for_provider(provider) -> ProviderGateway:
 
     GATEWAY_MAP = {
         "openai": OpenAIGateway,
-        "groq": OpenAIGateway,  # Groq is OpenAI-compatible
+        "groq": OpenAIGateway,      # Groq is OpenAI-compatible
+        "custom": OpenAIGateway,    # Any OpenAI-compatible endpoint
         "gemini": GeminiGateway,
         "azure": AzureGateway,
         "ollama": OllamaGateway,

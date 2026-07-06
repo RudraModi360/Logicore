@@ -9,6 +9,7 @@ from .providers.ollama_provider import OllamaProvider
 from .providers.groq_provider import GroqProvider
 from .providers.gemini_provider import GeminiProvider
 from .providers.azure_provider import AzureProvider
+from .providers.custom_provider import CustomProvider
 from .providers.base import LLMProvider
 from .mcp.client import MCPClientManager
 from .session.manager import SessionManager
@@ -28,6 +29,7 @@ __all__ = [
     "GroqProvider",
     "GeminiProvider",
     "AzureProvider",
+    "CustomProvider",
     "LLMProvider",
     "MCPClientManager",
     "SessionManager",

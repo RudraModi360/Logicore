@@ -13,6 +13,11 @@ class CopilotAgent(Agent):
     - Pre-loaded with filesystem and execution tools
     - Coding-focused Claude-style system prompt
     - Convenience methods for code explanation and review
+    
+    Tool Loading Strategy:
+    - Uses 'copilot' preset by default (~15 tools)
+    - Includes: filesystem, execution, process management, git, web tools
+    - Optimized for coding workflows
     """
     
     def __init__(
@@ -27,7 +32,9 @@ class CopilotAgent(Agent):
         telemetry: bool = False,
         memory: bool = False,
         skills: list = None,
-        workspace_root: str = None
+        workspace_root: str = None,
+        tool_preset: str = "copilot",
+        task_tracking: bool = True,
     ):
         # Use copilot-specific prompt if no custom message provided
         if not system_message:
@@ -42,15 +49,13 @@ class CopilotAgent(Agent):
             role="copilot",
             debug=debug,
             tools=tools,
-            capabilities=capabilities,
             telemetry=telemetry,
             memory=memory,
             skills=skills,
-            workspace_root=workspace_root
+            workspace_root=workspace_root,
+            tool_preset=tool_preset,
+            task_tracking=task_tracking,
         )
-        
-        # Auto-load tools useful for coding
-        self.load_default_tools()
         
     async def chat(self, user_input: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, generate_walkthrough: bool = False, **kwargs) -> str:
         """Coding-optimized chat."""

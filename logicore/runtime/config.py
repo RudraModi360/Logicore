@@ -301,6 +301,20 @@ class PlannerConfig:
 
 
 @dataclass
+class PromptCacheConfig:
+    """Configuration for prompt caching subsystem."""
+    
+    # Enable prompt caching
+    enabled: bool = True
+    
+    # TTL for cache entries in seconds (default 5 minutes)
+    ttl_seconds: int = 300
+    
+    # Maximum number of cache entries
+    max_entries: int = 100
+
+
+@dataclass
 class RuntimeConfig:
     """
     Master configuration for the agentic runtime.
@@ -330,14 +344,15 @@ class RuntimeConfig:
     reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
+    prompt_cache: PromptCacheConfig = field(default_factory=PromptCacheConfig)
     
     # Model-specific context windows (canonical source: context_engine.token_estimator)
     model_context_windows: Dict[str, int] = field(default_factory=lambda: _get_canonical_model_windows())
     
-    def get_model_context_window(self, model_name: str) -> int:
+    def get_model_context_window(self, model_name: str, provider=None) -> int:
         """Get context window size for a model, with fallback to default."""
         from logicore.context_engine.token_estimator import get_model_context_window
-        return get_model_context_window(model_name)
+        return get_model_context_window(model_name, provider)
     
     def get_compression_threshold_for_model(self, model_name: str) -> int:
         """Calculate compression threshold based on model's context window."""
@@ -420,6 +435,11 @@ class RuntimeConfig:
             telemetry=TelemetryConfig(
                 enabled=get_env_bool("LOGICORE_TELEMETRY_ENABLED", getattr(settings, "TELEMETRY_ENABLED", True)),
                 log_prompts=get_env_bool("LOGICORE_TELEMETRY_LOG_PROMPTS", getattr(settings, "TELEMETRY_LOG_PROMPTS", False)),
+            ),
+            prompt_cache=PromptCacheConfig(
+                enabled=get_env_bool("LOGICORE_PROMPT_CACHE_ENABLED", getattr(settings, "PROMPT_CACHE_ENABLED", True)),
+                ttl_seconds=get_env_int("LOGICORE_PROMPT_CACHE_TTL", getattr(settings, "PROMPT_CACHE_TTL_SECONDS", 300)),
+                max_entries=get_env_int("LOGICORE_PROMPT_CACHE_MAX_ENTRIES", getattr(settings, "PROMPT_CACHE_MAX_ENTRIES", 100)),
             ),
         )
     

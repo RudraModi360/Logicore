@@ -14,12 +14,15 @@ Inspired by gemini-cli's chatCompressionService.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Dict, List, Any, Callable
 
 from logicore.runtime.config import RuntimeConfig
+
+logger = logging.getLogger(__name__)
 
 
 class CompressionStatus(Enum):
@@ -323,9 +326,40 @@ SUMMARY:"""
             conversation_text = self._format_messages_for_summary(to_compress)
             prompt = self.COMPRESSION_PROMPT.format(conversation=conversation_text)
             
-            response = await self.llm.chat([
-                {"role": "user", "content": prompt}
-            ], tools=None)
+            logger.info(
+                f"[CompressionService] 🔄 Compressing {len(to_compress)} messages "
+                f"({original_tokens} tokens → target {self.config.context.compression_threshold_tokens})"
+            )
+            print(
+                f"\n[CompressionService] 🔄 Compressing {len(to_compress)} messages "
+                f"({original_tokens} tokens)..."
+            )
+            
+            # Use timeout to prevent indefinite blocking
+            _COMPRESSION_TIMEOUT = 120  # seconds
+            try:
+                response = await asyncio.wait_for(
+                    self.llm.chat([
+                        {"role": "user", "content": prompt}
+                    ], tools=None),
+                    timeout=_COMPRESSION_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[CompressionService] ⏰ Compression LLM call timed out after {_COMPRESSION_TIMEOUT}s"
+                )
+                print(
+                    f"[CompressionService] ⏰ Compression timed out after {_COMPRESSION_TIMEOUT}s, "
+                    f"skipping compression."
+                )
+                return CompressionResult(
+                    status=CompressionStatus.FAILED_ERROR,
+                    original_tokens=original_tokens,
+                    compressed_tokens=original_tokens,
+                    messages_compressed=len(to_compress),
+                    messages_preserved=len(to_preserve),
+                    error=f"Compression LLM call timed out after {_COMPRESSION_TIMEOUT}s",
+                )
             
             # Extract summary text
             if isinstance(response, dict):
@@ -336,6 +370,8 @@ SUMMARY:"""
             summary = summary.strip()
             
             if not summary:
+                logger.warning("[CompressionService] ⚠️ Compression returned empty summary")
+                print("[CompressionService] ⚠️ Compression returned empty summary")
                 return CompressionResult(
                     status=CompressionStatus.FAILED_EMPTY,
                     original_tokens=original_tokens,
@@ -351,6 +387,13 @@ SUMMARY:"""
             
             # Check if compression actually helped
             if compressed_tokens >= original_tokens:
+                logger.warning(
+                    f"[CompressionService] ⚠️ Compression inflated tokens: "
+                    f"{original_tokens} → {compressed_tokens}"
+                )
+                print(
+                    f"[CompressionService] ⚠️ Compression inflated tokens, skipping"
+                )
                 return CompressionResult(
                     status=CompressionStatus.FAILED_INFLATED,
                     original_tokens=original_tokens,
@@ -367,6 +410,16 @@ SUMMARY:"""
             
             # Garbage collect old summaries (keep last 3)
             self._summaries[session_id].append(summary)
+            
+            logger.info(
+                f"[CompressionService] ✅ Compression complete: "
+                f"{original_tokens} → {compressed_tokens} tokens "
+                f"({len(to_compress)} messages compressed, {len(to_preserve)} preserved)"
+            )
+            print(
+                f"[CompressionService] ✅ Compression complete: "
+                f"{original_tokens} → {compressed_tokens} tokens"
+            )
             if len(self._summaries[session_id]) > 3:
                 self._summaries[session_id] = self._summaries[session_id][-3:]
             
@@ -380,6 +433,8 @@ SUMMARY:"""
             )
             
         except Exception as e:
+            logger.error(f"[CompressionService] ❌ Compression failed: {e}")
+            print(f"[CompressionService] ❌ Compression failed: {e}")
             return CompressionResult(
                 status=CompressionStatus.FAILED_ERROR,
                 original_tokens=original_tokens,

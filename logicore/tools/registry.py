@@ -1,10 +1,14 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Set
 from .base import BaseTool, ToolResult
 from .filesystem import (
     ReadFileTool, CreateFileTool, EditFileTool, DeleteFileTool, 
     ListFilesTool, SearchFilesTool, FastGrepTool
 )
-from .execution import ExecuteCommandTool, CodeExecuteTool
+from .execution import (
+    ExecuteCommandTool, CodeExecuteTool, 
+    ListProcessesTool, KillProcessTool, GetProcessInfoTool,
+    GetProcessOutputTool, TailProcessOutputTool, WatchProcessTool
+)
 from .web import WebSearchTool, UrlFetchTool, ImageSearchTool
 from .git import GitCommandTool
 from .document import ReadDocumentTool
@@ -21,55 +25,178 @@ from .think import ThinkTool
 from .bash import SmartBashTool
 from .media import MediaSearchTool
 from .cron import AddCronJobTool, ListCronJobsTool, RemoveCronJobTool, GetCronsTool
+from .tracker import (
+    TrackerCreateTool, TrackerUpdateTool, TrackerListTool, TrackerGetTool,
+    TrackerAddDependencyTool, TrackerVisualizeTool, TrackerCloseTool
+)
+from .plan import (
+    EnterPlanModeTool, SubmitPlanTool, ExitPlanModeTool,
+    UpdatePlanProgressTool, ViewPlanTool
+)
+
+# Tool presets for different use cases
+TOOL_PRESETS = {
+    "lightweight": [
+        "read_file", "create_file", "edit_file", "list_files",
+        "search_files", "fast_grep", "execute_command", "code_execute",
+        "list_processes", "kill_process", "get_process_info",
+        "get_process_output", "tail_process_output", "watch_process",
+        "web_search", "git_command"
+    ],
+    "smart": [
+        # SmartAgent core tools - essential agentic toolkit
+        "bash", "datetime", "notes", "think",
+        # Filesystem
+        "read_file", "create_file", "edit_file", "delete_file",
+        "list_files", "search_files", "fast_grep",
+        # Execution
+        "code_execute",
+        # Process management
+        "list_processes", "kill_process", "get_process_output",
+        # Web
+        "web_search", "image_search",
+        # Cron
+        "add_cron_job", "list_cron_jobs", "remove_cron_job", "get_crons",
+        # Document
+        "read_document", "convert_document",
+        # Git
+        "git_command",
+        # Media
+        "media_search",
+        # V2 Task Management
+        "task_create", "task_get", "task_update", "task_list", "task_next",
+        # Plan
+        "enter_plan_mode", "submit_plan", "view_plan",
+    ],
+    "copilot": [
+        # Copilot - coding focused with filesystem and execution
+        "read_file", "create_file", "edit_file", "delete_file",
+        "list_files", "search_files", "fast_grep",
+        "execute_command", "code_execute",
+        "list_processes", "kill_process", "get_process_output",
+        "git_command",
+        "web_search", "url_fetch",
+    ],
+    "full": "__all__",  # Load all tools
+    "minimal": [
+        "read_file", "create_file", "edit_file", "list_files",
+        "execute_command", "code_execute"
+    ],
+    "webdev": [
+        "read_file", "create_file", "edit_file", "list_files",
+        "search_files", "fast_grep", "execute_command", "code_execute",
+        "list_processes", "kill_process", "get_process_output",
+        "web_search", "url_fetch"
+    ],
+}
 
 class ToolRegistry:
-    def __init__(self):
+    def __init__(self, preset: Optional[str] = None, enabled_tools: Optional[List[str]] = None, disabled_tools: Optional[List[str]] = None):
+        """
+        Initialize ToolRegistry with optional tool filtering.
+        
+        Args:
+            preset: Use a predefined tool preset ("lightweight", "smart", "copilot", "full", "minimal", "webdev")
+            enabled_tools: List of tool names to enable (overrides preset)
+            disabled_tools: List of tool names to disable (applied after preset/enabled_tools)
+        """
         self._tools: Dict[str, BaseTool] = {}
-        self._register_defaults()
+        
+        # Store all tool classes for lazy registration
+        all_tool_classes = {
+            # Filesystem
+            "read_file": ReadFileTool,
+            "create_file": CreateFileTool,
+            "edit_file": EditFileTool,
+            "delete_file": DeleteFileTool,
+            "list_files": ListFilesTool,
+            "search_files": SearchFilesTool,
+            "fast_grep": FastGrepTool,
+            # Execution
+            "execute_command": ExecuteCommandTool,
+            "code_execute": CodeExecuteTool,
+            # Process management
+            "list_processes": ListProcessesTool,
+            "kill_process": KillProcessTool,
+            "get_process_info": GetProcessInfoTool,
+            "get_process_output": GetProcessOutputTool,
+            "tail_process_output": TailProcessOutputTool,
+            "watch_process": WatchProcessTool,
+            # Web
+            "web_search": WebSearchTool,
+            "image_search": ImageSearchTool,
+            "url_fetch": UrlFetchTool,
+            # Git
+            "git_command": GitCommandTool,
+            # Document
+            "read_document": ReadDocumentTool,
+            "convert_document": ConvertDocumentTool,
+            # Media
+            "media_search": MediaSearchTool,
+            # Office
+            "edit_pptx": EditPPTXTool,
+            "create_pptx": CreatePPTXTool,
+            "append_slide": AppendSlideTool,
+            "edit_docx": EditDOCXTool,
+            "create_docx": CreateDOCXTool,
+            "edit_excel": EditExcelTool,
+            "create_excel": CreateExcelTool,
+            # PDF
+            "merge_pdfs": MergePDFTool,
+            "split_pdf": SplitPDFTool,
+            # Cron
+            "add_cron_job": AddCronJobTool,
+            "list_cron_jobs": ListCronJobsTool,
+            "remove_cron_job": RemoveCronJobTool,
+            "get_crons": GetCronsTool,
+            # SmartAgent specific tools
+            "bash": SmartBashTool,
+            "datetime": DateTimeTool,
+            "notes": NotesTool,
+            "think": ThinkTool,
+            # Tracker
+            "tracker_create": TrackerCreateTool,
+            "tracker_update": TrackerUpdateTool,
+            "tracker_list": TrackerListTool,
+            "tracker_get": TrackerGetTool,
+            "tracker_add_dependency": TrackerAddDependencyTool,
+            "tracker_visualize": TrackerVisualizeTool,
+            "tracker_close": TrackerCloseTool,
+            # Plan
+            "enter_plan_mode": EnterPlanModeTool,
+            "submit_plan": SubmitPlanTool,
+            "exit_plan_mode": ExitPlanModeTool,
+            "update_plan_progress": UpdatePlanProgressTool,
+            "view_plan": ViewPlanTool,
+        }
+        
+        # Determine which tools to register
+        if enabled_tools is not None:
+            # Explicit list of tools to enable
+            tools_to_register = set(enabled_tools)
+        elif preset and preset in TOOL_PRESETS:
+            preset_value = TOOL_PRESETS[preset]
+            if preset_value == "__all__":
+                tools_to_register = set(all_tool_classes.keys())
+            else:
+                tools_to_register = set(preset_value)
+        else:
+            # Default: register all tools (backward compatibility)
+            tools_to_register = set(all_tool_classes.keys())
+        
+        # Apply disabled_tools filter
+        if disabled_tools:
+            tools_to_register -= set(disabled_tools)
+        
+        # Register the selected tools
+        for tool_name in tools_to_register:
+            if tool_name in all_tool_classes:
+                self.register_tool(all_tool_classes[tool_name]())
 
     def register_tool(self, tool: BaseTool):
         if tool.name in self._tools:
             raise ValueError(f"Tool {tool.name} already registered.")
         self._tools[tool.name] = tool
-
-    def _register_defaults(self):
-        self.register_tool(ReadFileTool())
-        self.register_tool(CreateFileTool())
-        self.register_tool(EditFileTool())
-        self.register_tool(DeleteFileTool())
-        self.register_tool(ListFilesTool())
-        self.register_tool(SearchFilesTool())
-        self.register_tool(FastGrepTool())
-        self.register_tool(ExecuteCommandTool())
-        self.register_tool(CodeExecuteTool())
-        self.register_tool(WebSearchTool())
-        self.register_tool(ImageSearchTool())
-        self.register_tool(UrlFetchTool())
-        self.register_tool(GitCommandTool())
-        self.register_tool(ReadDocumentTool())
-        self.register_tool(ConvertDocumentTool())
-        
-        # Media Search for inline images/videos (Gemini-like)
-        self.register_tool(MediaSearchTool())
-        
-        # New Office Tools
-        self.register_tool(EditPPTXTool())
-        self.register_tool(CreatePPTXTool())
-        self.register_tool(AppendSlideTool())
-        self.register_tool(EditDOCXTool())
-        self.register_tool(CreateDOCXTool())
-        self.register_tool(EditExcelTool())
-        self.register_tool(CreateExcelTool())
-        
-        # New PDF Tools
-        self.register_tool(MergePDFTool())
-        self.register_tool(SplitPDFTool())
-
-        # Cron Scheduling Tools
-        self.register_tool(AddCronJobTool())
-        self.register_tool(ListCronJobsTool())
-        self.register_tool(RemoveCronJobTool())
-        self.register_tool(GetCronsTool())
 
     def get_tool(self, name: str) -> BaseTool:
         return self._tools.get(name)
@@ -89,12 +216,30 @@ class ToolRegistry:
     @property
     def schemas(self) -> List[Dict[str, Any]]:
         return [tool.schema for tool in self._tools.values()]
+    
+    @property
+    def tool_names(self) -> List[str]:
+        return list(self._tools.keys())
+    
+    def has_tool(self, name: str) -> bool:
+        return name in self._tools
 
-# Global registry instance
+# Global registry instance (default: all tools)
 registry = ToolRegistry()
+
+# Preset registries
+lightweight_registry = ToolRegistry(preset="lightweight")
+smart_registry = ToolRegistry(preset="smart")
+copilot_registry = ToolRegistry(preset="copilot")
 
 def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> ToolResult:
     return registry.execute_tool(tool_name, tool_args)
+
+def execute_tool_lightweight(tool_name: str, tool_args: Dict[str, Any]) -> ToolResult:
+    return lightweight_registry.execute_tool(tool_name, tool_args)
+
+def execute_tool_smart(tool_name: str, tool_args: Dict[str, Any]) -> ToolResult:
+    return smart_registry.execute_tool(tool_name, tool_args)
 
 # Tool categories
 SAFE_TOOLS = ['read_file', 'list_files', 'search_files', 'fast_grep', 'read_document', 'media_search', 'list_cron_jobs', 'get_crons']

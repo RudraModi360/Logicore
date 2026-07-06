@@ -19,7 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+.logicore/
 # Virtual Environments
 .venv/
 venv/

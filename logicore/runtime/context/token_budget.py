@@ -94,22 +94,26 @@ class TokenBudget:
     
     def __init__(
         self,
-        config: RuntimeConfig,
+        config: Optional[RuntimeConfig] = None,
         model_name: str = "default",
         token_counter: Optional[Callable[[str], int]] = None,
+        provider=None,
     ):
         """
         Args:
-            config: Runtime configuration
+            config: Runtime configuration. If None, loads from RuntimeConfig.from_settings()
             model_name: Name of the model for context window lookup
             token_counter: Optional custom token counting function
+            provider: Optional LLM provider instance (for context_window override)
         """
+        if config is None:
+            config = RuntimeConfig.from_settings()
         self.config = config
         self.model_name = model_name
         self._token_counter = token_counter or self._default_token_counter
         
-        # Get model-specific context window
-        self.context_window = config.get_model_context_window(model_name)
+        # Get model-specific context window (provider can override)
+        self.context_window = config.get_model_context_window(model_name, provider)
         
         # Calculate thresholds
         self.compression_threshold = config.get_compression_threshold_for_model(model_name)

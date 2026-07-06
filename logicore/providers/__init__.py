@@ -3,6 +3,7 @@ from .groq_provider import GroqProvider
 from .gemini_provider import GeminiProvider
 from .azure_provider import AzureProvider
 from .openai_provider import OpenAIProvider
+from .custom_provider import CustomProvider
 from .base import LLMProvider, ProviderCapability
 from logicore.gateway.gateway import (
     ProviderGateway, 
@@ -37,6 +38,7 @@ __all__ = [
     "GeminiProvider",
     "AzureProvider",
     "OpenAIProvider",
+    "CustomProvider",
     "LLMProvider",
     "ProviderCapability",
     # Gateway

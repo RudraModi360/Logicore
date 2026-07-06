@@ -291,6 +291,13 @@ class SessionMetrics:
     total_duration_ms: float = 0.0
     response_times_ms: List[float] = field(default_factory=list)
     
+    # Prompt caching metrics
+    cache_requests: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    cache_tokens_saved: int = 0
+    cache_cost_saved: float = 0.0
+    
     # Session tracking
     started_at: Optional[datetime] = None
     last_request_at: Optional[datetime] = None
@@ -339,6 +346,25 @@ class SessionMetrics:
         if self.total_requests == 0:
             return 0.0
         return (self.total_errors / self.total_requests) * 100
+
+    @property
+    def cache_hit_rate(self) -> float:
+        """Cache hit rate as a percentage."""
+        if self.cache_requests == 0:
+            return 0.0
+        return (self.cache_hits / self.cache_requests) * 100
+
+    def record_cache_hit(self, tokens_saved: int = 0, cost_saved: float = 0.0) -> None:
+        """Record a cache hit."""
+        self.cache_requests += 1
+        self.cache_hits += 1
+        self.cache_tokens_saved += tokens_saved
+        self.cache_cost_saved += cost_saved
+
+    def record_cache_miss(self) -> None:
+        """Record a cache miss."""
+        self.cache_requests += 1
+        self.cache_misses += 1
 
     def to_dict(self) -> dict:
         """Export session metrics as a dictionary."""
@@ -394,6 +420,16 @@ class SessionMetrics:
                 "window_size": "unknown",
                 "used_tokens": self.total_tokens,
             }
+        
+        # Prompt caching metrics
+        res["cache"] = {
+            "requests": self.cache_requests,
+            "hits": self.cache_hits,
+            "misses": self.cache_misses,
+            "hit_rate_percent": round(self.cache_hit_rate, 2),
+            "tokens_saved": self.cache_tokens_saved,
+            "cost_saved": round(self.cache_cost_saved, 6),
+        }
             
         return res
 
@@ -533,6 +569,39 @@ class TelemetryTracker:
 
         session.requests.append(request)
 
+    def record_cache_hit(
+        self,
+        session_id: str,
+        tokens_saved: int = 0,
+        cost_saved: float = 0.0,
+    ):
+        """
+        Record a prompt cache hit for a session.
+        
+        Args:
+            session_id: Unique session identifier
+            tokens_saved: Number of tokens saved due to caching
+            cost_saved: Estimated cost saved due to caching
+        """
+        if not self.enabled:
+            return
+        
+        session = self._get_session(session_id)
+        session.record_cache_hit(tokens_saved=tokens_saved, cost_saved=cost_saved)
+
+    def record_cache_miss(self, session_id: str):
+        """
+        Record a prompt cache miss for a session.
+        
+        Args:
+            session_id: Unique session identifier
+        """
+        if not self.enabled:
+            return
+        
+        session = self._get_session(session_id)
+        session.record_cache_miss()
+
     def get_session_summary(self, session_id: str) -> dict:
         """Get detailed telemetry summary for a specific session."""
         if session_id not in self.sessions:
@@ -598,6 +667,24 @@ class TelemetryTracker:
         ) if aggregate["total_requests"] > 0 else 0.0
         aggregate["total_duration_ms"] = round(aggregate["total_duration_ms"], 1)
         aggregate["token_breakdown"] = total_breakdown.to_dict()
+        
+        # Aggregate cache metrics
+        total_cache_requests = sum(s.cache_requests for s in self.sessions.values())
+        total_cache_hits = sum(s.cache_hits for s in self.sessions.values())
+        total_cache_misses = sum(s.cache_misses for s in self.sessions.values())
+        total_cache_tokens_saved = sum(s.cache_tokens_saved for s in self.sessions.values())
+        total_cache_cost_saved = sum(s.cache_cost_saved for s in self.sessions.values())
+        
+        aggregate["cache"] = {
+            "requests": total_cache_requests,
+            "hits": total_cache_hits,
+            "misses": total_cache_misses,
+            "hit_rate_percent": round(
+                (total_cache_hits / total_cache_requests * 100) if total_cache_requests > 0 else 0.0, 2
+            ),
+            "tokens_saved": total_cache_tokens_saved,
+            "cost_saved": round(total_cache_cost_saved, 6),
+        }
 
         return aggregate
 

@@ -96,7 +96,9 @@ class MCPAgent(Agent):
         deferred_tools: bool = False,
         tool_threshold: int = 15,  # Auto-enable deferred mode if tools exceed this
         skills: list = None,
-        workspace_root: str = None
+        workspace_root: str = None,
+        tool_preset: str = None,
+        task_tracking: bool = True,
     ):
         """
         Initialize MCPAgent.
@@ -118,24 +120,47 @@ class MCPAgent(Agent):
             tool_threshold: Auto-enable deferred mode if tool count exceeds this
             skills: List of skill names or Skill objects to load
             workspace_root: Root directory for workspace skill discovery
+            tool_preset: Tool preset to use ("lightweight", "minimal", "webdev", "smart", "copilot", "full")
+                         If None, loads all default tools (tools=True).
         """
-        # Initialize base Agent with tools=True first to load default tools
-        # We'll manage deferred mode after checking total tool count
-        super().__init__(
-            llm=provider,
-            model=model,
-            api_key=api_key,
-            endpoint=endpoint,
-            system_message=system_message,
-            role="mcp",
-            debug=debug,
-            telemetry=telemetry,
-            memory=memory,
-            max_iterations=max_iterations,
-            tools=True,  # Always load default tools initially
-            skills=skills,
-            workspace_root=workspace_root
-        )
+        # Initialize base Agent with tool_preset or tools=True
+        if tool_preset:
+            # Use preset instead of loading all tools
+            super().__init__(
+                llm=provider,
+                model=model,
+                api_key=api_key,
+                endpoint=endpoint,
+                system_message=system_message,
+                role="mcp",
+                debug=debug,
+                telemetry=telemetry,
+                memory=memory,
+                max_iterations=max_iterations,
+                tools=[],
+                tool_preset=tool_preset,
+                skills=skills,
+                workspace_root=workspace_root,
+                task_tracking=task_tracking,
+            )
+        else:
+            # Default: load all tools
+            super().__init__(
+                llm=provider,
+                model=model,
+                api_key=api_key,
+                endpoint=endpoint,
+                system_message=system_message,
+                role="mcp",
+                debug=debug,
+                telemetry=telemetry,
+                memory=memory,
+                max_iterations=max_iterations,
+                tools=True,  # Always load default tools initially
+                skills=skills,
+                workspace_root=workspace_root,
+                task_tracking=task_tracking,
+            )
         
         # MCP-specific configuration
         self.session_timeout = session_timeout
