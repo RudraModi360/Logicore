@@ -1,10 +1,71 @@
 import requests
 import os
 import re
+import html as html_mod
+import ipaddress
+from urllib.parse import urlparse
 from typing import Literal, List, Dict, Optional
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
 from logicore.config.settings import get_api_key
+
+# --- SSRF Protection ---
+
+# Internal/private IP ranges that should never be fetched
+_BLOCKED_IP_NETWORKS = [
+    ipaddress.ip_network('127.0.0.0/8'),      # Loopback
+    ipaddress.ip_network('10.0.0.0/8'),       # Private Class A
+    ipaddress.ip_network('172.16.0.0/12'),     # Private Class B
+    ipaddress.ip_network('192.168.0.0/16'),    # Private Class C
+    ipaddress.ip_network('169.254.0.0/16'),    # Link-local (AWS metadata)
+    ipaddress.ip_network('::1/128'),            # IPv6 loopback
+    ipaddress.ip_network('fc00::/7'),           # IPv6 private
+    ipaddress.ip_network('fe80::/10'),          # IPv6 link-local
+]
+
+# Blocked URL patterns (cloud metadata endpoints, internal services)
+_BLOCKED_URL_PATTERNS = [
+    '169.254.169.254',    # AWS/GCP/Azure metadata
+    'metadata.google',    # GCP metadata
+    'metadata.azure',     # Azure metadata
+    'localhost',          # Local services
+    '0.0.0.0',           # Wildcard bind
+]
+
+# Allowed URL schemes
+_ALLOWED_SCHEMES = {'http', 'https'}
+
+
+def _validate_url_safety(url: str) -> tuple[bool, str]:
+    """Validate URL is safe to fetch (no SSRF). Returns (is_valid, error)."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "Invalid URL format"
+
+    # Check scheme
+    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+        return False, f"URL scheme '{parsed.scheme}' not allowed. Only http/https permitted."
+
+    # Check blocked patterns in hostname
+    hostname = parsed.hostname or ''
+    for pattern in _BLOCKED_URL_PATTERNS:
+        if pattern in hostname:
+            return False, f"URL contains blocked hostname pattern: {pattern}"
+
+    # Check if hostname resolves to private/internal IP
+    try:
+        import socket
+        addrinfos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+        for family, _, _, _, sockaddr in addrinfos:
+            ip = ipaddress.ip_address(sockaddr[0])
+            for network in _BLOCKED_IP_NETWORKS:
+                if ip in network:
+                    return False, f"URL resolves to internal IP: {ip}"
+    except (socket.gaierror, ValueError):
+        pass  # DNS resolution failed - still allow the attempt
+
+    return True, ""
 
 # --- Schemas ---
 
@@ -17,7 +78,7 @@ class WebSearchParams(BaseModel):
     )
 
 class UrlFetchParams(BaseModel):
-    url: str = Field(..., description='URL to fetch content from.')
+    url: str = Field(..., max_length=2048, description='URL to fetch content from.')
 
 class ImageSearchParams(BaseModel):
     query: str = Field(..., description='Search query for images.')
@@ -56,14 +117,19 @@ def extract_text_from_html(html: str, max_chars: int = 3000) -> str:
 
 
 def fetch_page_content(url: str, max_chars: int = 3000) -> Optional[str]:
-    """Fetch and extract text content from a URL."""
+    """Fetch and extract text content from a URL with SSRF protection."""
+    is_valid, err = _validate_url_safety(url)
+    if not is_valid:
+        return None
+
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
-        response = requests.get(url, timeout=10, headers=headers)
+        response = requests.get(url, timeout=10, headers=headers, allow_redirects=False)
         response.raise_for_status()
         
+        # Validate redirect targets if any (shouldn't happen with allow_redirects=False)
         return extract_text_from_html(response.text, max_chars)
     except Exception:
         return None
@@ -74,44 +140,78 @@ def fetch_page_content(url: str, max_chars: int = 3000) -> Optional[str]:
 class WebSearchTool(BaseTool):
     name = "web_search"
     description = (
-        "Search the internet using Google. "
+        "Search the internet using Exa. "
         "Use 'quick' for fast snippet-based answers (recommended), "
         "'detailed' to fetch top page content, "
         "'deep' for comprehensive LLM-analyzed research."
     )
     args_schema = WebSearchParams
 
-    def _google_search(self, query: str, num_results: int = 5) -> List[Dict[str, str]]:
-        """Perform a Google Custom Search."""
-        api_key = os.environ.get("GOOGLE_API_KEY")
-        cx = os.environ.get("GOOGLE_CX")
+    EXA_SEARCH_URL = "https://api.exa.ai/search"
+
+    def _exa_search(self, query: str, num_results: int = 5, search_type: str = "quick") -> List[Dict[str, str]]:
+        """Perform an Exa Search."""
+        api_key = get_api_key("exa")
         
-        if not api_key or not cx:
-            raise ValueError("GOOGLE_API_KEY and GOOGLE_CX environment variables must be set")
+        if not api_key:
+            raise ValueError("EXA_API_KEY environment variable must be set")
         
-        url = "https://www.googleapis.com/customsearch/v1"
-        params = {
-            "key": api_key,
-            "cx": cx,
-            "q": query,
-            "num": min(num_results, 10)
+        # Map our search_type to Exa search type
+        exa_type_map = {
+            "quick": "fast",
+            "detailed": "auto",
+            "deep": "deep"
         }
-
-        response = requests.get(url, params=params, timeout=15)
+        exa_type = exa_type_map.get(search_type, "auto")
+        
+        # Configure contents based on search type
+        contents = {}
+        if search_type == "quick":
+            contents = {"highlights": True}
+        elif search_type == "detailed":
+            contents = {"highlights": True, "text": True}
+        elif search_type == "deep":
+            contents = {"text": True, "highlights": True}
+        
+        payload = {
+            "query": query,
+            "type": exa_type,
+            "numResults": min(num_results, 10),
+            "contents": contents
+        }
+        
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(
+            self.EXA_SEARCH_URL,
+            json=payload,
+            headers=headers,
+            timeout=15
+        )
         data = response.json()
-
+        
         if "error" in data:
-            raise Exception(f"Google API Error: {data['error'].get('message', 'Unknown error')}")
-
-        if "items" not in data:
+            raise Exception(f"Exa API Error: {data['error'].get('message', 'Unknown error')}")
+        
+        if "results" not in data:
             return []
-
+        
         results = []
-        for item in data["items"]:
+        for item in data["results"]:
+            # Extract highlights or text content
+            snippet = ""
+            if "highlights" in item and item["highlights"]:
+                snippet = " | ".join(item["highlights"])
+            elif "text" in item and item["text"]:
+                snippet = item["text"][:300]
+            
             results.append({
                 "title": item.get("title", ""),
-                "link": item.get("link", ""),
-                "snippet": item.get("snippet", "")
+                "link": item.get("url", ""),
+                "snippet": snippet
             })
         
         return results
@@ -184,7 +284,7 @@ class WebSearchTool(BaseTool):
         try:
             # Determine result count based on search type
             num_results = 5 if search_type == 'quick' else 8
-            results = self._google_search(user_input, num_results)
+            results = self._exa_search(user_input, num_results, search_type)
 
             if search_type == 'quick':
                 # Fast: Just return formatted snippets
@@ -238,7 +338,7 @@ class WebSearchTool(BaseTool):
             return ToolResult(success=True, content=self._format_quick_results(results))
 
         except Exception as e:
-            return ToolResult(success=False, error=f"Search failed: {e}")
+            return ToolResult(success=False, error="Search failed. Check API key and network connection.")
 
 
 class UrlFetchTool(BaseTool):
@@ -247,16 +347,20 @@ class UrlFetchTool(BaseTool):
     args_schema = UrlFetchParams
 
     def run(self, url: str) -> ToolResult:
+        is_valid, err = _validate_url_safety(url)
+        if not is_valid:
+            return ToolResult(success=False, error=err)
+
         content = fetch_page_content(url, max_chars=5000)
         if content:
             return ToolResult(success=True, content=content)
         else:
-            return ToolResult(success=False, error=f"Failed to fetch or parse URL: {url}")
+            return ToolResult(success=False, error="Failed to fetch or parse URL.")
 
 
 class ImageSearchTool(BaseTool):
     """
-    Search for images using Google Custom Search API.
+    Search for images using Exa Search API.
     Returns images that can be rendered inline in chat messages.
     Similar to Perplexity, ChatGPT, and Gemini Pro's image search capabilities.
     """
@@ -268,43 +372,48 @@ class ImageSearchTool(BaseTool):
     )
     args_schema = ImageSearchParams
 
-    def _google_image_search(self, query: str, num_results: int = 3) -> List[Dict[str, str]]:
-        """Perform a Google Custom Search for images."""
-        api_key = os.environ.get("GOOGLE_API_KEY")
-        cx = os.environ.get("GOOGLE_CX")
+    EXA_SEARCH_URL = "https://api.exa.ai/search"
+
+    def _exa_image_search(self, query: str, num_results: int = 3) -> List[Dict[str, str]]:
+        """Perform an Exa Search for images."""
+        api_key = get_api_key("exa")
         
-        if not api_key or not cx:
-            raise ValueError("GOOGLE_API_KEY and GOOGLE_CX environment variables must be set for image search")
+        if not api_key:
+            raise ValueError("EXA_API_KEY environment variable must be set for image search")
         
-        url = "https://www.googleapis.com/customsearch/v1"
-        params = {
-            "key": api_key,
-            "cx": cx,
-            "q": query,
-            "searchType": "image",
-            "num": min(max(1, num_results), 10),
-            "safe": "active"
+        payload = {
+            "query": query,
+            "type": "auto",
+            "numResults": min(max(1, num_results), 10),
+            "contents": {"highlights": True}
         }
-
-        response = requests.get(url, params=params, timeout=15)
+        
+        headers = {
+            "x-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(
+            self.EXA_SEARCH_URL,
+            json=payload,
+            headers=headers,
+            timeout=15
+        )
         data = response.json()
-
+        
         if "error" in data:
-            raise Exception(f"Google API Error: {data['error'].get('message', 'Unknown error')}")
-
-        if "items" not in data:
+            raise Exception(f"Exa API Error: {data['error'].get('message', 'Unknown error')}")
+        
+        if "results" not in data:
             return []
-
+        
         results = []
-        for item in data["items"]:
+        for item in data["results"]:
             image_info = {
                 "title": item.get("title", ""),
-                "url": item.get("link", ""),
-                "thumbnail": item.get("image", {}).get("thumbnailLink", item.get("link", "")),
-                "width": item.get("image", {}).get("width", 0),
-                "height": item.get("image", {}).get("height", 0),
-                "context_url": item.get("image", {}).get("contextLink", ""),
-                "source": item.get("displayLink", "")
+                "url": item.get("url", ""),
+                "thumbnail": item.get("thumbnail", item.get("url", "")),
+                "source": item.get("author", "")
             }
             results.append(image_info)
         
@@ -315,7 +424,7 @@ class ImageSearchTool(BaseTool):
             return ToolResult(success=False, error="Search query is required")
         
         try:
-            results = self._google_image_search(query, num_images)
+            results = self._exa_image_search(query, num_images)
             
             if not results:
                 return ToolResult(
@@ -325,17 +434,23 @@ class ImageSearchTool(BaseTool):
             
             # Format results as special markdown with image tags
             # The UI will parse these and render inline images
-            lines = [f"📷 **Image Search Results for \"{query}\"**\n"]
+            lines = [f"📷 **Image Search Results for \"{html_mod.escape(query)}\"**\n"]
             lines.append('<div class="inline-images-gallery">')
             
             for i, img in enumerate(results, 1):
-                # Create a structured format that the UI can parse
-                lines.append(f'<figure class="inline-image-item" data-index="{i}" onclick="window.open(\'{img["url"]}\', \'_blank\')">')
-                lines.append(f'<img src="{img["thumbnail"]}" data-full-url="{img["url"]}" alt="{img["title"]}" loading="lazy" />')
+                # HTML-escape all values to prevent XSS
+                safe_url = html_mod.escape(img["url"], quote=True)
+                safe_thumb = html_mod.escape(img["thumbnail"], quote=True)
+                safe_title = html_mod.escape(img["title"][:50])
+                safe_title_full = html_mod.escape(img["title"])
+                safe_source = html_mod.escape(img["source"])
+
+                lines.append(f'<figure class="inline-image-item" data-index="{i}" onclick="window.open(\'{safe_url}\', \'_blank\')">')
+                lines.append(f'<img src="{safe_thumb}" data-full-url="{safe_url}" alt="{safe_title_full}" loading="lazy" />')
                 lines.append(f'<figcaption>')
-                lines.append(f'<span class="image-title">{img["title"][:50]}{"..." if len(img["title"]) > 50 else ""}</span>')
+                lines.append(f'<span class="image-title">{safe_title}{"..." if len(img["title"]) > 50 else ""}</span>')
                 if img["source"]:
-                    lines.append(f'<span class="image-source">{img["source"]}</span>')
+                    lines.append(f'<span class="image-source">{safe_source}</span>')
                 lines.append(f'</figcaption>')
                 lines.append(f'</figure>')
             
@@ -345,4 +460,3 @@ class ImageSearchTool(BaseTool):
 
         except Exception as e:
             return ToolResult(success=False, error=f"Image search failed: {e}")
-

@@ -2,12 +2,14 @@ import csv
 import os
 from .base import BaseDocumentHandler
 
+# Maximum rows for markdown output to prevent context explosion
+MAX_MARKDOWN_ROWS = 100
+
 class CSVHandler(BaseDocumentHandler):
     """Handler for CSV files."""
     
     def load(self) -> None:
         """Load document. CSV is read on-demand, so checks existence."""
-        import os
         if not os.path.exists(self.file_path):
              raise FileNotFoundError(f"File not found: {self.file_path}")
 
@@ -18,7 +20,6 @@ class CSVHandler(BaseDocumentHandler):
             
     def get_metadata(self) -> dict:
         """Return basic file metadata."""
-        import os
         from datetime import datetime
         
         stat = os.stat(self.file_path)
@@ -29,7 +30,7 @@ class CSVHandler(BaseDocumentHandler):
         }
         
     def to_markdown(self) -> str:
-        """Convert CSV to Markdown table."""
+        """Convert CSV to Markdown table with row limit for large files."""
         try:
             with open(self.file_path, 'r', encoding='utf-8', errors='replace', newline='') as f:
                 reader = csv.reader(f)
@@ -38,27 +39,27 @@ class CSVHandler(BaseDocumentHandler):
             if not rows:
                 return "*Empty CSV file*"
                 
-            # Header
             header = rows[0]
-            md_table = f"| {' | '.join(header)} |\n"
-            md_table += f"| {' | '.join(['---'] * len(header))} |\n"
+            col_count = len(header)
+            total_data_rows = len(rows) - 1
             
-            # Rows (limit to first 50 rows to avoid massive context for now)
-            # Or should we include all? The user mentioned "real time data files", so maybe all is better.
-            # But for large CSVs, Markdown is bad.
-            # Let's verify size. If it's massive, maybe truncate.
-            # For now, let's include all.
-            for row in rows[1:]:
-                # Handle possible mismatch in column count
-                # Pad with empty strings if row is shorter
-                padded_row = row + [''] * (len(header) - len(row))
-                # If row is longer, truncate (or just join)
-                final_row = padded_row[:len(header)]
-                
+            md_table = f"| {' | '.join(header)} |\n"
+            md_table += f"| {' | '.join(['---'] * col_count)} |\n"
+            
+            display_rows = rows[1:MAX_MARKDOWN_ROWS + 1]
+            
+            for row in display_rows:
+                padded_row = row + [''] * (col_count - len(row))
+                final_row = padded_row[:col_count]
                 md_table += f"| {' | '.join(final_row)} |\n"
-                
-            return f"# Document: {os.path.basename(self.file_path)}\n\n{md_table}"
+            
+            result = f"# Document: {os.path.basename(self.file_path)}\n\n"
+            
+            if total_data_rows > MAX_MARKDOWN_ROWS:
+                result += f"*Showing first {MAX_MARKDOWN_ROWS} of {total_data_rows} rows*\n\n"
+            
+            result += md_table
+            return result
             
         except Exception as e:
-            # Fallback to plain text if CSV parsing fails
-            return f"# Document: {os.path.basename(self.file_path)}\n\n```csv\n{self.get_text()}\n```"
+            return f"# Document: {os.path.basename(self.file_path)}\n\n```csv\n{self.get_text()[:10000]}\n```"

@@ -11,16 +11,28 @@ Users can configure their own:
 Similar to popular frameworks like LangChain, CrewAI, etc.
 
 Example Usage:
-    from logicore.agents import BasicAgent
-    
+    from logicore import BasicAgent
+    import ast
+
     # Define custom tools as functions
     def calculator(expression: str) -> str:
-        '''Calculate a math expression.'''
-        return str(eval(expression))
-    
+        '''Calculate a math expression safely.'''
+        import operator
+        ops = {
+            operator.add: '+', operator.sub: '-', operator.mul: '*',
+            operator.truediv: '/', operator.floordiv: '//', operator.mod: '%',
+            operator.pow: '**'
+        }
+        # Safe evaluation using ast.literal_eval for numbers only
+        try:
+            tree = ast.parse(expression, mode='eval')
+            return str(eval(compile(tree, '<calc>', 'eval'), {"__builtins__": {}}, {}))
+        except Exception:
+            return f"Error: Cannot evaluate '{expression}' safely"
+
     def get_weather(city: str) -> str:
         '''Get weather for a city.'''
-        return f"Weather in {city}: 25°C, Sunny"
+        return f"Weather in {city}: 25C, Sunny"
     
     # Create agent
     agent = BasicAgent(
@@ -36,7 +48,6 @@ Example Usage:
 """
 
 import asyncio
-import inspect
 from typing import List, Dict, Any, Union, Callable
 from datetime import datetime
 from logicore.agent.base import Agent
@@ -45,7 +56,7 @@ from logicore.tools.base import BaseTool, ToolResult
 
 class BasicAgent:
     """
-    A generic, customizable agent wrapper for the Agentry framework.
+    A generic, customizable agent wrapper for the Logicore framework.
     
     This is the simplest way to create an AI agent. Just provide:
     - name: Your agent's name
@@ -81,14 +92,12 @@ class BasicAgent:
         api_key: str = None,
         tools: List[Union[Callable, BaseTool]] = None,
         system_prompt: str = None,
-        memory_enabled: bool = True,
         debug: bool = False,
         telemetry: bool = False,
         max_iterations: int = 20,
         skills: list = None,
         workspace_root: str = None,
         tool_preset: str = None,
-        task_tracking: bool = True,
         **kwargs
     ):
         """
@@ -102,7 +111,6 @@ class BasicAgent:
             api_key: API key for cloud providers (groq, gemini)
             tools: List of tools - can be functions or BaseTool instances
             system_prompt: Custom system prompt (optional, auto-generated if not provided)
-            memory_enabled: Whether to use memory middleware
             debug: Enable debug logging
             max_iterations: Maximum tool call iterations per chat
             tool_preset: Tool preset to use ("lightweight", "minimal", "webdev", "smart", "copilot", "full")
@@ -116,30 +124,31 @@ class BasicAgent:
         self.custom_tools = tools or []
         self.custom_system_prompt = system_prompt
         
-        # Build system prompt
+        # Create the underlying agent first
+        self._agent = Agent(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            system_prompt=system_prompt or "",
+            debug=debug,
+            telemetry=telemetry,
+            max_iterations=max_iterations,
+            skills=skills,
+            workspace_root=workspace_root,
+            tool_preset=tool_preset,
+        )
+        
+        # Register custom tools first (needed for tool descriptions in system prompt)
+        self._register_tools()
+        
+        # Build system prompt (now that tools are registered)
         if system_prompt:
             self._system_prompt = system_prompt
         else:
             self._system_prompt = self._build_system_prompt()
         
-        # Create the underlying agent with tool_preset
-        self._agent = Agent(
-            llm=provider,
-            model=model,
-            api_key=api_key,
-            system_message=self._system_prompt,
-            debug=debug,
-            telemetry=telemetry,
-            memory=memory_enabled,
-            max_iterations=max_iterations,
-            skills=skills,
-            workspace_root=workspace_root,
-            tool_preset=tool_preset,
-            task_tracking=task_tracking,
-        )
-        
-        # Register custom tools
-        self._register_tools()
+        # Update agent with final system prompt
+        self._agent.default_system_message = self._system_prompt
         
         # Enable tool support if we have tools
         if self.custom_tools or self._agent.supports_tools:
@@ -147,10 +156,12 @@ class BasicAgent:
     
     def _build_system_prompt(self) -> str:
         """Build a Claude-style system prompt based on name and description."""
+        from logicore.config.prompts import _get_task_tracking_section
         tool_descriptions = self._get_tool_descriptions()
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        task_section = _get_task_tracking_section()
         
-        return f"""You are {self.name}, a custom AI assistant built with the Agentry Framework.
+        return f"""You are {self.name}, a custom AI assistant built with the Logicore Framework.
 
 <identity>
 {self.description}
@@ -161,6 +172,8 @@ You are logicore bot designed for helping everyone on their specific use cases .
 <tools>
 {tool_descriptions}
 </tools>
+
+{task_section}
 
 <guidelines>
 1. **Use Your Tools**: When a task matches one of your tools, use it. Don't try to do things manually that tools can do.
@@ -187,151 +200,31 @@ You are ready to help. Use your tools effectively.
         if not self.custom_tools:
             return "You have no tools available. Respond using your knowledge only."
         
-        lines = ["You have access to these tools:"]
-        lines.append("")
+        from logicore.config.prompts import _format_tools
         
+        # Use schemas from already-registered tools (internal_tools)
+        tool_schemas = [t for t in self._agent.internal_tools]
+        
+        # Also include any BaseTool instances not yet registered
         for tool in self.custom_tools:
             if isinstance(tool, BaseTool):
-                lines.append(f"### `{tool.name}`")
-                lines.append(f"{tool.description}")
-                # Include parameter schema from BaseTool
-                params = tool.schema.get("function", {}).get("parameters", {})
-                properties = params.get("properties", {})
-                required = params.get("required", [])
-                if properties:
-                    lines.append("**Parameters:**")
-                    for pname, pinfo in properties.items():
-                        ptype = pinfo.get("type", "string")
-                        pdesc = pinfo.get("description", "")
-                        req = " *(required)*" if pname in required else " *(optional)*"
-                        if pdesc:
-                            lines.append(f"- `{pname}` ({ptype}){req}: {pdesc}")
-                        else:
-                            lines.append(f"- `{pname}` ({ptype}){req}")
-            elif callable(tool):
-                name = tool.__name__
-                doc = tool.__doc__ or "No description provided"
-                lines.append(f"### `{name}`")
-                lines.append(f"{doc.strip()}")
-                # Include parameter info from function signature
-                sig = inspect.signature(tool)
-                params_list = [(p, v) for p, v in sig.parameters.items() if p != 'self']
-                if params_list:
-                    lines.append("**Parameters:**")
-                    for pname, param in params_list:
-                        ptype = param.annotation.__name__ if param.annotation != inspect.Parameter.empty else "string"
-                        req = " *(required)*" if param.default == inspect.Parameter.empty else " *(optional)*"
-                        lines.append(f"- `{pname}` ({ptype}){req}")
-            lines.append("")
+                # Check if not already registered
+                registered_names = {t.get("function", {}).get("name") for t in tool_schemas}
+                if tool.name not in registered_names:
+                    tool_schemas.append(tool.schema)
         
-        lines.append("Use ONLY the exact parameter names listed above when calling tools.")
-        return "\n".join(lines)
+        return _format_tools(tool_schemas)
     
     def _register_tools(self):
         """Register all custom tools with the agent."""
         for tool in self.custom_tools:
             if isinstance(tool, BaseTool):
-                # Already a BaseTool - register directly
+                # Already a BaseTool - register via public API
                 self._agent.internal_tools.append(tool.schema)
-                self._agent.custom_tool_executors[tool.name] = tool.run
+                self._agent.tool_executor.register_custom_tool(tool.name, tool.run)
             elif callable(tool):
-                # Convert function to tool
-                self.register_tool_from_function(tool)
-    
-    def register_tool_from_function(self, func: Callable):
-        """Convert a Python function to a tool and register it with docstring-parsed param descriptions."""
-        import re
-        
-        name = func.__name__
-        raw_doc = func.__doc__ or f"Execute {name}"
-        
-        # Parse docstring for param descriptions (Google + Sphinx style)
-        doc_lines = raw_doc.strip().split('\n')
-        description_lines = []
-        param_docs = {}
-        in_args = False
-        
-        for line in doc_lines:
-            stripped = line.strip()
-            sphinx = re.match(r':param\s+(\w+)\s*:(.*)', stripped)
-            if sphinx:
-                param_docs[sphinx.group(1)] = sphinx.group(2).strip()
-                continue
-            if stripped.lower() in ('args:', 'arguments:', 'parameters:', 'params:'):
-                in_args = True
-                continue
-            if stripped.lower().rstrip(':') in ('returns', 'raises', 'yields', 'examples', 'note', 'notes'):
-                in_args = False
-                continue
-            if in_args and stripped:
-                arg_match = re.match(r'(\w+)\s*(?:\([^)]*\))?\s*:(.*)', stripped)
-                if arg_match:
-                    param_docs[arg_match.group(1)] = arg_match.group(2).strip()
-                continue
-            if not in_args and stripped:
-                description_lines.append(stripped)
-        
-        description = ' '.join(description_lines) if description_lines else raw_doc.strip()
-        
-        # Get function signature
-        sig = inspect.signature(func)
-        params = sig.parameters
-        
-        # Build parameters schema
-        properties = {}
-        required = []
-        
-        for param_name, param in params.items():
-            if param.annotation != inspect.Parameter.empty:
-                param_type = param.annotation
-            else:
-                param_type = str
-            
-            type_mapping = {
-                str: "string",
-                int: "integer",
-                float: "number",
-                bool: "boolean",
-                list: "array",
-                dict: "object",
-            }
-            json_type = type_mapping.get(param_type, "string")
-            
-            pdesc = param_docs.get(param_name, f"The {param_name.replace('_', ' ')} value")
-            
-            properties[param_name] = {
-                "type": json_type,
-                "description": pdesc
-            }
-            
-            if param.default == inspect.Parameter.empty:
-                required.append(param_name)
-        
-        schema = {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description.strip(),
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required
-                }
-            }
-        }
-        
-        def executor(**kwargs):
-            try:
-                result = func(**kwargs)
-                return ToolResult(success=True, content=str(result))
-            except Exception as e:
-                return ToolResult(success=False, error=str(e))
-        
-        self._agent.internal_tools.append(schema)
-        self._agent.custom_tool_executors[name] = executor
-        
-        if self.debug:
-            print(f"[BasicAgent] Registered tool: {name}")
+                # Use base Agent's register_tool_from_function (no duplication)
+                self._agent.register_tool_from_function(tool)
     
     # --- Public API ---
     
@@ -390,16 +283,17 @@ You are ready to help. Use your tools effectively.
     def add_tool(self, tool: Union[Callable, BaseTool]):
         """
         Add a new tool to the agent.
-        
+
         Args:
             tool: A function or BaseTool instance
         """
         self.custom_tools.append(tool)
         if isinstance(tool, BaseTool):
             self._agent.internal_tools.append(tool.schema)
-            self._agent.custom_tool_executors[tool.name] = tool.run
+            self._agent.tool_executor.register_custom_tool(tool.name, tool.run)
         else:
-            self._register_function_as_tool(tool)
+            # Use base Agent's register_tool_from_function (no duplication)
+            self._agent.register_tool_from_function(tool)
     
     def add_tools(self, tools: List[Union[Callable, BaseTool]]):
         """Add multiple tools at once."""
@@ -501,11 +395,12 @@ def create_agent(
 def tool(description: str = None):
     """
     Decorator to mark a function as a tool with a description.
-    
+
     Example:
         @tool("Calculate a math expression")
         def calculator(expression: str) -> str:
-            return str(eval(expression))
+            import ast
+            return str(ast.literal_eval(expression))
     """
     def decorator(func: Callable) -> Callable:
         if description:

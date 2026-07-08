@@ -46,7 +46,7 @@ from logicore.agents.agent import Agent
 
 async def main():
     provider = OllamaProvider(model_name="qwen3.5:0.8b")
-    agent = Agent(llm=provider, role="Greeter")
+    agent = Agent(provider=provider, role="Greeter")
     response = await agent.chat("Say hello!")
     print(response['content'])
 

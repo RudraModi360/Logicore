@@ -25,7 +25,7 @@ from logicore.agents.agent_basic import BasicAgent
 import asyncio
 
 async def main():
-    agent = BasicAgent(llm="ollama")
+    agent = BasicAgent(provider="ollama")
     response = await agent.chat("What is machine learning?")
     print(response['content'])
 
@@ -115,7 +115,7 @@ from logicore.agents.agent_basic import BasicAgent
 import asyncio
 
 async def main():
-    agent = BasicAgent(llm="ollama", model="qwen2:7b")
+    agent = BasicAgent(provider="ollama", model="qwen2:7b")
     
     response = await agent.chat("What is photosynthesis?")
     print(f"Answer: {response['content']}")
@@ -136,7 +136,7 @@ Tokens used: 87
 
 ```python
 agent = BasicAgent(
-    llm="openai",
+    provider="openai",
     model="gpt-4",
     api_key="sk-...",
     temperature=0.8  # More creative
@@ -173,9 +173,9 @@ Full response: Your name is Alice and you work in AI research. Based on our conv
 ```python
 # Shakespeare expert agent
 shakespeare_agent = BasicAgent(
-    llm="ollama",
+    provider="ollama",
     model="mistral:7b",
-    system_message="""You are an expert on Shakespeare's works.
+    system_prompt="""You are an expert on Shakespeare's works.
     Answer all questions about Shakespeare in a theatrical, dramatic tone.
     Use quotes from the plays when possible.""",
     temperature=0.9  # More creative responses
@@ -188,9 +188,9 @@ print(response['content'])
 
 # Content generator agent
 creative_agent = BasicAgent(
-    llm="openai",
+    provider="openai",
     model="gpt-4",
-    system_message="You are a creative writer. Generate engaging, unique content.",
+    system_prompt="You are a creative writer. Generate engaging, unique content.",
     temperature=0.95  # Maximum creativity
 )
 

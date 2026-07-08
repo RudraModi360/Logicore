@@ -104,7 +104,9 @@ class ContextWindowManager:
         """
         self.config = config
         self.model_name = model_name
-        self._token_counter = token_counter or (lambda x: len(x) // 4)
+        from logicore.context_engine.token_estimator import TokenEstimator
+        self._estimator = token_counter if isinstance(token_counter, TokenEstimator) else TokenEstimator(token_counter)
+        self._token_counter = self._estimator.count_tokens
         
         # Initialize sub-services (pass llm_provider for context_window override)
         self.budget = TokenBudget(config, model_name, token_counter, provider=llm_provider)

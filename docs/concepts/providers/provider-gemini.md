@@ -36,9 +36,9 @@ async def main():
     provider = GeminiProvider(model_name="gemini-1.5-flash")
 
     agent = Agent(
-        llm=provider,
+        provider=provider,
         role="Multimodal Assistant",
-        system_message="Answer accurately and briefly."
+        system_prompt="Answer accurately and briefly."
     )
 
     result = await agent.chat("Explain retrieval augmented generation in 4 lines.")
@@ -54,7 +54,7 @@ def fetch_doc_title(url: str) -> str:
     """Fetch title for a URL."""
     return f"Title for {url}"
 
-agent = Agent(llm=provider, tools=[fetch_doc_title])
+agent = Agent(provider=provider, tools=[fetch_doc_title])
 ```
 
 ## Multimodal input support
@@ -63,7 +63,7 @@ agent = Agent(llm=provider, tools=[fetch_doc_title])
 
 ```python
 agent = Agent(
-    llm=GeminiProvider(model_name="gemini-2.5-pro"),
+    provider=GeminiProvider(model_name="gemini-2.5-pro"),
     role="Vision Assistant"
 )
 

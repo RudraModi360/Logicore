@@ -109,7 +109,7 @@ def get_time() -> str:
     from datetime import datetime
     return datetime.now().strftime("%H:%M:%S")
 
-agent = Agent(llm="ollama", tools=[get_time])
+agent = Agent(provider="ollama", tools=[get_time])
 agent.set_auto_approve_all(True)
 
 response = await agent.chat("What time is it?")
@@ -126,7 +126,7 @@ The tool is discoverable from its signature/docstring and can be called by the m
 def on_token(token: str):
     print(token, end="", flush=True)
 
-agent = Agent(llm="openai", model="gpt-4o-mini")
+agent = Agent(provider="openai", model="gpt-4o-mini")
 response = await agent.chat(
     "Explain event loops in Python",
     stream=True,
@@ -147,7 +147,7 @@ async def approve_tool(session_id, tool_name, args):
         return False
     return True
 
-agent = Agent(llm="ollama", tools=[...], memory=True)
+agent = Agent(provider="ollama", tools=[...], memory=True)
 agent.set_callbacks(on_tool_approval=approve_tool)
 
 response = await agent.chat("Clean temp files and summarize")

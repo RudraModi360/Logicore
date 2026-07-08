@@ -19,7 +19,7 @@ class CustomProvider(LLMProvider):
             api_key="not-needed",
             endpoint="http://localhost:1234/v1",
         )
-        agent = Agent(llm=provider)
+        agent = Agent(provider=provider)
 
     Environment variables (fallback):
         CUSTOM_PROVIDER_MODEL       – model name

@@ -21,7 +21,7 @@ def summarize_text(text: str, max_points: int = 5, **kwargs) -> str:
     """
     return f"Summarized into {max_points} points"
 
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.register_tool_from_function(summarize_text)
 ```
 
@@ -48,7 +48,7 @@ def multiply(a: int, b: int) -> int:
     return a * b
 
 agent = Agent(
-    llm="ollama",
+    provider="ollama",
     tools=[add, multiply]
 )
 ```
@@ -87,7 +87,7 @@ schema = {
     }
 }
 
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.add_custom_tool(schema, run_sql)
 ```
 
@@ -121,7 +121,7 @@ class InvoiceLookupTool(BaseTool):
 
 
 tool = InvoiceLookupTool()
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.add_custom_tool(tool.schema, lambda **kwargs: tool.run(**kwargs))
 ```
 

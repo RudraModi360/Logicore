@@ -1,5 +1,5 @@
 """
-Agentry Unified Configuration
+Logicore Unified Configuration
 Single source of truth for all deployment and runtime settings.
 
 Priority: Environment Variables > logicore.toml > defaults
@@ -89,8 +89,10 @@ def get_api_key(provider: str):
         return os.getenv("OLLAMA_API_KEY")
     elif provider == "azure":
         return os.getenv("AZURE_API_KEY")
+    elif provider == "exa":
+        return os.getenv("EXA_API_KEY")
     elif provider == "custom":
-        return os.getenv("CUSTOM_PROVIDER_API_KEY") or os.getenv("CUSTOM_API_KEY") or "not-needed"
+        return os.getenv("CUSTOM_PROVIDER_API_KEY") or os.getenv("CUSTOM_API_KEY")
     return None
 
 
@@ -144,7 +146,7 @@ class AgentrySettings:
     # ==========================================================================
     # SERVER
     # ==========================================================================
-    HOST: str = field(default_factory=lambda: _get_env("HOST", "0.0.0.0", "server", "host"))
+    HOST: str = field(default_factory=lambda: _get_env("HOST", "127.0.0.1", "server", "host"))
     PORT: int = field(default_factory=lambda: _get_int("PORT", 8000, "server", "port"))
     FRONTEND_PORT: int = field(default_factory=lambda: _get_int("FRONTEND_PORT", 3000, "server", "frontend_port"))
     
@@ -169,7 +171,7 @@ class AgentrySettings:
         ]
     
     # ==========================================================================
-    # EMBEDDING & SIMPLEMEM
+    # EMBEDDING
     # ==========================================================================
     EMBEDDING_PROVIDER: str = field(default_factory=lambda: _get_env("EMBEDDING_PROVIDER", "ollama", "embedding", "provider"))
     """Embedding provider: 'ollama' or 'huggingface'"""
@@ -181,15 +183,6 @@ class AgentrySettings:
     def OLLAMA_URL(self) -> str:
         """Ollama API URL (auto-detects Kubernetes)."""
         return _get_env("OLLAMA_URL", "http://localhost:11434", "embedding", "ollama_url")
-    
-    SIMPLEMEM_ENABLED: bool = field(default_factory=lambda: _get_bool("SIMPLEMEM_ENABLED", True, "simplemem", "enabled"))
-    """Enable SimpleMem context engineering"""
-    
-    SIMPLEMEM_WINDOW_SIZE: int = field(default_factory=lambda: _get_int("SIMPLEMEM_WINDOW_SIZE", 6, "simplemem", "window_size"))
-    """Dialogue window size for memory processing"""
-    
-    SIMPLEMEM_TOP_K: int = field(default_factory=lambda: _get_int("SIMPLEMEM_TOP_K", 5, "simplemem", "top_k"))
-    """Number of memories to retrieve"""
     
     # ==========================================================================
     # CLOUD SERVICES (when MODE=cloud)
@@ -358,7 +351,6 @@ class AgentrySettings:
             "PORT": self.PORT,
             "OLLAMA_URL": self.OLLAMA_URL,
             "LANCEDB_PATH": self.LANCEDB_PATH,
-            "SIMPLEMEM_ENABLED": self.SIMPLEMEM_ENABLED,
             "EMBEDDING_PROVIDER": self.EMBEDDING_PROVIDER,
             "EMBEDDING_MODEL": self.EMBEDDING_MODEL,
             "is_cloud": self.is_cloud,
@@ -383,3 +375,6 @@ MODE = settings.MODE
 DEBUG = settings.DEBUG
 OLLAMA_URL = settings.OLLAMA_URL
 LANCEDB_PATH = settings.LANCEDB_PATH
+
+# Alias for new code
+LogicoreSettings = AgentrySettings

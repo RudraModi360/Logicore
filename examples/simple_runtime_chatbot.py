@@ -74,11 +74,11 @@ async def main():
     
     # === Step 3: Create Agent with tools ===
     agent = Agent(
-        llm=provider,
-        system_message="You are a helpful assistant. Be concise and clear.",
+        provider=provider,
+        system_prompt="You are a helpful assistant. Be concise and clear.",
         tools=True,  # Enable built-in tools
         debug=False,
-        memory=False,
+
     )
     
     # Stream tokens to stdout as they arrive
@@ -105,7 +105,7 @@ async def main():
     # Create runtime
     runtime = AgentRuntime(
         config=config,
-        llm_provider=provider,
+        provider=provider,
         model_name=model,
         tool_executor=tool_executor,
     )

@@ -64,7 +64,6 @@ module_tests = [
     ("logicore.gateway", "from logicore.gateway import ProviderGateway, NormalizedMessage"),
     ("logicore.context_engine", "from logicore.context_engine import ContextEngine, TokenEstimator"),
     ("logicore.document", "from logicore.document import get_handler, BaseDocumentHandler"),
-    ("logicore.memory", "from logicore.memory import ProjectMemory, AgentrySimpleMem"),
 ]
 
 for name, import_stmt in module_tests:
@@ -96,9 +95,6 @@ try:
         "GitCommandTool",
         "ReadDocumentTool", "ConvertDocumentTool",
         "NotesTool", "DateTimeTool", "ThinkTool", "SmartBashTool",
-        "EditPPTXTool", "CreatePPTXTool", "AppendSlideTool",
-        "EditDOCXTool", "CreateDOCXTool",
-        "EditExcelTool", "CreateExcelTool",
         "MergePDFTool", "SplitPDFTool",
         "MediaSearchTool",
         "AddCronJobTool", "ListCronJobsTool", "RemoveCronJobTool",
@@ -126,13 +122,6 @@ try:
         "NotesTool": "logicore.tools.notes",
         "SmartBashTool": "logicore.tools.bash",
         "ThinkTool": "logicore.tools.think",
-        "EditPPTXTool": "logicore.tools.office",
-        "CreatePPTXTool": "logicore.tools.office",
-        "AppendSlideTool": "logicore.tools.office",
-        "EditDOCXTool": "logicore.tools.office",
-        "CreateDOCXTool": "logicore.tools.office",
-        "EditExcelTool": "logicore.tools.office",
-        "CreateExcelTool": "logicore.tools.office",
         "MergePDFTool": "logicore.tools.pdf",
         "SplitPDFTool": "logicore.tools.pdf",
         "MediaSearchTool": "logicore.tools.media",
@@ -222,46 +211,8 @@ except Exception as e:
     check("Context module", False, str(e))
     errors.append(f"Context module: {e}")
 
-# -- 6. Memory System (Removed) --
-section("6. Memory System (Removed)")
-
-try:
-    from logicore.memory import ProjectMemory, AgentrySimpleMem, ProjectContext, MemoryType
-    from logicore.memory.project import ProjectMemory as PM2, MemoryEntry
-    from logicore.memory.providers import AgentrySimpleMem as ASM2
-
-    check("Memory module imports OK (stubs)", True)
-
-    pm = ProjectMemory()
-    check("ProjectMemory stub instantiated", True)
-
-    # Memory functionality has been removed - stubs return None/empty
-    proj = pm.create_project(project_id="test_proj", title="Test Project", goal="Testing")
-    check("Project stub returns None", proj is None)
-
-    entry = pm.add_memory(
-        memory_type=MemoryType.LEARNING,
-        title="Test Learning",
-        content="This is a test memory entry for validation.",
-        tags=["test", "validation"],
-        project_id="test_proj"
-    )
-    check("Memory stub returns None", entry is None)
-
-    results = pm.search_memories(query="test", limit=10)
-    check(f"Memory search returns empty: {len(results)} results", len(results) == 0)
-
-    context = pm.export_for_llm(project_id="test_proj")
-    check(f"Memory export returns empty: {len(context)} chars", len(context) == 0)
-
-    check("Memory system stubs functional", True)
-
-except Exception as e:
-    check("Memory system stubs", False, str(e))
-    errors.append(f"Memory system stubs: {e}")
-
-# -- 7. Session & Telemetry --
-section("7. Session & Telemetry")
+# -- 6. Session & Telemetry --
+section("6. Session & Telemetry")
 
 try:
     from logicore.session import SessionStorage, SessionManager
@@ -277,8 +228,8 @@ except Exception as e:
     check("Session/Telemetry", False, str(e))
     errors.append(f"Session/Telemetry: {e}")
 
-# -- 8. MCP & Gateway --
-section("8. MCP & Gateway")
+# -- 7. MCP & Gateway --
+section("7. MCP & Gateway")
 
 try:
     from logicore.mcp import MCPClientManager
@@ -293,8 +244,8 @@ except Exception as e:
     check("MCP/Gateway", False, str(e))
     errors.append(f"MCP/Gateway: {e}")
 
-# -- 9. No Old Import Paths --
-section("9. No Old Import Paths Remain")
+# -- 8. No Old Import Paths --
+section("8. No Old Import Paths Remain")
 
 old_paths = [
     "logicore.agents.agent",
@@ -306,12 +257,8 @@ old_paths = [
     "logicore.session_manager",
     "logicore.document_handlers",
     "logicore.providers.gateway",
-    "logicore.memory.middleware",
-    "logicore.memory.storage",
     "logicore.context_engine",
-    "logicore.memory.project_memory",
     "logicore.tools.agent_tools",
-    "logicore.tools.office_tools",
     "logicore.tools.pdf_tools",
     "logicore.tools.media_search",
     "logicore.tools.cron_tools",
@@ -337,7 +284,7 @@ if all_old_gone:
     check("All old import paths removed", True)
 
 
-# -- 10. Summary --
+# -- 9. Summary --
 section("SUMMARY")
 total_tests = 40
 passed = total_tests - len(errors)

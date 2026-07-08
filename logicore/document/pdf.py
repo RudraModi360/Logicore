@@ -1,8 +1,12 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from .base import BaseDocumentHandler
 
+# Maximum pages to OCR via VLM before giving up (prevents hanging on large scanned PDFs)
+_MAX_OCR_PAGES = 10
+
+
 class PDFHandler(BaseDocumentHandler):
-    """Handler for PDF documents using PyPDFLoader with OllamaVision fallback for scanned pages."""
+    """Handler for PDF documents with hybrid OCR (pytesseract primary, Ollama VLM fallback)."""
 
     def __init__(self, file_path: str):
         super().__init__(file_path)
@@ -10,8 +14,15 @@ class PDFHandler(BaseDocumentHandler):
         self._text = ""
         self._metadata = {}
 
-    def load(self) -> None:
-        """Load and parse the PDF file using PyPDFLoader with OllamaVision fallback for scanned pages."""
+    def load(self, reasoning_prompt: Optional[str] = None) -> None:
+        """
+        Load and parse the PDF file.
+
+        Args:
+            reasoning_prompt: If provided, scanned pages are sent to the VLM with
+                            this prompt instead of raw OCR. Useful when the agent
+                            wants targeted analysis (e.g. "summarize this page").
+        """
         try:
             from langchain_community.document_loaders import PyPDFLoader
             import pypdf
@@ -22,22 +33,24 @@ class PDFHandler(BaseDocumentHandler):
             # 1. Load Text via PyPDFLoader
             loader = PyPDFLoader(self.file_path)
             documents = loader.load()
-            
+
             final_text_parts = []
-            reader = pypdf.PdfReader(self.file_path)
-            
-            # Check if Ollama Vision is available
+            self._reader = pypdf.PdfReader(self.file_path)
+            reader = self._reader
+
+            # Check if OCR service is available
             try:
-                from ..services.ollama_vision import OllamaVisionService
+                from ..services.ocr_service import ocr_from_image, reason_about_image
                 from PIL import Image
                 from io import BytesIO
-                VISION_AVAILABLE = True
+                OCR_AVAILABLE = True
             except ImportError:
-                VISION_AVAILABLE = False
-            
+                OCR_AVAILABLE = False
+
+            ocr_count = 0
             for i, doc in enumerate(documents):
                 page_text = doc.page_content
-                
+
                 # Check if page is likely scanned (has images, little text)
                 is_scanned = False
                 try:
@@ -48,47 +61,55 @@ class PDFHandler(BaseDocumentHandler):
                 except (IndexError, AttributeError):
                     pass
 
-                # If scanned and Vision available, OCR the images
-                if is_scanned and VISION_AVAILABLE:
+                # If scanned and OCR available, process images
+                if is_scanned and OCR_AVAILABLE and ocr_count < _MAX_OCR_PAGES:
                     image_texts = []
                     try:
                         for img_obj in reader.pages[i].images:
                             try:
                                 image = Image.open(BytesIO(img_obj.data))
-                                ocr_text = OllamaVisionService.get_text_from_pil_image(image)
+
+                                # Use reasoning prompt if provided, otherwise raw OCR
+                                if reasoning_prompt:
+                                    ocr_text = reason_about_image(image, reasoning_prompt)
+                                else:
+                                    ocr_text = ocr_from_image(image)
+
                                 if ocr_text.strip():
                                     image_texts.append(ocr_text)
                             except Exception:
                                 continue
                     except (IndexError, AttributeError):
                         pass
-                    
+
                     if image_texts:
                         combined = "\n".join(image_texts)
-                        final_text_parts.append(f"--- Page {i+1} (OllamaVision) ---\n{combined}")
-                        self._metadata[f"page_{i+1}_engine"] = "ollama_vision"
+                        engine = "vlm_reasoning" if reasoning_prompt else "ocr"
+                        final_text_parts.append(f"--- Page {i+1} ({engine}) ---\n{combined}")
+                        self._metadata[f"page_{i+1}_engine"] = engine
+                        ocr_count += 1
                         continue
-                
+
                 # Standard text
                 final_text_parts.append(page_text)
-            
+
             self._text = "\n\n".join(final_text_parts).strip()
-            
+
             # Extract metadata
             if reader.metadata:
                 for key, value in reader.metadata.items():
                     clean_key = key[1:] if key.startswith('/') else key
                     self._metadata[clean_key] = value
-                    
+
         except Exception as e:
             raise RuntimeError(f"Failed to load PDF file {self.file_path}: {e}")
 
     def get_text(self) -> str:
-        if self._reader is None:
+        if not self._text:
             self.load()
         return self._text
 
     def get_metadata(self) -> Dict[str, Any]:
-        if self._reader is None:
+        if not self._metadata:
             self.load()
         return self._metadata

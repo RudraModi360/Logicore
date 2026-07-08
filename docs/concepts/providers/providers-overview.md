@@ -308,7 +308,7 @@ class InternalLLMProvider(LLMProvider):
         # Optional: ping your internal endpoint
         return True
 
-agent = Agent(llm=InternalLLMProvider(endpoint="...", api_key="..."))
+agent = Agent(provider=InternalLLMProvider(endpoint="...", api_key="..."))
 ```
 
 `ProviderCapability` values: `CHAT`, `STREAMING`, `TOOLS`, `VISION`, `EMBEDDINGS`, `JSON_MODE`.

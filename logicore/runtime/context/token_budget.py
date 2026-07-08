@@ -110,7 +110,9 @@ class TokenBudget:
             config = RuntimeConfig.from_settings()
         self.config = config
         self.model_name = model_name
-        self._token_counter = token_counter or self._default_token_counter
+        from logicore.context_engine.token_estimator import TokenEstimator
+        self._estimator = token_counter if isinstance(token_counter, TokenEstimator) else TokenEstimator(token_counter)
+        self._token_counter = self._estimator.count_tokens
         
         # Get model-specific context window (provider can override)
         self.context_window = config.get_model_context_window(model_name, provider)

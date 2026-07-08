@@ -199,7 +199,7 @@ graph TD
 Agents automatically maintain context across multiple turns:
 
 ```python
-agent = Agent(llm="ollama", tools=[check_weather])
+agent = Agent(provider="ollama", tools=[check_weather])
 
 # Turn 1
 r1 = await agent.chat("What's the weather in Seattle?")
@@ -226,7 +226,7 @@ Agents can access two types of memory:
 ### Session Memory
 Automatic within the conversation:
 ```python
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 await agent.chat("My name is Alice")
 await agent.chat("What's my name?")
 # Agent remembers: "Your name is Alice"
@@ -235,11 +235,11 @@ await agent.chat("What's my name?")
 ### Persistent Memory (with `memory=True`)
 Stores and retrieves embeddings across sessions:
 ```python
-agent = Agent(llm="ollama", memory=True)
+agent = Agent(provider="ollama", memory=True)
 await agent.chat("The capital of France is Paris")
 
 # Later, in a new session:
-agent2 = Agent(llm="ollama", memory=True)
+agent2 = Agent(provider="ollama", memory=True)
 await agent2.chat("Where is the capital of France?")
 # Semantic search retrieves: "...Paris" from storage
 ```
@@ -379,11 +379,11 @@ Agents expose control at every level:
 
 ```python
 agent = Agent(
-    llm="ollama",                    # LLM provider
+    provider="ollama",                    # LLM provider
     model="qwen2:7b",                # Specific model
     tools=[check_weather, get_time],  # Available tools
     role="Weather Assistant",         # Identity
-    system_message="Be concise...",   # Instructions
+    system_prompt="Be concise...",   # Instructions
     memory=True,                      # Enable persistence
     max_iterations=10,                # Prevent loops
     debug=True,                       # Enable logging

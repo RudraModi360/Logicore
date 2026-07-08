@@ -1,0 +1,1 @@
+"""Memory consolidation subpackage."""

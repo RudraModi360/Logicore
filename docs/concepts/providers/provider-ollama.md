@@ -30,9 +30,9 @@ async def main():
     provider = OllamaProvider(model_name="qwen3.5:0.8b")
 
     agent = Agent(
-        llm=provider,
+        provider=provider,
         role="Local Assistant",
-        system_message="Be concise and accurate."
+        system_prompt="Be concise and accurate."
     )
 
     result = await agent.chat("Summarize why local models are useful.")
@@ -48,7 +48,7 @@ def get_weather(city: str) -> str:
     """Get weather information for a city."""
     return f"Weather in {city}: 27°C, clear"
 
-agent = Agent(llm=provider, tools=[get_weather])
+agent = Agent(provider=provider, tools=[get_weather])
 ```
 
 ## Multimodal input support
@@ -57,7 +57,7 @@ agent = Agent(llm=provider, tools=[get_weather])
 
 ```python
 agent = Agent(
-    llm=OllamaProvider(model_name="qwen3-vl:latest"),
+    provider=OllamaProvider(model_name="qwen3-vl:latest"),
     role="Vision Assistant"
 )
 

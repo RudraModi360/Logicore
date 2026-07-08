@@ -56,6 +56,14 @@ class EnterPlanModeTool(BaseTool):
     )
     args_schema = EnterPlanModeParams
     
+    def is_read_only(self, args=None) -> bool:
+        """Enter plan mode is read-only (just changes state)."""
+        return True
+    
+    def is_destructive(self, args=None) -> bool:
+        """Enter plan mode is NOT destructive."""
+        return False
+    
     def run(self, reason: str = None, **kwargs) -> ToolResult:
         try:
             planner = get_planner()
@@ -96,6 +104,14 @@ class SubmitPlanTool(BaseTool):
         "User must approve before execution proceeds."
     )
     args_schema = SubmitPlanParams
+    
+    def is_read_only(self, args=None) -> bool:
+        """Submit plan is NOT read-only (creates plan)."""
+        return False
+    
+    def is_destructive(self, args=None) -> bool:
+        """Submit plan is NOT destructive."""
+        return False
     
     def run(
         self,
@@ -160,6 +176,14 @@ class ExitPlanModeTool(BaseTool):
         "or action='cancel' to abort."
     )
     args_schema = ExitPlanModeParams
+    
+    def is_read_only(self, args=None) -> bool:
+        """Exit plan mode is NOT read-only (modifies state)."""
+        return False
+    
+    def is_destructive(self, args=None) -> bool:
+        """Exit plan mode is NOT destructive."""
+        return False
     
     def run(
         self,
@@ -244,6 +268,14 @@ class UpdatePlanProgressTool(BaseTool):
     )
     args_schema = UpdatePlanProgressParams
     
+    def is_read_only(self, args=None) -> bool:
+        """Update plan progress is NOT read-only (modifies data)."""
+        return False
+    
+    def is_destructive(self, args=None) -> bool:
+        """Update plan progress is NOT destructive."""
+        return False
+    
     def run(
         self,
         step_number: int,
@@ -320,6 +352,14 @@ class ViewPlanTool(BaseTool):
         "Use to check execution progress and remaining steps."
     )
     args_schema = ViewPlanParams
+    
+    def is_read_only(self, args=None) -> bool:
+        """View plan is read-only (just reads data)."""
+        return True
+    
+    def is_destructive(self, args=None) -> bool:
+        """View plan is NOT destructive."""
+        return False
     
     def run(self, plan_id: str = None, **kwargs) -> ToolResult:
         try:

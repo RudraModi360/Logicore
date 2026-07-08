@@ -100,17 +100,6 @@
             "docs/concepts/skills/skills-use-in-agents",
             "docs/concepts/skills/skills-working-internals"
           ]
-        },
-        {
-          "group": "Memory",
-          "pages": [
-            "docs/concepts/memory/memory",
-            "docs/concepts/memory/memory-overview",
-            "docs/concepts/memory/memory-short-term",
-            "docs/concepts/memory/memory-long-term",
-            "docs/concepts/memory/memory-simplemem-integration",
-            "docs/concepts/memory/memory-use-in-agents"
-          ]
         }
       ]
     },

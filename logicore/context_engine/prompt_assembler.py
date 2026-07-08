@@ -51,8 +51,12 @@ class PromptAssembler:
         """
         prompt = base_prompt
 
+        # Append tools section if not already embedded in base_prompt
+        if tools_section and tools_section not in prompt:
+            prompt += tools_section
+
         if hidden_tool_count > 0:
-            tools_section += (
+            prompt += (
                 f"\n\n- Note: {hidden_tool_count} additional tools are available at runtime "
                 "but omitted from prompt docs for context efficiency."
             )
@@ -60,18 +64,35 @@ class PromptAssembler:
         if skills_section:
             prompt += skills_section
 
-        # Truncate if too long
+        # Truncate if too long — use semantic-aware boundary detection
         if len(prompt) > self.max_chars:
-            prompt = (
-                prompt[: self.max_chars]
-                + "\n\n[System prompt truncated for context efficiency.]"
-            )
+            prompt = self._truncate_semantic(prompt, self.max_chars)
             if self.debug:
                 print(
-                    f"[ContextEngine] ⚠️ System prompt exceeded {self.max_chars} chars and was truncated"
+                    f"[ContextEngine] System prompt exceeded {self.max_chars} chars and was truncated"
                 )
 
         return prompt
+
+    @staticmethod
+    def _truncate_semantic(prompt: str, max_chars: int) -> str:
+        """
+        Truncate prompt at a semantic boundary (section header or newline)
+        rather than mid-word or mid-tag. Falls back to max_chars if no good
+        boundary is found within the last 500 characters.
+        """
+        truncated = prompt[:max_chars]
+        # Search backwards for a clean section boundary (## header)
+        last_header = truncated.rfind("\n## ")
+        if last_header > max_chars - 500:
+            truncated = truncated[:last_header]
+        else:
+            # Fall back to last newline
+            last_newline = truncated.rfind("\n")
+            if last_newline > max_chars - 500:
+                truncated = truncated[:last_newline]
+
+        return truncated + "\n\n[System prompt truncated for context efficiency.]"
 
     def patch_custom_prompt(
         self,

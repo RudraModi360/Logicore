@@ -90,7 +90,7 @@ class TelemetryEvent:
 
 @dataclass
 class SessionMetrics:
-    """Aggregated metrics for a session."""
+    """Aggregated runtime execution metrics for a session (turns, tools, loops, context)."""
     session_id: str
     
     # Turn metrics

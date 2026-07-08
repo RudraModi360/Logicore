@@ -27,7 +27,7 @@ import asyncio
 
 async def main():
     agent = MCPAgent(
-        llm="ollama",
+        provider="ollama",
         mcp_servers=["file_system", "web_search"]
     )
     agent.set_auto_approve_all(True)
@@ -159,7 +159,7 @@ response = await agent.chat(
 
 ```python
 agent = MCPAgent(
-    llm="ollama",
+    provider="ollama",
     mcp_servers=["web_search"]  # Load web search server
 )
 agent.set_auto_approve_all(True)
@@ -211,7 +211,7 @@ async def rbac_approval(tool_name, args):
     return tool_name in allowed
 
 agent = MCPAgent(
-    llm="ollama",
+    provider="ollama",
     mcp_servers=["file_system", "web_search", "database_client"]
 )
 agent.set_callbacks(on_tool_approval=rbac_approval)
@@ -230,7 +230,7 @@ response = await agent.chat("Delete old logs in /data/")
 
 ```python
 agent = MCPAgent(
-    llm="openai",
+    provider="openai",
     mcp_servers=["file_system", "database_client"],
     tool_governance_enabled=True,
     audit_logs_path="/var/log/agent_audit.log"
@@ -267,7 +267,7 @@ report = {
 ```python
 # Connect to custom MCP server (e.g., internal analytics tools)
 agent = MCPAgent(
-    llm="ollama",
+    provider="ollama",
     mcp_servers=[
         "file_system",                           # Built-in
         "web_search",                            # Built-in
@@ -312,7 +312,7 @@ def strict_approval(tool_name, args):
     return False
 
 agent = MCPAgent(
-    llm="azure",  # Enterprise provider
+    provider="azure",  # Enterprise provider
     model="gpt-4",
     mcp_servers=[
         {"url": "stdio://enterprise-tools", "args": ["--prod"]},
@@ -338,7 +338,7 @@ response = await agent.chat("Analyze Q4 data and competitor trends")
 ## Loading MCP Servers
 
 ```python
-agent = MCPAgent(llm="ollama")
+agent = MCPAgent(provider="ollama")
 
 # Load built-in servers
 agent.load_mcp_server("file_system")

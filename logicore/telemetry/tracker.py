@@ -1,5 +1,5 @@
 """
-Agentry Telemetry Module
+Logicore Telemetry Module
 Comprehensive token usage tracking with detailed breakdown per session.
 
 Features:
@@ -141,6 +141,9 @@ class ContextWindowFetcher:
         try:
             import subprocess
             import json
+            import re
+            if not re.match(r'^[a-zA-Z0-9._:-]+$', model):
+                return None
             result = subprocess.run(
                 ["ollama", "show", model, "--json"],
                 capture_output=True,

@@ -89,7 +89,7 @@ Logicore provides three agent types, each optimized for different needs:
 ```python
 from logicore.agents.agent_basic import BasicAgent
 
-agent = BasicAgent(llm="ollama")
+agent = BasicAgent(provider="ollama")
 response = await agent.chat("What is AI?")
 ```
 
@@ -110,7 +110,7 @@ def check_weather(location: str) -> str:
     """Get weather for a location."""
     return "72°F and sunny"
 
-agent = Agent(llm="ollama", tools=[check_weather])
+agent = Agent(provider="ollama", tools=[check_weather])
 agent.set_auto_approve_all(True)
 response = await agent.chat("What's the weather in Seattle?")
 ```
@@ -129,11 +129,11 @@ response = await agent.chat("What's the weather in Seattle?")
 from logicore.agents.agent_smart import SmartAgent
 
 # Solo mode: explore and reason
-agent = SmartAgent(llm="ollama", mode="solo")
+agent = SmartAgent(provider="ollama", mode="solo")
 response = await agent.chat("Find the latest AI trends and explain")
 
 # Or Project mode: focused work
-agent = SmartAgent(llm="ollama", mode="project")
+agent = SmartAgent(provider="ollama", mode="project")
 agent.create_project("api-backend", "REST API", goal="Build scalable API")
 agent.switch_to_project("api-backend")
 response = await agent.chat("Design the authentication flow")
@@ -153,7 +153,7 @@ response = await agent.chat("Design the authentication flow")
 from logicore.agents.agent_mcp import MCPAgent
 
 agent = MCPAgent(
-    llm="ollama",
+    provider="ollama",
     mcp_servers=["file_system", "web_search", "database_client"]
 )
 agent.set_callbacks(on_tool_approval=rbac_approval)
@@ -193,11 +193,11 @@ Every agent has three core components:
 ### Brain: The LLM Provider
 ```python
 # Choose your provider
-agent = Agent(llm="ollama")       # Local
-agent = Agent(llm="openai")       # Cloud
-agent = Agent(llm="gemini")       # Google
-agent = Agent(llm="groq")         # Fast inference
-agent = Agent(llm="azure")        # Enterprise
+agent = Agent(provider="ollama")       # Local
+agent = Agent(provider="openai")       # Cloud
+agent = Agent(provider="gemini")       # Google
+agent = Agent(provider="groq")         # Fast inference
+agent = Agent(provider="azure")        # Enterprise
 ```
 
 ### Hands: Tools & Skills
@@ -261,21 +261,21 @@ agent = Agent(memory=True)  # Stores facts across sessions
 ### Scenario 1: Quick Chatbot
 → Use **BasicAgent**
 ```python
-agent = BasicAgent(llm="ollama")
+agent = BasicAgent(provider="ollama")
 # Done. No tools, no config needed.
 ```
 
 ### Scenario 2: Weather Assistant with Web Search
 → Use **Agent**
 ```python
-agent = Agent(llm="ollama", tools=[check_weather, search_web])
+agent = Agent(provider="ollama", tools=[check_weather, search_web])
 agent.set_auto_approve_all(True)
 ```
 
 ### Scenario 3: Developer Assistant for a Project
 → Use **SmartAgent**
 ```python
-agent = SmartAgent(llm="ollama", mode="project")
+agent = SmartAgent(provider="ollama", mode="project")
 agent.create_project("my-app", "Python App", goal="Build CLI tool")
 agent.switch_to_project("my-app")
 # Web search, bash, notes, memory all built-in
@@ -285,7 +285,7 @@ agent.switch_to_project("my-app")
 → Use **MCPAgent**
 ```python
 agent = MCPAgent(
-    llm="azure",
+    provider="azure",
     mcp_servers=["database", "file_system", "http_client"]
 )
 agent.set_callbacks(on_tool_approval=rbac_approval)

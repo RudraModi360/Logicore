@@ -9,11 +9,54 @@ Tools:
 - task_next: Get next available task
 
 These tools wrap TaskManager and are registered in the tool registry.
+
+Supports dependency injection for multi-agent scenarios:
+- TaskToolContext: Holds task manager and agent ID for each agent instance
+- get_task_tools_with_context(): Returns tools bound to a specific context
 """
 
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from pydantic import BaseModel, Field
 from logicore.tools.base import BaseTool, ToolResult
+
+if TYPE_CHECKING:
+    from logicore.tasks.manager import TaskManager
+
+
+# === Dependency Injection Context ===
+
+class TaskToolContext:
+    """
+    Context for task tools that holds task manager and agent ID.
+    
+    This enables multi-agent scenarios by eliminating global state.
+    Each agent instance should create its own context.
+    
+    Usage:
+        context = TaskToolContext(task_manager=manager, agent_id="agent-1")
+        tools = get_task_tools_with_context(context)
+        for tool in tools:
+            agent.tool_executor.register_custom_tool(tool.name, tool.run)
+    """
+    
+    def __init__(self, task_manager: 'TaskManager', agent_id: str):
+        """
+        Initialize task tool context.
+        
+        Args:
+            task_manager: The TaskManager instance for this agent
+            agent_id: Unique identifier for this agent
+        """
+        self.task_manager = task_manager
+        self.agent_id = agent_id
+    
+    def get_task_manager(self) -> 'TaskManager':
+        """Get the task manager for this context."""
+        return self.task_manager
+    
+    def get_agent_id(self) -> str:
+        """Get the agent ID for this context."""
+        return self.agent_id
 
 
 # === Tool Argument Schemas ===
@@ -92,14 +135,35 @@ class TaskNextArgs(BaseModel):
 
 # These tools are intercepted by the Agent before execution.
 # They use TaskManager internally, which is initialized by the Agent.
+#
+# WARNING: These are module-level globals. If multiple Agent instances
+# run concurrently in the same process, the last one to call set_task_manager()
+# wins. This is a known limitation. For multi-agent scenarios, each agent
+# should run in a separate process.
+
+import logging as _logging
+_task_logger = _logging.getLogger(__name__)
 
 _task_manager = None
+_task_manager_owner: str | None = None  # Track which agent owns the globals
 
 
-def set_task_manager(manager):
-    """Set the task manager instance for tools to use."""
-    global _task_manager
+def set_task_manager(manager, owner_id: str = "unknown"):
+    """Set the task manager instance for tools to use.
+
+    Args:
+        manager: The TaskManager instance
+        owner_id: Identifier of the agent claiming ownership (for conflict detection)
+    """
+    global _task_manager, _task_manager_owner
+    if _task_manager is not None and _task_manager_owner != owner_id:
+        _task_logger.warning(
+            f"[TaskTools] Global task manager being overwritten by agent '{owner_id}' "
+            f"(previous owner: '{_task_manager_owner}'). "
+            f"If running multiple agents concurrently, this causes state crosstalk."
+        )
     _task_manager = manager
+    _task_manager_owner = owner_id
 
 
 def get_task_manager():
@@ -108,12 +172,24 @@ def get_task_manager():
 
 
 _agent_id = None
+_agent_id_owner: str | None = None
 
 
-def set_agent_id(agent_id: str):
-    """Set the agent ID for task claiming (multi-agent coordination)."""
-    global _agent_id
+def set_agent_id(agent_id: str, owner_id: str = "unknown"):
+    """Set the agent ID for task claiming (multi-agent coordination).
+
+    Args:
+        agent_id: The agent identifier
+        owner_id: Identifier of the agent claiming ownership (for conflict detection)
+    """
+    global _agent_id, _agent_id_owner
+    if _agent_id is not None and _agent_id != agent_id and _agent_id_owner != owner_id:
+        _task_logger.warning(
+            f"[TaskTools] Global agent_id being overwritten: '{_agent_id}' -> '{agent_id}' "
+            f"(owner: '{owner_id}')."
+        )
     _agent_id = agent_id
+    _agent_id_owner = owner_id
 
 
 def get_agent_id() -> str:
@@ -125,18 +201,39 @@ class TaskCreateTool(BaseTool):
     """Create a new task in the task list."""
     name = "task_create"
     description = (
-        "Create a new task to track work. Tasks can have dependencies "
-        "(blocked_by) that prevent claiming until resolved. Use active_form "
-        "to describe what will be shown in the UI while this task runs."
+        "MUST USE for any request with 3+ steps. Creates a task to track work. "
+        "For exploration tasks: explore first, then create tasks from findings. "
+        "For implementation tasks: create tasks first, then execute. Use active_form "
+        "for live UI status. Use blocked_by for dependencies."
     )
     args_schema = TaskCreateArgs
     
+    def __init__(self, context: Optional[TaskToolContext] = None):
+        """
+        Initialize task create tool.
+        
+        Args:
+            context: Optional context for dependency injection. If None, uses global state.
+        """
+        super().__init__()
+        self._context = context
+    
+    def is_read_only(self, args=None) -> bool:
+        """Task creation is NOT read-only (creates data)."""
+        return False
+    
+    def is_destructive(self, args=None) -> bool:
+        """Task creation is NOT destructive (reversible)."""
+        return False
+    
     def run(self, subject: str, description: str = "", active_form: Optional[str] = None,
-            blocked_by: Optional[List[str]] = None) -> ToolResult:
-        if not _task_manager:
-            return ToolResult(success=False, error="Task manager not initialized")
+            blocked_by: Optional[List[str]] = None, **kwargs) -> ToolResult:
+        # Get task manager from context or global state
+        task_manager = self._context.get_task_manager() if self._context else _task_manager
+        if not task_manager:
+            return ToolResult(success=False, error="Task manager not initialized. Call task_create to start.")
         try:
-            task = _task_manager.create_task(
+            task = task_manager.create_task(
                 subject=subject,
                 description=description,
                 active_form=active_form,
@@ -147,58 +244,104 @@ class TaskCreateTool(BaseTool):
                 content={"task_id": task.id, "subject": task.subject, "status": task.status.value}
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=f"Failed to create task: {str(e)}. Check parameters.")
 
 
 class TaskGetTool(BaseTool):
     """Get task details and optionally claim it."""
     name = "task_get"
     description = (
-        "Get details of a task by ID. Optionally claim it (assign ownership). "
-        "Claiming validates the task is available (not blocked, not already claimed)."
+        "ALWAYS USE after task_create. Get details of a task by ID and claim it "
+        "to start working. Claiming assigns ownership. Use claim=true to take "
+        "ownership of a task before working on it."
     )
     args_schema = TaskGetArgs
     
-    def run(self, task_id: str, claim: bool = False) -> ToolResult:
-        if not _task_manager:
-            return ToolResult(success=False, error="Task manager not initialized")
+    def __init__(self, context: Optional[TaskToolContext] = None):
+        """
+        Initialize task get tool.
+        
+        Args:
+            context: Optional context for dependency injection. If None, uses global state.
+        """
+        super().__init__()
+        self._context = context
+    
+    def is_read_only(self, args=None) -> bool:
+        """Task get is read-only when not claiming (just reads data)."""
+        if args and args.get('claim'):
+            return False  # Claiming modifies data
+        return True
+    
+    def is_destructive(self, args=None) -> bool:
+        """Task get is NOT destructive."""
+        return False
+    
+    def run(self, task_id: str, claim: bool = False, **kwargs) -> ToolResult:
+        # Get task manager and agent ID from context or global state
+        task_manager = self._context.get_task_manager() if self._context else _task_manager
+        agent_id = self._context.get_agent_id() if self._context else get_agent_id()
+        
+        if not task_manager:
+            return ToolResult(success=False, error="Task manager not initialized. Call task_create first.")
         try:
             if claim:
-                task = _task_manager.claim_task(task_id, agent_id=get_agent_id(), check_agent_busy=False)
+                task = task_manager.claim_task(task_id, agent_id=agent_id, check_agent_busy=False)
                 return ToolResult(
                     success=True,
                     content={**task.to_dict(), "claimed": True}
                 )
             else:
-                task = _task_manager.store.get(task_id)
+                task = task_manager.store.get(task_id)
                 if not task:
-                    return ToolResult(success=False, error=f"Task #{task_id} not found")
+                    return ToolResult(success=False, error=f"Task #{task_id} not found. Use task_list to see available tasks.")
                 return ToolResult(success=True, content=task.to_dict())
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=f"Failed to get task: {str(e)}. Check task_id.")
 
 
 class TaskUpdateTool(BaseTool):
     """Update task status and fields."""
     name = "task_update"
     description = (
-        "Update a task's status, active form, or other fields. "
-        "Setting status to 'completed' will cascade-unblock dependent tasks."
+        "ALWAYS USE when finishing work. Update task status to 'completed' when "
+        "done, 'in_progress' when starting, or 'failed' if blocked. Setting "
+        "status to 'completed' will cascade-unblock dependent tasks."
     )
     args_schema = TaskUpdateArgs
     
+    def __init__(self, context: Optional[TaskToolContext] = None):
+        """
+        Initialize task update tool.
+        
+        Args:
+            context: Optional context for dependency injection. If None, uses global state.
+        """
+        super().__init__()
+        self._context = context
+    
+    def is_read_only(self, args=None) -> bool:
+        """Task update is NOT read-only (modifies data)."""
+        return False
+    
+    def is_destructive(self, args=None) -> bool:
+        """Task update is NOT destructive (reversible)."""
+        return False
+    
     def run(self, task_id: str, status: Optional[str] = None,
             active_form: Optional[str] = None, subject: Optional[str] = None,
-            description: Optional[str] = None) -> ToolResult:
-        if not _task_manager:
-            return ToolResult(success=False, error="Task manager not initialized")
+            description: Optional[str] = None, **kwargs) -> ToolResult:
+        # Get task manager from context or global state
+        task_manager = self._context.get_task_manager() if self._context else _task_manager
+        if not task_manager:
+            return ToolResult(success=False, error="Task manager not initialized. Call task_create first.")
         try:
             if status == "completed":
-                task = _task_manager.complete_task(task_id)
+                task = task_manager.complete_task(task_id)
             elif status == "failed":
-                task = _task_manager.fail_task(task_id)
+                task = task_manager.fail_task(task_id)
             else:
-                task = _task_manager.update_task(
+                task = task_manager.update_task(
                     task_id,
                     status=status,
                     active_form=active_form,
@@ -207,7 +350,7 @@ class TaskUpdateTool(BaseTool):
                 )
             return ToolResult(success=True, content=task.to_dict())
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=f"Failed to update task: {str(e)}. Check task_id and status.")
 
 
 class TaskListTool(BaseTool):
@@ -219,18 +362,38 @@ class TaskListTool(BaseTool):
     )
     args_schema = TaskListArgs
     
-    def run(self, status: Optional[str] = None, available_only: bool = False) -> ToolResult:
-        if not _task_manager:
-            return ToolResult(success=False, error="Task manager not initialized")
+    def __init__(self, context: Optional[TaskToolContext] = None):
+        """
+        Initialize task list tool.
+        
+        Args:
+            context: Optional context for dependency injection. If None, uses global state.
+        """
+        super().__init__()
+        self._context = context
+    
+    def is_read_only(self, args=None) -> bool:
+        """Task list is read-only (just reads data)."""
+        return True
+    
+    def is_destructive(self, args=None) -> bool:
+        """Task list is NOT destructive."""
+        return False
+    
+    def run(self, status: Optional[str] = None, available_only: bool = False, **kwargs) -> ToolResult:
+        # Get task manager from context or global state
+        task_manager = self._context.get_task_manager() if self._context else _task_manager
+        if not task_manager:
+            return ToolResult(success=False, error="Task manager not initialized. Call task_create first.")
         try:
             if available_only:
-                tasks = _task_manager.store.list_available()
+                tasks = task_manager.store.list_available()
             elif status:
-                tasks = _task_manager.store.list_by_status(status)
+                tasks = task_manager.store.list_by_status(status)
             else:
-                tasks = _task_manager.store.list_all()
+                tasks = task_manager.store.list_all()
             
-            summary = _task_manager.get_task_summary()
+            summary = task_manager.get_task_summary()
             return ToolResult(
                 success=True,
                 content={
@@ -239,42 +402,95 @@ class TaskListTool(BaseTool):
                 }
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=f"Failed to list tasks: {str(e)}")
 
 
 class TaskNextTool(BaseTool):
     """Get the next available task."""
     name = "task_next"
     description = (
-        "Get the next available task to work on. Returns the first task "
-        "that is pending, unclaimed, and unblocked."
+        "USE after creating tasks. Returns the next pending, unclaimed, unblocked "
+        "task. After getting the next task, call task_get with claim=true to take "
+        "ownership before working on it."
     )
     args_schema = TaskNextArgs
     
-    def run(self) -> ToolResult:
-        if not _task_manager:
-            return ToolResult(success=False, error="Task manager not initialized")
+    def __init__(self, context: Optional[TaskToolContext] = None):
+        """
+        Initialize task next tool.
+        
+        Args:
+            context: Optional context for dependency injection. If None, uses global state.
+        """
+        super().__init__()
+        self._context = context
+    
+    def is_read_only(self, args=None) -> bool:
+        """Task next is read-only (just reads data)."""
+        return True
+    
+    def is_destructive(self, args=None) -> bool:
+        """Task next is NOT destructive."""
+        return False
+    
+    def run(self, **kwargs) -> ToolResult:
+        # Get task manager from context or global state
+        task_manager = self._context.get_task_manager() if self._context else _task_manager
+        if not task_manager:
+            return ToolResult(success=False, error="Task manager not initialized. Call task_create first.")
         try:
-            task = _task_manager.get_next_task()
+            task = task_manager.get_next_task()
             if not task:
                 return ToolResult(
                     success=True,
-                    content={"message": "No available tasks", "task": None}
+                    content={"message": "No available tasks. All tasks are completed or claimed.", "task": None}
                 )
             return ToolResult(success=True, content=task.to_dict())
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=f"Failed to get next task: {str(e)}")
 
 
-def get_task_tools():
-    """Get all task tools."""
+def get_task_tools(context: Optional[TaskToolContext] = None):
+    """
+    Get all task tools.
+    
+    Args:
+        context: Optional context for dependency injection. If provided, tools will use
+                 this context instead of global state. This enables multi-agent scenarios.
+    
+    Returns:
+        List of task tool instances
+    """
     return [
-        TaskCreateTool(),
-        TaskGetTool(),
-        TaskUpdateTool(),
-        TaskListTool(),
-        TaskNextTool(),
+        TaskCreateTool(context=context),
+        TaskGetTool(context=context),
+        TaskUpdateTool(context=context),
+        TaskListTool(context=context),
+        TaskNextTool(context=context),
     ]
+
+
+def get_task_tools_with_context(context: TaskToolContext):
+    """
+    Get all task tools bound to a specific context.
+    
+    This is the recommended way to get task tools for multi-agent scenarios.
+    
+    Args:
+        context: The context containing task manager and agent ID
+    
+    Returns:
+        List of task tool instances bound to the context
+    
+    Usage:
+        from logicore.tasks import TaskToolContext, get_task_tools_with_context
+        
+        context = TaskToolContext(task_manager=manager, agent_id="agent-1")
+        tools = get_task_tools_with_context(context)
+        for tool in tools:
+            agent.tool_executor.register_custom_tool(tool.name, tool.run)
+    """
+    return get_task_tools(context=context)
 
 
 def get_task_tool_schemas():

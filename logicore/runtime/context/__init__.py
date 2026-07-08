@@ -1,13 +1,14 @@
 """
-Context Window Management: Intelligent context compression and masking.
+Context Window Management: Internal implementation details.
 
-Components:
+This module contains the internal implementation of context management:
 - ContextWindowManager: Orchestrates context budget and compression
 - ContextManagementResult: Result of context management operations
 - TokenBudget: Model-specific token tracking
 - CompressionService: Intelligent history summarization (async, outside main loop)
 - ToolOutputMaskingService: Backward-scanned FIFO masking for tool outputs
-- DistillationService: Large output summarization via secondary LLM
+
+For the public API, use logicore.context_engine instead.
 """
 
 from logicore.runtime.context.manager import ContextWindowManager, ContextManagementResult

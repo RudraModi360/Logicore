@@ -20,8 +20,6 @@ Also provides:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Optional, Dict, List, Any, Callable
 
 from logicore.runtime.config import RuntimeConfig
@@ -32,40 +30,9 @@ from logicore.context_engine.message_pipeline import MessagePipeline
 from logicore.context_engine.tool_output_distiller import ToolOutputDistiller
 from logicore.caching import PromptCacheManager, get_prompt_cache_manager
 
-
-@dataclass
-class EngineResult:
-    """
-    Result of a context engine operation.
-
-    Wraps ContextManagementResult with additional metadata
-    useful for telemetry and debugging.
-    """
-    original_tokens: int = 0
-    final_tokens: int = 0
-    tokens_saved: int = 0
-    masked: bool = False
-    compressed: bool = False
-    truncated: bool = False
-    timestamp: datetime = field(default_factory=datetime.now)
-
-    # Sub-results from the pipeline
-    _raw: Optional[ContextManagementResult] = None
-
-    @property
-    def any_action_taken(self) -> bool:
-        return self.masked or self.compressed or self.truncated
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "original_tokens": self.original_tokens,
-            "final_tokens": self.final_tokens,
-            "tokens_saved": self.tokens_saved,
-            "masked": self.masked,
-            "compressed": self.compressed,
-            "truncated": self.truncated,
-            "timestamp": self.timestamp.isoformat(),
-        }
+# Re-export ContextManagementResult as EngineResult for public API compatibility
+# This eliminates the duplicate dataclass that existed before
+EngineResult = ContextManagementResult
 
 
 class ContextEngine:

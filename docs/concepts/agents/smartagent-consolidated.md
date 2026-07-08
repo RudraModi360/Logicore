@@ -27,7 +27,7 @@ import asyncio
 
 async def main():
     # General chat with web search, memory, bash
-    agent = SmartAgent(llm="ollama", mode="solo")
+    agent = SmartAgent(provider="ollama", mode="solo")
     
     response = await agent.chat("What are latest AI trends in 2024?")
     print(response['content'])
@@ -40,7 +40,7 @@ asyncio.run(main())
 ## Quick Start: Project Mode
 
 ```python
-agent = SmartAgent(llm="ollama", mode="project")
+agent = SmartAgent(provider="ollama", mode="project")
 
 # Create and switch to project
 agent.create_project(
@@ -163,7 +163,7 @@ response = await agent.chat(
 ### Example 1: Solo Mode - Web Research
 
 ```python
-agent = SmartAgent(llm="ollama", mode="solo")
+    agent = SmartAgent(provider="ollama", mode="solo")
 
 # SmartAgent automatically uses web_search
 response = await agent.chat(
@@ -190,7 +190,7 @@ Tools used: ['web_search']
 ### Example 2: Project Mode - Context-Aware Development
 
 ```python
-agent = SmartAgent(llm="openai", mode="project", memory=True)
+    agent = SmartAgent(provider="openai", mode="project", memory=True)
 
 # Create a project
 agent.create_project(
@@ -229,7 +229,7 @@ Project context: E-Commerce API - Build scalable REST API...
 ### Example 3: Learning Capture & Retrieval
 
 ```python
-agent = SmartAgent(llm="ollama", mode="project", memory=True)
+agent = SmartAgent(provider="ollama", mode="project", memory=True)
 
 agent.create_project("backend", "Node.js Backend")
 agent.switch_to_project("backend")
@@ -265,7 +265,7 @@ we recommended token bucket algorithm with Redis. This approach offers:
 ### Example 4: Multi-Project Switching
 
 ```python
-agent = SmartAgent(llm="ollama")
+agent = SmartAgent(provider="ollama")
 
 # Create 3 projects
 for proj_id, title, goal in [
@@ -311,7 +311,7 @@ def analyze_performance(code: str) -> str:
     # Custom implementation
     return "Performance analysis..."
 
-agent = SmartAgent(llm="ollama")
+agent = SmartAgent(provider="ollama")
 agent.register_tool_from_function(analyze_performance)
 
 # Now has both built-in tools + custom tool

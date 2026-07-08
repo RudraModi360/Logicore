@@ -2,8 +2,13 @@
 name: web_research
 description: Web research skill for gathering information from the internet with structured analysis
 version: "1.0.0"
-author: Agentry
-tags: [research, web, search, analysis]
+author: Logicore
+tags: [web, research, search, information]
+trigger: research, web search, find information, look up, investigate
+cost_tier: low
+requires: []
+conflicts_with: []
+min_framework_version: "0.1.0"
 ---
 
 # Web Research Skill

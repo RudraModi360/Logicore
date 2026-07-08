@@ -131,7 +131,7 @@ class MCPClientManager:
                 print(f"[MCP Client] Failed to setup {server_name}: {e}")
 
     async def get_tools(self) -> List[Dict[str, Any]]:
-        """Get all tools from connected servers in OpenAI/Agentry schema format."""
+        """Get all tools from connected servers in OpenAI/Logicore schema format."""
         all_tools = []
         
         for server_name, session in self.sessions.items():

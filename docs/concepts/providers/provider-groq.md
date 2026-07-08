@@ -32,9 +32,9 @@ async def main():
     )
 
     agent = Agent(
-        llm=provider,
+        provider=provider,
         role="Fast Assistant",
-        system_message="Return clear, fast responses."
+        system_prompt="Return clear, fast responses."
     )
 
     result = await agent.chat("Give 3 tips to speed up API responses.")
@@ -50,7 +50,7 @@ def lookup_stock(symbol: str) -> str:
     """Return latest mocked stock price."""
     return f"{symbol}: 120.5 USD"
 
-agent = Agent(llm=provider, tools=[lookup_stock])
+agent = Agent(provider=provider, tools=[lookup_stock])
 ```
 
 ## Multimodal input support
@@ -59,7 +59,7 @@ agent = Agent(llm=provider, tools=[lookup_stock])
 
 ```python
 agent = Agent(
-    llm=GroqProvider(model_name="meta-llama/llama-4-scout-17b-16e-instruct"),
+    provider=GroqProvider(model_name="meta-llama/llama-4-scout-17b-16e-instruct"),
     role="Vision Assistant"
 )
 

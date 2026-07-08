@@ -202,25 +202,10 @@ class RetryIterator:
 
 def _classify_failure_standalone(error: Exception) -> FailureCategory:
     """Classify an exception without availability service context."""
-    error_str = str(error).lower()
-    error_type = type(error).__name__.lower()
-    
-    if any(x in error_str for x in ['rate limit', 'ratelimit', '429', 'too many requests']):
-        return FailureCategory.RATE_LIMIT
-    if any(x in error_str for x in ['401', '403', 'unauthorized', 'authentication', 'invalid api key']):
-        return FailureCategory.AUTH
-    if any(x in error_str for x in ['model not found', '404', 'does not exist']):
-        return FailureCategory.MODEL_NOT_FOUND
-    if any(x in error_str for x in ['400', 'bad request', 'invalid', 'validation']):
-        return FailureCategory.INVALID_REQUEST
-    if any(x in error_str for x in ['500', '502', '503', '504', 'internal server']):
-        return FailureCategory.SERVER_ERROR
-    if any(x in error_type for x in ['connection', 'network']):
-        return FailureCategory.NETWORK
-    if any(x in error_str for x in ['timeout', 'timed out']):
-        return FailureCategory.TIMEOUT
-    
-    return FailureCategory.UNKNOWN
+    # Delegate to the more comprehensive implementation
+    from logicore.providers.availability import ModelAvailabilityService
+    svc = ModelAvailabilityService()
+    return svc._classify_failure(error)
 
 
 def with_retry(
@@ -364,40 +349,6 @@ class FallbackResolver:
             raise last_error
         raise RuntimeError("All providers failed without capturing an error")
 
-
-@dataclass
-class RetryStats:
-    """Statistics for retry operations."""
-    total_attempts: int = 0
-    successful_attempts: int = 0
-    failed_attempts: int = 0
-    total_delay_seconds: float = 0.0
-    failures_by_category: dict = field(default_factory=dict)
-    
-    @property
-    def success_rate(self) -> float:
-        """Calculate success rate (0-1)."""
-        if self.total_attempts == 0:
-            return 0.0
-        return self.successful_attempts / self.total_attempts
-    
-    def record_attempt(
-        self, 
-        success: bool, 
-        delay: float = 0.0,
-        category: Optional[FailureCategory] = None
-    ) -> None:
-        """Record an attempt result."""
-        self.total_attempts += 1
-        self.total_delay_seconds += delay
-        
-        if success:
-            self.successful_attempts += 1
-        else:
-            self.failed_attempts += 1
-            if category:
-                key = category.value
-                self.failures_by_category[key] = self.failures_by_category.get(key, 0) + 1
 
 
 # Convenience instances for common retry policies

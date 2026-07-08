@@ -186,7 +186,7 @@ SCHEDULED → VALIDATING → EXECUTING → SUCCESS
 
 **Integration Points**:
 ```python
-runtime = AgentRuntime.create(llm_provider, model_name="gpt-4")
+runtime = AgentRuntime.create(provider, model_name="gpt-4")
 
 async with runtime.turn(session_id) as ctx:
     # 1. Check for loops
@@ -256,7 +256,7 @@ from logicore.runtime import AgentRuntime, RuntimeConfig
 
 # Create runtime with custom config
 config = RuntimeConfig(max_turns=100)
-runtime = AgentRuntime(config, llm_provider=provider, model_name="gpt-4o")
+runtime = AgentRuntime(config, provider=provider, model_name="gpt-4o")
 
 # Set tool executor
 runtime.set_tool_executor(my_tool_executor)

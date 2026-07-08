@@ -11,7 +11,7 @@ Logicore ships with a default registry of tools for files, shell/code execution,
 from logicore import Agent
 
 agent = Agent(
-    llm="ollama",
+    provider="ollama",
     tools=True
 )
 ```
@@ -19,7 +19,7 @@ agent = Agent(
 You can also enable them after initialization:
 
 ```python
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.load_default_tools()
 ```
 
@@ -98,7 +98,7 @@ Notes:
 ```python
 from logicore import Agent
 
-agent = Agent(llm="ollama", tools=True)
+agent = Agent(provider="ollama", tools=True)
 
 reply = await agent.chat(
     "Read docs/quickstart.md and create a 5-point setup checklist in docs/setup-checklist.md"
@@ -144,7 +144,8 @@ agent.set_auto_approve_all(True)
 
 ## Environment Notes
 
-- `web_search` and `image_search` require `GOOGLE_API_KEY` and `GOOGLE_CX`.
+- `web_search` and `image_search` require `EXA_API_KEY`.
+- `deep` search mode also requires `GROQ_API_KEY` for LLM analysis.
 - `execute_command` behavior depends on host OS and shell availability.
 - Cron jobs persist through the framework cron service storage.
 

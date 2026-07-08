@@ -10,6 +10,7 @@ import queue
 from typing import Literal, Optional, Dict, List, Any
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
+from .bash import validate_command
 
 
 # --- Background Process Manager ---
@@ -744,7 +745,7 @@ class ExecuteCommandParams(BaseModel):
     )
     timeout: int = Field(
         300, 
-        description='Max execution time in seconds (1-300).'
+        description='Max execution time in seconds (10-300). Minimum 10s to prevent premature termination.'
     )
     ignore_error: bool = Field(
         False, 
@@ -762,7 +763,7 @@ class ExecuteCodeParams(BaseModel):
     )
     timeout: int = Field(
         60, 
-        description='Max execution time in seconds (1-300).'
+        description='Max execution time in seconds (10-300). Minimum 10s to prevent premature termination.'
     )
 
 
@@ -798,13 +799,12 @@ class ExecuteCommandTool(BaseTool):
     def _run_python_code(self, code: str, cwd: str, timeout: int, ignore_error: bool) -> ToolResult:
         """Execute Python code by writing to a temp file."""
         try:
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.py', delete=False, encoding='utf-8'
-            ) as tmp:
-                tmp.write(code)
-                tmp_path = tmp.name
-
+            fd, tmp_path = tempfile.mkstemp(suffix='.py')
             try:
+                os.chmod(tmp_path, 0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as tmp:
+                    tmp.write(code)
+
                 result = subprocess.run(
                     [sys.executable, tmp_path],
                     capture_output=True,
@@ -850,6 +850,14 @@ class ExecuteCommandTool(BaseTool):
         background: bool = False
     ) -> ToolResult:
         try:
+            # Enforce minimum timeout to prevent premature termination
+            timeout = max(10, min(timeout, 300))
+            
+            # Validate command against blocklist
+            block_reason = validate_command(command)
+            if block_reason:
+                return ToolResult(success=False, error=block_reason)
+            
             # Support both working_directory and workdir
             cwd_path = working_directory or workdir
             # Normalize working directory
@@ -917,7 +925,7 @@ class ExecuteCommandTool(BaseTool):
                 error=f"Shell '{shell}' not found on {os_name}. Ensure it is installed and in PATH."
             )
         except Exception as e:
-            error_msg = f"Failed to execute command: {e}"
+            error_msg = "Failed to execute command. Check permissions and command syntax."
             
             # Provide helpful suggestions based on common errors
             error_str = str(e).lower()
@@ -958,13 +966,14 @@ class CodeExecuteTool(BaseTool):
 
     def run(self, code: str, timeout: int = 60) -> ToolResult:
         try:
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.py', delete=False, encoding='utf-8'
-            ) as tmp:
-                tmp.write(code)
-                tmp_path = tmp.name
-
+            # Enforce minimum timeout to prevent premature termination
+            timeout = max(10, min(timeout, 300))
+            fd, tmp_path = tempfile.mkstemp(suffix='.py')
             try:
+                os.chmod(tmp_path, 0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as tmp:
+                    tmp.write(code)
+
                 result = subprocess.run(
                     [sys.executable, tmp_path],
                     capture_output=True,

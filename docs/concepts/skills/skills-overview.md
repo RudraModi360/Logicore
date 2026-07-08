@@ -37,7 +37,7 @@ graph TD
 from logicore.agents.agent import Agent
 
 agent = Agent(
-    llm="ollama",
+    provider="ollama",
     tools=True,
     skills=["web_research"]
 )

@@ -97,7 +97,7 @@ Example:
 ```python
 from logicore.agents.agent import Agent
 
-agent = Agent(llm="ollama", tools=True, workspace_root="D:/Scratchy")
+agent = Agent(provider="ollama", tools=True, workspace_root="D:/Scratchy")
 agent.load_skills(["release_assistant"])
 
 response = await agent.chat("Prepare release summary for v1.4.0")

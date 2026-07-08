@@ -26,7 +26,7 @@ Core tool implementations are in `logicore/tools/`:
 ```python
 from logicore import Agent
 
-agent = Agent(llm="ollama", tools=True)
+agent = Agent(provider="ollama", tools=True)
 result = await agent.chat("Read README.md and summarize setup steps")
 ```
 
@@ -43,7 +43,7 @@ def get_weather(city: str, unit: str = "c") -> str:
     """
     return f"{city}: 27°{unit.upper()}"
 
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.register_tool_from_function(get_weather)
 ```
 

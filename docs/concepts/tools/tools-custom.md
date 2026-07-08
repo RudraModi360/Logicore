@@ -28,7 +28,7 @@ def search_tickets(project: str, status: str = "open", limit: int = 20, **kwargs
     return {"project": project, "count": len(rows), "items": rows[:limit]}
 
 
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.register_tool_from_function(search_tickets)
 ```
 
@@ -65,7 +65,7 @@ schema = {
 }
 
 
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.add_custom_tool(schema, get_exchange_rate)
 ```
 
@@ -131,7 +131,7 @@ class StockPriceTool(BaseTool):
 
 
 tool = StockPriceTool()
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.add_custom_tool(tool.schema, lambda **kwargs: tool.run(**kwargs))
 ```
 

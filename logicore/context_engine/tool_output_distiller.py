@@ -11,9 +11,10 @@ import json
 from typing import Dict, Any
 
 
-# Default limits
-DEFAULT_MAX_CHARS = 12000
-DEFAULT_PREVIEW_CHARS = 4000
+# Default limits — reduced from 12K/4K to prevent large file reads from
+# flooding message history and causing context window exhaustion.
+DEFAULT_MAX_CHARS = 6000
+DEFAULT_PREVIEW_CHARS = 2000
 
 
 class ToolOutputDistiller:

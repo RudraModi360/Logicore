@@ -314,14 +314,14 @@ async def main() -> None:
           f"context={get_model_context_window(model_name):,} tokens\n")
 
     agent = Agent(
-        llm=provider,
-        system_message=(
+        provider=provider,
+        system_prompt=(
             "You are a helpful, precise assistant. "
             "Use tools when needed. Think step-by-step for complex tasks."
         ),
         tools=True,
         telemetry=show_telemetry,
-        memory=False,
+
         debug=False,
     )
 

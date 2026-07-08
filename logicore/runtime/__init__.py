@@ -13,9 +13,7 @@ Components:
 - TelemetryCollector: Comprehensive observability
 - AgentRuntime: Orchestrator combining all components
 - Reasoning: Configurable reasoning levels and thinking budgets
-- Tracker: Hierarchical task tracking with dependencies
 - Planner: Plan-before-execute workflow with approval gates
-- Progress: Real-time progress tracking and visualization
 """
 
 from logicore.runtime.config import (
@@ -25,8 +23,6 @@ from logicore.runtime.config import (
     ToolConfig, 
     RetryConfig, 
     TelemetryConfig,
-    ReasoningConfig,
-    TrackerConfig,
     PlannerConfig,
 )
 from logicore.runtime.turn_manager import TurnManager, TurnContext, TurnStatus
@@ -40,23 +36,18 @@ from logicore.runtime.loop_detection import (
     RecoveryActionType,
 )
 from logicore.runtime.context import ContextWindowManager, ContextManagementResult
+from logicore.context_engine import EngineResult  # Public alias for ContextManagementResult
 from logicore.runtime.scheduler import ToolScheduler, ToolCallRequest, ToolCallResult, ToolCallStatus
 from logicore.runtime.telemetry import TelemetryCollector, TelemetryEvent, TelemetryEventType
 from logicore.runtime.agent_runtime import AgentRuntime
 
-# New modules for complex reasoning, task tracking, planning, and progress
+# New modules for complex reasoning and planning
 from logicore.runtime.reasoning import (
     ReasoningLevel,
-    ReasoningConfig as ReasoningConfigFull,
+    ReasoningConfig,
     ReasoningController,
     REASONING_PRESETS,
     get_reasoning_system_prompt_addon,
-)
-from logicore.runtime.tracker import (
-    TrackerService,
-    TrackerTask,
-    TaskType,
-    TaskStatus,
 )
 from logicore.runtime.planner import (
     PlanService,
@@ -64,12 +55,6 @@ from logicore.runtime.planner import (
     PlanStep,
     PlanStatus,
     StepStatus,
-)
-from logicore.runtime.progress import (
-    ProgressService,
-    ProgressState,
-    ProgressEvent,
-    ProgressEventType,
 )
 
 # Hooks system for execution lifecycle customization
@@ -102,7 +87,6 @@ __all__ = [
     "RetryConfig",
     "TelemetryConfig",
     "ReasoningConfig",
-    "TrackerConfig",
     "PlannerConfig",
     # Turn Management
     "TurnManager",
@@ -119,6 +103,7 @@ __all__ = [
     # Context
     "ContextWindowManager",
     "ContextManagementResult",
+    "EngineResult",
     # Scheduler
     "ToolScheduler",
     "ToolCallRequest",
@@ -132,7 +117,7 @@ __all__ = [
     "AgentRuntime",
     # Reasoning
     "ReasoningLevel",
-    "ReasoningConfigFull",
+    "ReasoningConfig",
     "ReasoningController",
     "REASONING_PRESETS",
     "get_reasoning_system_prompt_addon",
@@ -151,20 +136,10 @@ __all__ = [
     "HookRegistration",
     "get_default_hook_system",
     "set_default_hook_system",
-    # Tracker
-    "TrackerService",
-    "TrackerTask",
-    "TaskType",
-    "TaskStatus",
     # Planner
     "PlanService",
     "Plan",
     "PlanStep",
     "PlanStatus",
     "StepStatus",
-    # Progress
-    "ProgressService",
-    "ProgressState",
-    "ProgressEvent",
-    "ProgressEventType",
 ]

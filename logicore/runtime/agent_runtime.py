@@ -85,19 +85,19 @@ class AgentRuntime:
     def __init__(
         self,
         config: RuntimeConfig,
-        llm_provider: Optional[LLMProvider] = None,
+        provider: Optional[LLMProvider] = None,
         model_name: str = "default",
         tool_executor: Optional[Callable[[str, Dict[str, Any]], Awaitable[Any]]] = None,
     ):
         """
         Args:
             config: Runtime configuration
-            llm_provider: LLM provider for chat and compression
+            provider: LLM provider for chat and compression
             model_name: Model name for context window lookup
             tool_executor: Function to execute tools
         """
         self.config = config
-        self.llm = llm_provider
+        self.llm = provider
         self.model_name = model_name
         
         # Initialize components
@@ -105,7 +105,7 @@ class AgentRuntime:
         self.loop_engine = LoopDetectionEngine(config)
         self.context_manager = ContextWindowManager(
             config,
-            llm_provider,
+            provider,
             model_name,
         )
         self.tool_scheduler = ToolScheduler(config, tool_executor)
@@ -117,7 +117,7 @@ class AgentRuntime:
     @classmethod
     def create(
         cls,
-        llm_provider: Optional[LLMProvider] = None,
+        provider: Optional[LLMProvider] = None,
         model_name: str = "default",
         tool_executor: Optional[Callable[[str, Dict[str, Any]], Awaitable[Any]]] = None,
         **config_overrides: Any,
@@ -126,7 +126,7 @@ class AgentRuntime:
         Factory method to create runtime with optional config overrides.
         
         Args:
-            llm_provider: LLM provider
+            provider: LLM provider
             model_name: Model name
             tool_executor: Tool execution function
             **config_overrides: Override RuntimeConfig fields
@@ -145,7 +145,7 @@ class AgentRuntime:
             if hasattr(config, key):
                 setattr(config, key, value)
         
-        return cls(config, llm_provider, model_name, tool_executor)
+        return cls(config, provider, model_name, tool_executor)
     
     def _setup_telemetry_hooks(self) -> None:
         """Wire up telemetry collection from all components."""

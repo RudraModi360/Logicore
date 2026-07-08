@@ -24,7 +24,7 @@ from logicore.agents.agent import Agent
 import asyncio
 
 async def main():
-    agent = Agent(llm="ollama")  # Uses Ollama or specify: "openai", "gemini", "groq", "azure"
+    agent = Agent(provider="ollama")  # Uses Ollama or specify: "openai", "gemini", "groq", "azure"
     
     response = await agent.chat("What is an AI agent?")
     print(response['content'])
@@ -78,7 +78,7 @@ def check_weather(location: str, unit: str = "fahrenheit", **kwargs) -> dict:
 
 async def main():
     agent = Agent(
-        llm="ollama",
+        provider="ollama",
         tools=[check_weather]  # Register your tool
     )
     
@@ -102,7 +102,7 @@ See tokens as they arrive:
 
 ```python
 async def main():
-    agent = Agent(llm="ollama", tools=[check_weather])
+    agent = Agent(provider="ollama", tools=[check_weather])
     
     def on_token(token):
         print(token, end="", flush=True)
@@ -124,7 +124,7 @@ asyncio.run(main())
 By default, tools require approval. Enable auto-approval for safe tools:
 
 ```python
-agent = Agent(llm="ollama", tools=[check_weather])
+agent = Agent(provider="ollama", tools=[check_weather])
 agent.set_auto_approve_all(True)  # All tools execute without approval
 
 response = await agent.chat("What's the weather in Seattle?")
@@ -158,10 +158,10 @@ def check_weather(location: str, unit: str = "fahrenheit", **kwargs) -> dict:
 async def main():
     # Create agent with streaming, tools, and auto-approval
     agent = Agent(
-        llm="ollama",
+        provider="ollama",
         tools=[check_weather],
         role="Weather Assistant",
-        system_message="Use the check_weather tool to answer weather questions."
+        system_prompt="Use the check_weather tool to answer weather questions."
     )
     agent.set_auto_approve_all(True)
     
@@ -302,7 +302,7 @@ The LLM receives the tool result, analyzes it, and returns the final answer:
 Agents handle multi-turn conversations automatically:
 
 ```python
-agent = Agent(llm="ollama", tools=[check_weather])
+agent = Agent(provider="ollama", tools=[check_weather])
 
 # Turn 1
 response1 = await agent.chat("What's the weather in Seattle?")

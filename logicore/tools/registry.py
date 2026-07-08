@@ -1,5 +1,9 @@
 from typing import Dict, Any, List, Optional, Set
+import logging
+
 from .base import BaseTool, ToolResult
+
+logger = logging.getLogger(__name__)
 from .filesystem import (
     ReadFileTool, CreateFileTool, EditFileTool, DeleteFileTool, 
     ListFilesTool, SearchFilesTool, FastGrepTool
@@ -13,11 +17,6 @@ from .web import WebSearchTool, UrlFetchTool, ImageSearchTool
 from .git import GitCommandTool
 from .document import ReadDocumentTool
 from .convert import ConvertDocumentTool
-from .office import (
-    EditPPTXTool, CreatePPTXTool, AppendSlideTool,
-    EditDOCXTool, CreateDOCXTool,
-    EditExcelTool, CreateExcelTool
-)
 from .pdf import MergePDFTool, SplitPDFTool
 from .notes import NotesTool
 from .datetime import DateTimeTool
@@ -25,10 +24,6 @@ from .think import ThinkTool
 from .bash import SmartBashTool
 from .media import MediaSearchTool
 from .cron import AddCronJobTool, ListCronJobsTool, RemoveCronJobTool, GetCronsTool
-from .tracker import (
-    TrackerCreateTool, TrackerUpdateTool, TrackerListTool, TrackerGetTool,
-    TrackerAddDependencyTool, TrackerVisualizeTool, TrackerCloseTool
-)
 from .plan import (
     EnterPlanModeTool, SubmitPlanTool, ExitPlanModeTool,
     UpdatePlanProgressTool, ViewPlanTool
@@ -76,6 +71,8 @@ TOOL_PRESETS = {
         "list_processes", "kill_process", "get_process_output",
         "git_command",
         "web_search", "url_fetch",
+        # V2 Task Management
+        "task_create", "task_get", "task_update", "task_list", "task_next",
     ],
     "full": "__all__",  # Load all tools
     "minimal": [
@@ -103,7 +100,16 @@ class ToolRegistry:
         self._tools: Dict[str, BaseTool] = {}
         
         # Store all tool classes for lazy registration
+        # Import task tools from the tasks module
+        from logicore.tasks.tools import TaskCreateTool, TaskGetTool, TaskUpdateTool, TaskListTool, TaskNextTool
+        
         all_tool_classes = {
+            # Task Management (registered first for prompt priority)
+            "task_create": TaskCreateTool,
+            "task_get": TaskGetTool,
+            "task_update": TaskUpdateTool,
+            "task_list": TaskListTool,
+            "task_next": TaskNextTool,
             # Filesystem
             "read_file": ReadFileTool,
             "create_file": CreateFileTool,
@@ -133,14 +139,6 @@ class ToolRegistry:
             "convert_document": ConvertDocumentTool,
             # Media
             "media_search": MediaSearchTool,
-            # Office
-            "edit_pptx": EditPPTXTool,
-            "create_pptx": CreatePPTXTool,
-            "append_slide": AppendSlideTool,
-            "edit_docx": EditDOCXTool,
-            "create_docx": CreateDOCXTool,
-            "edit_excel": EditExcelTool,
-            "create_excel": CreateExcelTool,
             # PDF
             "merge_pdfs": MergePDFTool,
             "split_pdf": SplitPDFTool,
@@ -154,14 +152,6 @@ class ToolRegistry:
             "datetime": DateTimeTool,
             "notes": NotesTool,
             "think": ThinkTool,
-            # Tracker
-            "tracker_create": TrackerCreateTool,
-            "tracker_update": TrackerUpdateTool,
-            "tracker_list": TrackerListTool,
-            "tracker_get": TrackerGetTool,
-            "tracker_add_dependency": TrackerAddDependencyTool,
-            "tracker_visualize": TrackerVisualizeTool,
-            "tracker_close": TrackerCloseTool,
             # Plan
             "enter_plan_mode": EnterPlanModeTool,
             "submit_plan": SubmitPlanTool,
@@ -203,15 +193,43 @@ class ToolRegistry:
 
     def execute_tool(self, tool_name: str, tool_args: Dict[str, Any]) -> ToolResult:
         tool = self.get_tool(tool_name)
-        if not tool:
-            return ToolResult(success=False, error=f"Unknown tool: {tool_name}")
-        
+        if tool is None:
+            # Unknown-tool failures are deterministic — never retryable.
+            from logicore.tools.error_classifier import (
+                ClassifiedToolError, ToolFailoverReason,
+            )
+            classified = ClassifiedToolError(
+                reason=ToolFailoverReason.not_found,
+                message=f"Unknown tool: {tool_name}",
+                tool_name=tool_name,
+                retryable=False,
+            )
+            return ToolResult(
+                success=False, error=classified.message,
+                **{"error_category": classified.reason.value,
+                   "retryable": classified.retryable,
+                   "should_rotate_credential": classified.should_rotate_credential},
+            )
+
         try:
             # Pydantic validation
             validated_args = tool.args_schema(**tool_args).model_dump()
             return tool.run(**validated_args)
         except Exception as e:
-            return ToolResult(success=False, error=f"Error executing tool {tool_name}: {e}")
+            # Mirror the hermes-agent parent's structured tool-error taxonomy so
+            # the agent loop can retry transient failures / rotate credentials.
+            from logicore.tools.error_classifier import classify_tool_error
+            classified = classify_tool_error(e, tool_name=tool_name, is_credentialed=False)
+            logger.warning(
+                "Tool %s execution failed [%s, retryable=%s]: %s",
+                tool_name, classified.reason.value, classified.retryable, e,
+            )
+            return ToolResult(
+                success=False, error=classified.message,
+                **{"error_category": classified.reason.value,
+                   "retryable": classified.retryable,
+                   "should_rotate_credential": classified.should_rotate_credential},
+            )
 
     @property
     def schemas(self) -> List[Dict[str, Any]]:
@@ -242,12 +260,14 @@ def execute_tool_smart(tool_name: str, tool_args: Dict[str, Any]) -> ToolResult:
     return smart_registry.execute_tool(tool_name, tool_args)
 
 # Tool categories
-SAFE_TOOLS = ['read_file', 'list_files', 'search_files', 'fast_grep', 'read_document', 'media_search', 'list_cron_jobs', 'get_crons']
+SAFE_TOOLS = [
+    'read_file', 'list_files', 'search_files', 'fast_grep', 
+    'read_document', 'media_search', 'list_cron_jobs', 'get_crons',
+    # Task management tools (safe, internal bookkeeping - no approval needed)
+    'task_create', 'task_get', 'task_update', 'task_list', 'task_next',
+]
 APPROVAL_REQUIRED_TOOLS = [
     'create_file', 'edit_file', 'web_search', 'image_search', 'url_fetch', 'convert_document',
-    'edit_pptx', 'create_pptx', 'append_slide',
-    'edit_docx', 'create_docx',
-    'edit_excel', 'create_excel',
     'merge_pdfs', 'split_pdf',
     'add_cron_job', 'remove_cron_job'
 ]

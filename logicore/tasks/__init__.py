@@ -37,8 +37,8 @@ from logicore.tasks.activity import ActivityTracker, ToolActivity, ActivitySumma
 from logicore.tasks.session_progress import SessionProgressWriter
 from logicore.tasks.tools import (
     TaskCreateTool, TaskGetTool, TaskUpdateTool, TaskListTool, TaskNextTool,
-    get_task_tools, get_task_tool_schemas, set_task_manager, get_task_manager,
-    set_agent_id, get_agent_id,
+    TaskToolContext, get_task_tools, get_task_tools_with_context, get_task_tool_schemas,
+    set_task_manager, get_task_manager, set_agent_id, get_agent_id,
 )
 
 __all__ = [
@@ -70,7 +70,9 @@ __all__ = [
     "TaskUpdateTool",
     "TaskListTool",
     "TaskNextTool",
+    "TaskToolContext",
     "get_task_tools",
+    "get_task_tools_with_context",
     "get_task_tool_schemas",
     "set_task_manager",
     "get_task_manager",

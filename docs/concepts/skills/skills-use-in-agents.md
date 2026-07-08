@@ -16,7 +16,7 @@ When passing a string, the agent resolves it from:
 from logicore.agents.agent import Agent
 
 agent = Agent(
-    llm="ollama",
+    provider="ollama",
     tools=True,
     workspace_root="D:/Scratchy",
     skills=["release_assistant"]
@@ -33,7 +33,7 @@ from logicore.agents.agent import Agent
 
 skill = SkillLoader.load("D:/Scratchy/.agent/skills/release_assistant")
 
-agent = Agent(llm="ollama", tools=True)
+agent = Agent(provider="ollama", tools=True)
 if skill:
     agent.load_skill(skill)
 ```

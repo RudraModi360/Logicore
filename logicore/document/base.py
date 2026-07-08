@@ -4,7 +4,7 @@ import os
 
 class BaseDocumentHandler(ABC):
     """
-    Abstract base class for all document handlers in Scratchy.
+    Abstract base class for all document handlers in Logicore.
     """
     
     def __init__(self, file_path: str):

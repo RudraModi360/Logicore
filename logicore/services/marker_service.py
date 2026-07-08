@@ -40,6 +40,7 @@ class MarkerService:
             # Marker creates subdir: output_dir/filename_stem/filename_stem.md
             filename = os.path.basename(file_path)
             stem = os.path.splitext(filename)[0]
+            stem = "".join(c for c in stem if c.isalnum() or c in ('-', '_', ' '))
             
             # Construct expected path
             result_dir = os.path.join(cls.OUTPUT_DIR, stem)

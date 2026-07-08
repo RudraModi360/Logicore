@@ -12,18 +12,12 @@ Core Components:
 
 NEW Deep Reasoning & Planning Features:
 - logicore.runtime.reasoning - 5-level reasoning depth (MINIMAL → DEEP)
-- logicore.runtime.tracker - Hierarchical task tracking with dependencies
 - logicore.runtime.planner - Plan-before-execute workflow with approval gates
-- logicore.runtime.progress - Real-time progress tracking with ETA
 
 Run: python examples/native_chatbot.py
 
 Commands for testing new features:
   /level [1-5|minimal|low|medium|high|deep] - Set reasoning level
-  /task create <title>    - Create a new task
-  /task list              - List all tasks
-  /task tree              - Visualize task hierarchy
-  /task close <id>        - Close a task
   /plan enter             - Enter plan mode
   /plan submit <steps>    - Submit plan (comma-separated steps)
   /plan approve           - Approve current plan
@@ -50,9 +44,7 @@ from logicore.runtime.context.token_budget import TokenBudget, TokenCategory
 
 # === NEW: Runtime Feature Imports ===
 from logicore.runtime.reasoning import ReasoningLevel, ReasoningController, ReasoningConfig
-from logicore.runtime.tracker import TrackerService, TaskType, TaskStatus, TaskPriority
 from logicore.runtime.planner import PlanService, PlanStatus
-from logicore.runtime.progress import ProgressService
 
 
 # === Configuration ===
@@ -120,31 +112,15 @@ class ChatSession:
         )
         self.reasoning.on_level_change(self._on_reasoning_change)
         
-        # === NEW: Task Tracker ===
-        self.tracker = TrackerService(
-            project_dir=str(self.work_dir),
-        )
-        
         # === NEW: Plan Service ===
         self.planner = PlanService(
             project_dir=str(self.work_dir),
         )
         self._in_plan_mode: bool = False  # local flag since enter_plan_mode() is stateless
-        
-        # === NEW: Progress Service ===
-        self.progress = ProgressService()
-        self.progress.on_progress(self._on_progress)
     
     def _on_reasoning_change(self, old_level: ReasoningLevel, new_level: ReasoningLevel):
         """Callback when reasoning level changes."""
         print(f"\n[Reasoning] {LEVEL_NAMES[old_level]} → {LEVEL_NAMES[new_level]}")
-    
-    def _on_progress(self, event):
-        """Callback for progress updates."""
-        bar = self.progress.get_progress_bar(width=30)
-        print(f"\r[Progress] {bar} {event.message}", end="", flush=True)
-        if event.percent >= 100 or event.status == "failed":
-            print()  # Newline when done
     
     @property
     def remaining_turns(self) -> int:
@@ -180,59 +156,6 @@ class ChatSession:
             f"Thinking Budget: {budget} tokens\n"
             f"Auto-escalate: {'ON' if self.reasoning.config.auto_escalate else 'OFF'}"
         )
-    
-    # === NEW: Task Tracking Commands ===
-    def task_create(self, title: str, task_type: str = "task") -> str:
-        """Create a new task."""
-        type_map = {
-            "epic": TaskType.EPIC,
-            "task": TaskType.TASK,
-            "subtask": TaskType.SUBTASK,
-            "bug": TaskType.BUG,
-        }
-        tt = type_map.get(task_type.lower(), TaskType.TASK)
-        task = self.tracker.create_task(title=title, type=tt)
-        return f"Created {tt.value} [{task.id}]: {title}"
-    
-    def task_list(self, status_filter: Optional[str] = None) -> str:
-        """List tasks with optional status filter."""
-        status = None
-        if status_filter:
-            status_map = {
-                "open": TaskStatus.OPEN,
-                "in_progress": TaskStatus.IN_PROGRESS,
-                "blocked": TaskStatus.BLOCKED,
-                "closed": TaskStatus.CLOSED,
-            }
-            status = status_map.get(status_filter.lower())
-        
-        tasks = self.tracker.list_tasks(status=status)
-        if not tasks:
-            return "No tasks found."
-        
-        lines = ["Tasks:"]
-        for t in tasks:
-            status_icon = {"OPEN": "⬚", "IN_PROGRESS": "▶", "BLOCKED": "⛔", "CLOSED": "✓"}.get(t.status.value, "?")
-            lines.append(f"  {status_icon} [{t.id}] {t.title} ({t.progress_percent}%)")
-        return "\n".join(lines)
-    
-    def task_tree(self) -> str:
-        """Visualize task hierarchy."""
-        return self.tracker.visualize()
-    
-    def task_close(self, task_id: str) -> str:
-        """Close a task."""
-        result = self.tracker.close_task(task_id)
-        if result:
-            return f"Closed task [{task_id}]"
-        return f"Cannot close task [{task_id}] - check dependencies"
-    
-    def task_start(self, task_id: str) -> str:
-        """Start working on a task."""
-        result = self.tracker.start_task(task_id)
-        if result:
-            return f"Started task [{task_id}]"
-        return f"Failed to start task [{task_id}]"
     
     # === NEW: Plan Mode Commands ===
     def plan_enter(self, goal: str = "Current task") -> str:
@@ -351,17 +274,14 @@ class ChatSession:
         self.budget.reset()
         self.scheduler.clear()
         self.reasoning.reset()
-        self.progress.reset()
-        print("Session reset (including reasoning, progress).")
+        print("Session reset (including reasoning).")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get session statistics including new features."""
-        task_summary = self.tracker.get_summary()
         return {
             "turns": self.turn_count,
             "remaining": self.remaining_turns,
             "reasoning": self.reasoning.get_state_summary(),
-            "tasks": task_summary,
             "plan_mode": self._in_plan_mode,
             "budget": self.budget.to_dict(),
             "scheduler": self.scheduler.get_statistics(),
@@ -425,21 +345,6 @@ def handle_command(session: ChatSession, user_input: str) -> Optional[str]:
             return session.get_reasoning_status()
         return session.set_reasoning_level(arg1)
     
-    # === Task Commands ===
-    elif cmd == "task":
-        if arg1 == "create" and arg2:
-            return session.task_create(arg2)
-        elif arg1 == "list":
-            return session.task_list(arg2 if arg2 else None)
-        elif arg1 == "tree":
-            return session.task_tree()
-        elif arg1 == "start" and arg2:
-            return session.task_start(arg2)
-        elif arg1 == "close" and arg2:
-            return session.task_close(arg2)
-        else:
-            return "Usage: /task create|list|tree|start|close [args]"
-    
     # === Plan Commands ===
     elif cmd == "plan":
         if arg1 == "enter":
@@ -477,14 +382,13 @@ async def main():
     
     # Create agent with NEW features enabled
     agent = Agent(
-        llm=provider,
-        system_message="You are a helpful assistant. Be concise but thorough when needed.",
+        provider=provider,
+        system_prompt="You are a helpful assistant. Be concise but thorough when needed.",
         tools=True,
         debug=False,
-        memory=False,
+
         # === NEW: Enable runtime features ===
         reasoning_level="medium",
-        task_tracking=True,
         plan_mode=True,
     )
     

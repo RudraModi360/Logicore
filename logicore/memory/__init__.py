@@ -1,106 +1,72 @@
 """
-Agentry Memory Module
+Memory subsystem for persistent memory across sessions.
 
-Memory backends have been removed. This module is kept for backward compatibility
-but all memory functionality is disabled.
+Provides:
+- Memory storage with YAML frontmatter
+- LLM-based extraction worker
+- Memory retrieval with decay scoring
+- Context injection integration
+- Consolidation and forgetting mechanisms
 """
 
-
-class MemoryType:
-    """Placeholder for backward compatibility."""
-    APPROACH = "approach"
-    LEARNING = "learning"
-    KEY_STEP = "key_step"
-    PATTERN = "pattern"
-    PREFERENCE = "preference"
-    DECISION = "decision"
-    CONTEXT = "context"
-
-
-class MemoryEntry:
-    """Placeholder for backward compatibility."""
-    def __init__(self, *args, **kwargs):
-        pass
-
-
-class ProjectContext:
-    """Placeholder for backward compatibility."""
-    def __init__(self, *args, **kwargs):
-        pass
-
-
-class ProjectMemory:
-    """Placeholder for backward compatibility."""
-
-    def __init__(self, db_path=None):
-        pass
-
-    def create_project(self, *args, **kwargs):
-        return None
-
-    def get_project(self, *args, **kwargs):
-        return None
-
-    def update_project_focus(self, *args, **kwargs):
-        pass
-
-    def list_projects(self):
-        return []
-
-    def add_memory(self, *args, **kwargs):
-        return None
-
-    def search_memories(self, *args, **kwargs):
-        return []
-
-    def get_memories(self, *args, **kwargs):
-        return []
-
-    def update_memory_relevance(self, *args, **kwargs):
-        pass
-
-    def delete_memory(self, *args, **kwargs):
-        pass
-
-    def export_for_llm(self, *args, **kwargs):
-        return ""
-
-    def export_project_context(self, *args, **kwargs):
-        return ""
-
-
-def get_project_memory():
-    """Get or create the global ProjectMemory instance (stub)."""
-    return ProjectMemory()
-
-
-class AgentrySimpleMem:
-    """Placeholder for backward compatibility."""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    async def on_user_message(self, *args, **kwargs):
-        return ""
-
-    async def on_assistant_message(self, *args, **kwargs):
-        pass
-
-    async def process_pending(self):
-        pass
-
-    def get_stats(self):
-        return {}
-
-    def clear_memories(self):
-        pass
-
-
+# Lazy imports to avoid circular dependencies
 __all__ = [
-    "ProjectMemory",
-    "ProjectContext",
+    # Types
+    "MemoryDomain",
+    "MemoryKind",
+    "MemoryStability",
     "MemoryType",
-    "MemoryEntry",
-    "get_project_memory",
-    "AgentrySimpleMem",
+    "MemoryMetadata",
+    "MemoryHeader",
+    "TopicDetection",
+    "MemoryScore",
+    
+    # Components
+    "MemoryStore",
+    "ExtractionWorker",
+    "MemoryRetriever",
+    "ConsolidationWorker",
+    "MemoryManager",
+    
+    # Manager functions
+    "get_memory_manager",
+    "reset_memory_manager",
 ]
+
+
+def __getattr__(name):
+    """Lazy import to avoid circular dependencies."""
+    if name in ("MemoryDomain", "MemoryKind", "MemoryStability", "MemoryType",
+                "MemoryMetadata", "MemoryHeader", "TopicDetection", "MemoryScore"):
+        from logicore.memory.types import (
+            MemoryDomain, MemoryKind, MemoryStability, MemoryType,
+            MemoryMetadata, MemoryHeader, TopicDetection, MemoryScore,
+        )
+        return locals()[name]
+    
+    if name == "MemoryStore":
+        from logicore.memory.storage import MemoryStore
+        return MemoryStore
+    
+    if name == "ExtractionWorker":
+        from logicore.memory.extraction.worker import ExtractionWorker
+        return ExtractionWorker
+    
+    if name == "MemoryRetriever":
+        from logicore.memory.retrieval.retriever import MemoryRetriever
+        return MemoryRetriever
+    
+    if name == "ConsolidationWorker":
+        from logicore.memory.consolidation.worker import ConsolidationWorker
+        return ConsolidationWorker
+    
+    if name in ("MemoryManager", "get_memory_manager", "reset_memory_manager"):
+        from logicore.memory.manager import MemoryManager, get_memory_manager, reset_memory_manager
+        if name == "MemoryManager":
+            return MemoryManager
+        elif name == "get_memory_manager":
+            return get_memory_manager
+        else:
+            return reset_memory_manager
+    
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

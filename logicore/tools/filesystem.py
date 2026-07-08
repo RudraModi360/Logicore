@@ -7,6 +7,63 @@ from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
 from .dedup import file_state_cache
 
+# --- Workspace Boundary ---
+# Set via set_workspace_root() to enable path traversal protection.
+# When set, all file operations are confined to this directory.
+_workspace_root: Optional[str] = None
+
+# System directories that should never be accessed
+if os.name == 'nt':
+    # Windows
+    _BLOCKED_PATHS = [
+        'C:\\Windows', 'C:\\Windows\\System32', 'C:\\Windows\\SysWOW64',
+        'C:\\Program Files', 'C:\\Program Files (x86)',
+        'C:\\Boot', 'C:\\Recovery',
+    ]
+else:
+    # Unix/Linux/macOS
+    _BLOCKED_PATHS = [
+        '/etc', '/boot', '/sys', '/proc', '/dev',
+        '/usr/sbin', '/sbin', '/root',
+    ]
+
+def set_workspace_root(root: str):
+    """Set the workspace root for path traversal protection."""
+    global _workspace_root
+    _workspace_root = os.path.abspath(root) if root else None
+
+def get_workspace_root() -> Optional[str]:
+    """Get the current workspace root."""
+    return _workspace_root
+
+def validate_path(file_path: str) -> tuple[bool, str]:
+    """Validate that a path is safe to access.
+    
+    Returns (is_valid, error_message).
+    Checks:
+      1. Path is not within blocked system directories
+      2. Path stays within workspace root (if set)
+    """
+    abs_path = os.path.abspath(file_path)
+
+    # Check blocked system paths
+    for blocked in _BLOCKED_PATHS:
+        try:
+            if os.path.commonpath([abs_path, blocked]) == blocked:
+                return False, f"Access denied: path is within system directory '{blocked}'"
+        except (ValueError, OSError):
+            pass
+
+    # Check workspace boundary
+    if _workspace_root:
+        try:
+            if os.path.commonpath([abs_path, _workspace_root]) != _workspace_root:
+                return False, f"Access denied: path '{file_path}' is outside workspace root"
+        except (ValueError, OSError):
+            return False, f"Access denied: cannot resolve path '{file_path}'"
+
+    return True, ""
+
 # --- Shared State ---
 global_read_files_tracker: Set[str] = set()
 _READ_TRACKER_MAX = 1000
@@ -81,6 +138,10 @@ class ReadFileTool(BaseTool):
 
     def run(self, file_path: str, start_line: int = None, end_line: int = None) -> ToolResult:
         try:
+            is_valid, err = validate_path(file_path)
+            if not is_valid:
+                return ToolResult(success=False, error=err)
+
             abs_path = os.path.abspath(file_path)
             if not os.path.exists(abs_path):
                 return ToolResult(success=False, error="File not found")
@@ -146,6 +207,10 @@ class CreateFileTool(BaseTool):
 
     def run(self, file_path: str, content: str, file_type: str = 'file', overwrite: bool = False) -> ToolResult:
         try:
+            is_valid, err = validate_path(file_path)
+            if not is_valid:
+                return ToolResult(success=False, error=err)
+
             abs_path = os.path.abspath(file_path)
             if os.path.exists(abs_path) and not overwrite:
                 return ToolResult(success=False, error="File already exists. Use overwrite=true to replace.")
@@ -375,6 +440,10 @@ class EditFileTool(BaseTool):
         if not validate_read_before_edit(file_path):
             return ToolResult(success=False, error=get_read_before_edit_error(file_path))
         
+        is_valid, err = validate_path(file_path)
+        if not is_valid:
+            return ToolResult(success=False, error=err)
+
         try:
             abs_path = os.path.abspath(file_path)
             with open(abs_path, 'r', encoding='utf-8') as f:
@@ -511,6 +580,10 @@ class DeleteFileTool(BaseTool):
 
     def run(self, file_path: str, recursive: bool = False) -> ToolResult:
         try:
+            is_valid, err = validate_path(file_path)
+            if not is_valid:
+                return ToolResult(success=False, error=err)
+
             abs_path = os.path.abspath(file_path)
             if not os.path.exists(abs_path):
                 return ToolResult(success=False, error="Path not found.")
@@ -540,6 +613,10 @@ class ListFilesTool(BaseTool):
 
     def run(self, directory: str = '.', pattern: str = '*.*', recursive: bool = False, show_hidden: bool = False, tree: bool = False, ignore_patterns: List[str] = None) -> ToolResult:
         try:
+            is_valid, err = validate_path(directory)
+            if not is_valid:
+                return ToolResult(success=False, error=err)
+
             abs_path = os.path.abspath(directory)
             if not os.path.isdir(abs_path):
                 return ToolResult(success=False, error="Directory not found.")
@@ -715,5 +792,9 @@ class FastGrepTool(BaseTool):
     args_schema = FastGrepParams
 
     def run(self, keyword: str, directory: str = '.', file_pattern: Optional[str] = None) -> ToolResult:
+        is_valid, err = validate_path(directory)
+        if not is_valid:
+            return ToolResult(success=False, error=err)
+
         search_tool = SearchFilesTool()
         return search_tool.run(pattern=keyword, directory=directory, file_pattern=file_pattern or '*')

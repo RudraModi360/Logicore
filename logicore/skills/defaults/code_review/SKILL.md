@@ -2,8 +2,13 @@
 name: code_review
 description: Automated code review skill for identifying bugs, security issues, and code quality improvements
 version: "1.0.0"
-author: Agentry
+author: Logicore
 tags: [code, review, security, quality]
+trigger: code review, review code, check code, audit code, security review
+cost_tier: low
+requires: []
+conflicts_with: []
+min_framework_version: "0.1.0"
 ---
 
 # Code Review Skill

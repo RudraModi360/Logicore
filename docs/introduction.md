@@ -34,10 +34,10 @@ Logicore is a **unified agentic framework** that abstracts away the fragmentatio
 ### 1. **Multi-Provider Agent Orchestration**
 ```python
 # Switch providers without changing agent logic
-agent = Agent(llm="ollama")        # Local execution
-agent = Agent(llm="openai")        # Cloud execution
-agent = Agent(llm="gemini")        # Google's model
-agent = Agent(llm="groq")          # Fast inference
+agent = Agent(provider="ollama")        # Local execution
+agent = Agent(provider="openai")        # Cloud execution
+agent = Agent(provider="gemini")        # Google's model
+agent = Agent(provider="groq")          # Fast inference
 ```
 Your agent code remains **100% identical** across all providers.
 
@@ -89,7 +89,7 @@ Agents remember context across sessions:
 
 ```python
 agent = Agent(
-    llm="ollama",
+    provider="ollama",
     memory=True  # Enable persistent memory
 )
 

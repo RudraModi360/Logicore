@@ -85,7 +85,9 @@ class ToolOutputMaskingService:
             temp_dir: Directory for saving masked outputs
         """
         self.config = config
-        self._token_counter = token_counter or (lambda x: len(x) // 4)
+        from logicore.context_engine.token_estimator import TokenEstimator
+        self._estimator = token_counter if isinstance(token_counter, TokenEstimator) else TokenEstimator(token_counter)
+        self._token_counter = self._estimator.count_tokens
         self.temp_dir = temp_dir or tempfile.gettempdir()
     
     def _count_tokens(self, text: str) -> int:
@@ -147,14 +149,33 @@ class ToolOutputMaskingService:
         session_id: str,
     ) -> str:
         """Save masked content to file and return path."""
+        import re
+        
+        # Sanitize tool_name to prevent path traversal
+        # Remove path separators, special characters, and limit length
+        sanitized_tool = re.sub(r'[^\w\-]', '_', tool_name)
+        sanitized_tool = re.sub(r'_+', '_', sanitized_tool).strip('_')
+        sanitized_tool = sanitized_tool[:50]  # Limit length
+        
+        # Sanitize session_id as well
+        sanitized_session = re.sub(r'[^\w\-]', '_', session_id)
+        sanitized_session = re.sub(r'_+', '_', sanitized_session).strip('_')
+        sanitized_session = sanitized_session[:50]
+        
         # Create session directory
-        session_dir = os.path.join(self.temp_dir, "logicore_masked", session_id)
+        session_dir = os.path.join(self.temp_dir, "logicore_masked", sanitized_session)
         os.makedirs(session_dir, exist_ok=True)
         
-        # Generate filename
+        # Generate filename with sanitized tool name
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{tool_name}_{timestamp}.txt"
+        filename = f"{sanitized_tool}_{timestamp}.txt"
         filepath = os.path.join(session_dir, filename)
+        
+        # Verify the resolved path is within the intended directory
+        resolved = os.path.realpath(filepath)
+        intended_dir = os.path.realpath(session_dir)
+        if not resolved.startswith(intended_dir):
+            raise ValueError(f"Path traversal detected: {filepath}")
         
         # Save content
         with open(filepath, "w", encoding="utf-8") as f:

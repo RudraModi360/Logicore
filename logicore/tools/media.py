@@ -1,5 +1,5 @@
 """
-Media Search Tool for Agentry Framework
+Media Search Tool for Logicore Framework
 
 Provides inline image and video search capabilities similar to Gemini/Perplexity.
 Fetches relevant images and YouTube videos to embed inline in responses.
@@ -275,7 +275,7 @@ class MediaSearchTool(BaseTool):
             return ToolResult(success=True, content=summary)
             
         except Exception as e:
-            return ToolResult(success=False, error=f"Media search failed: {str(e)}")
+            return ToolResult(success=False, error="Media search failed. Check API key and network connection.")
 
 
 media_search_tool = MediaSearchTool()

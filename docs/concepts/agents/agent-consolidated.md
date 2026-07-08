@@ -31,7 +31,7 @@ def check_weather(location: str) -> str:
 
 async def main():
     agent = Agent(
-        llm="ollama",
+        provider="ollama",
         tools=[check_weather]
     )
     agent.set_auto_approve_all(True)
@@ -150,7 +150,7 @@ def get_time() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 agent = Agent(
-    llm="ollama",
+    provider="ollama",
     tools=[get_time],
     debug=True
 )
@@ -196,7 +196,7 @@ async def smart_approval(tool_name, args):
     return True
 
 agent = Agent(
-    llm="openai",
+    provider="openai",
     tools=[safe_tool, dangerous_tool]
 )
 agent.set_callbacks(on_tool_approval=smart_approval)
@@ -214,7 +214,7 @@ response = await agent.chat("Delete old logs")
 
 ```python
 # Session 1: Store knowledge
-agent1 = Agent(llm="ollama", memory=True)
+agent1 = Agent(provider="ollama", memory=True)
 
 await agent1.chat("""
     Remember: Our API endpoint is at https://api.example.com/v1.
@@ -222,7 +222,7 @@ await agent1.chat("""
 """)
 
 # Session 2: Retrieve knowledge (different agent instance)
-agent2 = Agent(llm="ollama", memory=True)
+agent2 = Agent(provider="ollama", memory=True)
 
 response = await agent2.chat(
     "What's our API endpoint and authentication method?"

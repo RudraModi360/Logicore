@@ -5,6 +5,7 @@ from .azure_provider import AzureProvider
 from .openai_provider import OpenAIProvider
 from .custom_provider import CustomProvider
 from .base import LLMProvider, ProviderCapability
+from .factory import create_provider, register_provider, get_provider_names
 from logicore.gateway.gateway import (
     ProviderGateway, 
     NormalizedMessage, 
@@ -41,6 +42,10 @@ __all__ = [
     "CustomProvider",
     "LLMProvider",
     "ProviderCapability",
+    # Factory
+    "create_provider",
+    "register_provider",
+    "get_provider_names",
     # Gateway
     "ProviderGateway",
     "NormalizedMessage",

@@ -9,6 +9,7 @@ class ExcelHandler(BaseDocumentHandler):
         self._wb = None
         self._text = ""
         self._metadata = {}
+        self._sheet_data = {}  # sheet_name -> list of rows
 
     def load(self) -> None:
         """Load and parse the XLSX file."""
@@ -21,23 +22,24 @@ class ExcelHandler(BaseDocumentHandler):
             self._wb = openpyxl.load_workbook(self.file_path, data_only=True)
             
             text_parts = []
+            self._sheet_data = {}
+            
             for sheet_name in self._wb.sheetnames:
                 sheet = self._wb[sheet_name]
                 text_parts.append(f"--- Sheet: {sheet_name} ---")
                 
-                # Iterate rows
+                rows = []
                 for row in sheet.iter_rows(values_only=True):
-                    # Filter out None values and convert to string
                     row_data = [str(cell) if cell is not None else "" for cell in row]
-                    # Only add non-empty rows
                     if any(row_data):
+                        rows.append(row_data)
                         text_parts.append("\t".join(row_data))
                 
-                text_parts.append("") # Spacer between sheets
+                self._sheet_data[sheet_name] = rows
+                text_parts.append("")
 
             self._text = "\n".join(text_parts)
             
-            # Extract properties
             props = self._wb.properties
             self._metadata = {
                 "author": props.creator,
@@ -49,7 +51,6 @@ class ExcelHandler(BaseDocumentHandler):
                 "category": props.category,
                 "sheet_names": self._wb.sheetnames
             }
-             # Remove None values
             self._metadata = {k: v for k, v in self._metadata.items() if v is not None}
 
         except Exception as e:
@@ -64,3 +65,38 @@ class ExcelHandler(BaseDocumentHandler):
         if self._wb is None:
             self.load()
         return self._metadata
+
+    def to_markdown(self) -> str:
+        """Convert Excel to Markdown with proper table formatting per sheet."""
+        if self._wb is None:
+            self.load()
+        
+        md_parts = [f"# Document: {__import__('os').path.basename(self.file_path)}\n"]
+        
+        if self._metadata:
+            md_parts.append("## Metadata\n")
+            for key, value in self._metadata.items():
+                md_parts.append(f"- **{key}**: {value}")
+            md_parts.append("")
+        
+        for sheet_name, rows in self._sheet_data.items():
+            if not rows:
+                continue
+            
+            md_parts.append(f"## Sheet: {sheet_name}\n")
+            
+            header = rows[0]
+            col_count = len(header)
+            
+            md_table = "| " + " | ".join(header) + " |\n"
+            md_table += "| " + " | ".join(["---"] * col_count) + " |\n"
+            
+            for row in rows[1:]:
+                padded = row + [""] * (col_count - len(row))
+                final = padded[:col_count]
+                md_table += "| " + " | ".join(final) + " |\n"
+            
+            md_parts.append(md_table)
+            md_parts.append("")
+        
+        return "\n".join(md_parts)

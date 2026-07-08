@@ -124,10 +124,10 @@ class ContextConfig:
     preserve_recent_count: int = 10
     
     # Tool output masking: protect recent N tokens from pruning
-    protection_threshold_tokens: int = 50000
+    protection_threshold_tokens: int = 20000
     
     # Tool output masking: trigger pruning when prunable tokens exceed N
-    min_prunable_tokens: int = 30000
+    min_prunable_tokens: int = 10000
     
     # Protect the most recent turn from masking
     protect_latest_turn: bool = True
@@ -237,50 +237,7 @@ class TelemetryConfig:
     export_interval_seconds: int = 60
 
 
-@dataclass
-class ReasoningConfig:
-    """
-    Configuration for agent reasoning behavior.
-    
-    Controls reasoning depth, thinking budgets, and auto-escalation.
-    Inspired by gemini-cli's thinkingConfig.
-    """
-    from enum import Enum
-    
-    # Reasoning level: 1=MINIMAL, 2=LOW, 3=MEDIUM, 4=HIGH, 5=DEEP
-    level: int = 3  # MEDIUM by default
-    
-    # Maximum tokens for reasoning/thinking (0 = unlimited, 8192 = max for most models)
-    thinking_budget: int = 2048
-    
-    # Whether to capture and display thinking process
-    include_thoughts: bool = True
-    
-    # Show step-by-step reasoning to user
-    show_reasoning_steps: bool = False
-    
-    # Automatically increase reasoning level for complex tasks
-    auto_escalate: bool = True
-    
-    # Approval mode: "plan", "default", "auto", "yolo"
-    approval_mode: str = "default"
-
-
-@dataclass
-class TrackerConfig:
-    """Configuration for task tracking subsystem."""
-    
-    # Enable task tracking
-    enabled: bool = True
-    
-    # Auto-create task for complex requests
-    auto_create_tasks: bool = True
-    
-    # Persist tasks to disk
-    persist: bool = True
-    
-    # Storage directory (relative to project root)
-    storage_dir: str = ".logicore/tracker"
+from logicore.runtime.reasoning.config import ReasoningConfig, ReasoningLevel
 
 
 @dataclass
@@ -342,7 +299,6 @@ class RuntimeConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
-    tracker: TrackerConfig = field(default_factory=TrackerConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
     prompt_cache: PromptCacheConfig = field(default_factory=PromptCacheConfig)
     
@@ -413,8 +369,8 @@ class RuntimeConfig:
                 max_context_tokens=get_env_int("LOGICORE_CONTEXT_MAX_TOKENS", getattr(settings, "CONTEXT_MAX_TOKENS", 128000)),
                 compression_threshold_ratio=get_env_float("LOGICORE_COMPRESSION_RATIO", getattr(settings, "CONTEXT_COMPRESS_THRESHOLD", 0.85)),
                 compression_threshold_tokens=get_env_int("LOGICORE_COMPRESSION_TOKENS", 100000),
-                protection_threshold_tokens=get_env_int("LOGICORE_PROTECTION_TOKENS", 50000),
-                min_prunable_tokens=get_env_int("LOGICORE_MIN_PRUNABLE_TOKENS", getattr(settings, "CONTEXT_TOOL_OUTPUT_MASK_THRESHOLD", 30000)),
+                protection_threshold_tokens=get_env_int("LOGICORE_PROTECTION_TOKENS", 20000),
+                min_prunable_tokens=get_env_int("LOGICORE_MIN_PRUNABLE_TOKENS", getattr(settings, "CONTEXT_TOOL_OUTPUT_MASK_THRESHOLD", 10000)),
             ),
             tool=ToolConfig(
                 max_output_chars=get_env_int("LOGICORE_TOOL_MAX_OUTPUT", 12000),

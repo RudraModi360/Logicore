@@ -18,19 +18,9 @@ from .datetime import DateTimeTool, get_smart_agent_tools, get_smart_agent_tool_
 from .think import ThinkTool
 from .bash import SmartBashTool
 from .execution import ListProcessesTool, KillProcessTool, GetProcessInfoTool, GetProcessOutputTool, TailProcessOutputTool, WatchProcessTool, background_manager
+from .filesystem import validate_path, set_workspace_root, get_workspace_root
 
-# Tracker and plan tools
-from .tracker import (
-    TrackerCreateTool,
-    TrackerUpdateTool,
-    TrackerListTool,
-    TrackerGetTool,
-    TrackerAddDependencyTool,
-    TrackerVisualizeTool,
-    TrackerCloseTool,
-    get_tracker_tools,
-    get_tracker_tool_schemas,
-)
+# Plan tools
 from .plan import (
     EnterPlanModeTool,
     SubmitPlanTool,
@@ -81,16 +71,6 @@ __all__ = [
     'ThinkTool',
     'get_smart_agent_tools',
     'get_smart_agent_tool_schemas',
-    # Tracker Tools
-    'TrackerCreateTool',
-    'TrackerUpdateTool',
-    'TrackerListTool',
-    'TrackerGetTool',
-    'TrackerAddDependencyTool',
-    'TrackerVisualizeTool',
-    'TrackerCloseTool',
-    'get_tracker_tools',
-    'get_tracker_tool_schemas',
     # Plan Tools
     'EnterPlanModeTool',
     'SubmitPlanTool',

@@ -36,9 +36,9 @@ async def main():
     )
 
     agent = Agent(
-        llm=provider,
+        provider=provider,
         role="Enterprise Assistant",
-        system_message="Respond with concise, production-safe guidance."
+        system_prompt="Respond with concise, production-safe guidance."
     )
 
     result = await agent.chat("List 5 Azure governance best practices.")
@@ -61,7 +61,7 @@ If omitted, Logicore auto-detects the model type from endpoint and deployment na
 
 ```python
 agent = Agent(
-    llm=AzureProvider(
+    provider=AzureProvider(
         model_name="gpt-4o-mini",
         endpoint="https://your-resource.openai.azure.com",
         api_key="your_key_here",

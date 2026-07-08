@@ -135,14 +135,14 @@ def add(a: int, b: int) -> int:
     return a + b
 
 agent = Agent(
-    llm="ollama",
+    provider="ollama",
     tools=[multiply, add]  # List of functions
 )
 ```
 
 ### Runtime Registration
 ```python
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 agent.register_tool_from_function(multiply)
 agent.register_tool_from_function(add)
 ```
@@ -375,7 +375,7 @@ def get_data() -> MyCustomClass:
 Only load tools when relevant:
 
 ```python
-agent = Agent(llm="ollama")
+agent = Agent(provider="ollama")
 
 # Load tools conditionally
 if user_role == "admin":

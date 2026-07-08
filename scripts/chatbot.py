@@ -262,9 +262,6 @@ class Chatbot:
         "read_file", "write_file", "edit_file", "create_file", "delete_file",
         "execute_command", "code_execute", "git_command",
         "read_document", "convert_document",
-        "edit_pptx", "create_pptx", "append_slide",
-        "edit_docx", "create_docx",
-        "edit_excel", "create_excel",
         "merge_pdfs", "split_pdf",
     }
 
@@ -301,11 +298,10 @@ class Chatbot:
         llm = self._build_provider()
 
         common_kwargs = {
-            "llm": llm,
+            "provider": llm,
             "model": self.model_name,
             "debug": True,
             "telemetry": True,
-            "memory": False,
             "max_iterations": 100,
         }
 
@@ -319,16 +315,14 @@ class Chatbot:
                 model=self.model_name,
                 debug=True,
                 telemetry=True,
-                memory_enabled=False,
                 max_iterations=100,
             )
         elif agent_class_name == "CopilotAgent":
             agent = CopilotAgent(
-                llm=llm,
+                provider=llm,
                 model=self.model_name,
                 debug=True,
                 telemetry=True,
-                memory=False,
             )
         elif agent_class_name == "MCPAgent":
             agent = MCPAgent(
@@ -336,15 +330,13 @@ class Chatbot:
                 model=self.model_name,
                 debug=True,
                 telemetry=True,
-                memory=False,
             )
         elif agent_class_name == "Agent":
             agent = Agent(
-                llm=llm,
+                provider=llm,
                 model=self.model_name,
                 debug=True,
                 telemetry=True,
-                memory=False,
                 tools=True,
                 max_iterations=100,
             )
@@ -641,8 +633,6 @@ class Chatbot:
             elif name in DANGEROUS_TOOLS:
                 safety = " [DANGEROUS]"
             elif name in ['web_search', 'image_search', 'url_fetch', 'convert_document',
-                          'edit_pptx', 'create_pptx', 'append_slide', 'edit_docx',
-                          'create_docx', 'edit_excel', 'create_excel',
                           'merge_pdfs', 'split_pdf', 'add_cron_job', 'remove_cron_job']:
                 safety = " [APPROVAL]"
             lines.append(f"  • {name}{safety}")
@@ -689,9 +679,6 @@ class Chatbot:
             f"  Sandbox mode: {sandbox_status}\n"
             f"  Description: {agent_config.get('desc', 'N/A')}\n"
         )
-
-    def _show_memory_status(self) -> str:
-        return "\n--- Memory Status ---\n  Memory system has been removed.\n"
 
     def _show_telemetry(self) -> str:
         try:
@@ -1042,8 +1029,6 @@ class Chatbot:
                 f"  Created: {session.created_at}\n"
                 f"  Active: {session.last_activity}\n"
             )
-        elif command == "/memory":
-            print(self._show_memory_status())
         elif command == "/telemetry":
             print(self._show_telemetry())
         elif command == "/token":
@@ -1351,16 +1336,17 @@ class Chatbot:
     async def _handle_tasks_view(self):
         """View tasks created by the agent (read-only)."""
         try:
-            from logicore.tools.tracker import get_tracker
-            tracker = get_tracker()
-            tasks = tracker.list_tasks()
+            from logicore.tasks import TaskStore
+            store = TaskStore(base_dir=".", task_list_id="default")
+            tasks = store.list_all()
             if not tasks:
                 print("No tasks yet. The agent will create tasks automatically for complex work.")
             else:
                 print(f"\n--- Agent Tasks ({len(tasks)}) ---")
                 for task in tasks:
-                    status_icon = {"todo": "[ ]", "in_progress": "[>]", "done": "[x]", "open": "[ ]", "closed": "[x]"}.get(task.status, "[?]")
-                    print(f"  {status_icon} {task.id}: {task.title} ({task.status})")
+                    status_icon = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]", "failed": "[!]"}
+                    icon = status_icon.get(task.status.value, "[?]")
+                    print(f"  {icon} #{task.id}: {task.subject} ({task.status.value})")
         except Exception as e:
             print(f"Error: {e}")
 
@@ -1522,30 +1508,63 @@ class Chatbot:
     # --- Inline Function Parser ---
 
     def _parse_inline_function(self, text: str) -> Callable:
-        """Parse a one-line function definition and return a callable."""
+        """Parse a one-line function definition and return a callable.
+        
+        Uses AST-based safe parsing instead of exec() to prevent code injection.
+        Only allows simple function definitions and lambda expressions.
+        """
+        import ast
         text = text.strip()
+
+        # Whitelist of allowed AST node types for safe evaluation
+        _SAFE_NODES = (
+            ast.Expression, ast.Call, ast.Name, ast.Attribute,
+            ast.Constant, ast.Num, ast.Str, ast.BinOp, ast.UnaryOp,
+            ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+            ast.USub, ast.UAdd,
+            ast.List, ast.Tuple, ast.Dict, ast.Set,
+            ast.keyword, ast.Index, ast.Slice,
+        )
+
+        def _validate_ast_safe(node):
+            """Recursively check AST only contains safe nodes."""
+            for child in ast.walk(node):
+                if not isinstance(child, _SAFE_NODES):
+                    raise ValueError(f"Unsafe AST node type: {type(child).__name__}")
+            return True
+
         if text.startswith("def ") or text.startswith("async def "):
+            try:
+                tree = ast.parse(text, mode='exec')
+                _validate_ast_safe(tree)
+            except (SyntaxError, ValueError) as e:
+                raise ValueError(f"Unsafe or invalid function definition: {e}")
+
             namespace = {}
             try:
-                exec(f"async def _fn(): pass", namespace)
-                async_fn = namespace["_fn"]
-            except Exception:
-                namespace = {}
-            full = f"{text}\n" if not text.endswith("\n") else text
-            try:
-                exec(compile(full, "<addtool>", "exec"), namespace)
-            except SyntaxError:
-                full = f"def {text.split('(', 1)[0].replace('def ', '')}(): pass" if "(" not in text else text
-                namespace = {}
-                exec(text, namespace)
+                code = compile(text, "<addtool>", "exec")
+                exec(code, {"__builtins__": {}}, namespace)
+            except Exception as e:
+                raise ValueError(f"Failed to compile function: {e}")
+
+            candidates = [v for k, v in namespace.items() if callable(v) and not k.startswith("_")]
+            if not candidates:
+                raise ValueError("No callable found in function definition.")
+            return candidates[0]
         else:
-            # Treat as expression, wrap in lambda
-            namespace = {}
-            exec(f"_fn = lambda: {text}", namespace)
-        candidates = [v for k, v in namespace.items() if callable(v) and not k.startswith("_")]
-        if not candidates:
-            raise ValueError("No callable found in expression.")
-        return candidates[0]
+            # Treat as expression - validate as safe AST first
+            try:
+                tree = ast.parse(text, mode='eval')
+                _validate_ast_safe(tree)
+            except (SyntaxError, ValueError) as e:
+                raise ValueError(f"Unsafe or invalid expression: {e}")
+
+            # Build a safe lambda from the validated expression
+            try:
+                safe_fn = eval(compile(tree, "<addtool>", "eval"), {"__builtins__": {}})
+                return lambda: safe_fn
+            except Exception as e:
+                raise ValueError(f"Failed to evaluate expression: {e}")
 
 
 async def main():

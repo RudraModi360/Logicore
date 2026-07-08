@@ -22,39 +22,35 @@ class CopilotAgent(Agent):
     
     def __init__(
         self, 
-        llm: Union[LLMProvider, str] = "ollama",
+        provider: Union[LLMProvider, str] = "ollama",
         model: str = None,
         api_key: str = None,
-        system_message: str = None,
+        system_prompt: str = None,
         debug: bool = False,
         tools: list|bool = True,
         capabilities: Any = None,
         telemetry: bool = False,
-        memory: bool = False,
         skills: list = None,
         workspace_root: str = None,
         tool_preset: str = "copilot",
-        task_tracking: bool = True,
     ):
         # Use copilot-specific prompt if no custom message provided
-        if not system_message:
+        if not system_prompt:
             model_name = model or "Unknown Model"
-            system_message = get_copilot_prompt(model_name)
+            system_prompt = get_copilot_prompt(model_name)
         
         super().__init__(
-            llm=llm,
+            provider=provider,
             model=model,
             api_key=api_key,
-            system_message=system_message,
+            system_prompt=system_prompt,
             role="copilot",
             debug=debug,
             tools=tools,
             telemetry=telemetry,
-            memory=memory,
             skills=skills,
             workspace_root=workspace_root,
             tool_preset=tool_preset,
-            task_tracking=task_tracking,
         )
         
     async def chat(self, user_input: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, generate_walkthrough: bool = False, **kwargs) -> str:

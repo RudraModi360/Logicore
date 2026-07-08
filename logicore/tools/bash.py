@@ -1,6 +1,87 @@
-from typing import Optional
+import re
+from typing import Optional, List, Tuple
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
+
+
+# Command blocklist: patterns that should be blocked for safety
+# Each entry is (pattern, description) where pattern is a regex
+BLOCKED_COMMAND_PATTERNS: List[Tuple[str, str]] = [
+    # Destructive filesystem operations
+    (r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/', 'Recursive force delete from root'),
+    (r'rm\s+-[a-z]*f[a-z]*r[a-z]*\s+/', 'Recursive force delete from root'),
+    (r'rm\s+-rf\s+/\*', 'Recursive force delete all from root'),
+    (r'rm\s+-fr\s+/\*', 'Recursive force delete all from root'),
+    (r'rmdir\s+/[a-zA-Z]', 'Remove system directory'),
+    
+    # Fork bombs and resource exhaustion
+    (r':\(\)\s*\{\s*:\|:\s*&\s*\}\s*;:', 'Fork bomb'),
+    (r'while\s+true\s*;', 'Infinite loop'),
+    
+    # Pipe to shell (remote code execution)
+    (r'curl\s+.*\|\s*(ba)?sh', 'Pipe remote content to shell'),
+    (r'wget\s+.*\|\s*(ba)?sh', 'Pipe remote content to shell'),
+    (r'curl\s+.*\|\s*bash', 'Pipe remote content to bash'),
+    (r'wget\s+.*\|\s*bash', 'Pipe remote content to bash'),
+    
+    # Encoded/obfuscated commands
+    (r'powershell\s+-[eE][nN][cC]', 'Encoded PowerShell command'),
+    (r'powershell\s+-[eE]\s+', 'Encoded PowerShell command'),
+    (r'bash\s+-c\s+["\'].*\\x', 'Obfuscated bash command'),
+    
+    # Disk wipe operations
+    (r'dd\s+.*of=/dev/', 'Direct disk write'),
+    (r'mkfs\.', 'Format filesystem'),
+    (r'fdisk\s+/dev/', 'Disk partitioning'),
+    
+    # Dangerous permission changes
+    (r'chmod\s+777\s+/', 'Set world-writable permissions on root'),
+    (r'chmod\s+-R\s+777\s+/', 'Recursive world-writable permissions'),
+    (r'chown\s+.*\s+/', 'Change ownership of system files'),
+    
+    # Network attacks
+    (r'nc\s+-[a-z]*l', 'Netcat listener'),
+    (r'nmap\s+', 'Network scanning'),
+    
+    # Credential/access operations
+    (r'cat\s+/etc/shadow', 'Read password hashes'),
+    (r'cat\s+/etc/passwd.*\|', 'Read and pipe system user data'),
+    
+    # Process manipulation
+    (r'kill\s+-9\s+1\b', 'Kill init/systemd process'),
+    (r'killall\s+', 'Kill all processes'),
+    (r'pkill\s+-9\s+', 'Force kill processes'),
+    
+    # System modification
+    (r'rm\s+/etc/', 'Remove system configuration'),
+    (r'rm\s+/boot/', 'Remove boot files'),
+    (r'rm\s+/bin/', 'Remove system binaries'),
+    (r'rm\s+/sbin/', 'Remove system binaries'),
+    (r'rm\s+/usr/', 'Remove user programs'),
+    (r'rm\s+/var/', 'Remove variable data'),
+    (r'rm\s+/sys/', 'Remove sysfs'),
+    (r'rm\s+/proc/', 'Remove procfs'),
+    
+    # Scheduled task manipulation
+    (r'crontab\s+-r', 'Remove all cron jobs'),
+    (r'at\s+', 'Schedule one-time command'),
+]
+
+
+def validate_command(command: str) -> Optional[str]:
+    """
+    Validate a command against the blocklist.
+    
+    Returns:
+        Error message if command is blocked, None if safe.
+    """
+    cmd_lower = command.lower().strip()
+    
+    for pattern, description in BLOCKED_COMMAND_PATTERNS:
+        if re.search(pattern, cmd_lower):
+            return f"Command blocked: {description}. This command could cause irreversible damage."
+    
+    return None
 
 
 class SmartBashParams(BaseModel):
@@ -22,30 +103,26 @@ class SmartBashParams(BaseModel):
     )
     timeout: int = Field(
         60,
-        description="Timeout in seconds (1-300)"
-    )
-    capture_learning: bool = Field(
-        False,
-        description="Whether to store the command as a learning if successful"
+        description="Timeout in seconds (10-300). Minimum 10s to prevent premature termination."
     )
 
 
 class SmartBashTool(BaseTool):
     """
-    Enhanced bash/shell command execution with learning capabilities.
+    Enhanced bash/shell command execution.
     
     Features:
     - Auto-detects host OS and uses appropriate shell
     - Auto-translates commands between OS syntaxes (Unix ↔ PowerShell)
     - Auto-detects Python code and handles via temp files
-    - Captures successful commands as learnings when requested
+    - Command blocklist prevents destructive operations
     """
     
     name = "bash"
     description = (
         "Execute shell commands. Auto-detects OS and translates commands between "
         "Unix/PowerShell syntax. Python code is auto-detected and handled via temp files. "
-        "Set capture_learning=true to remember successful commands."
+        "Dangerous commands (rm -rf /, pipe to shell, etc.) are blocked for safety."
     )
     args_schema = SmartBashParams
     
@@ -54,7 +131,14 @@ class SmartBashTool(BaseTool):
         self.exec_tool = ExecuteCommandTool()
     
     def run(self, command: str, purpose: str = None, working_dir: str = None,
-            workdir: str = None, timeout: int = 60, capture_learning: bool = False) -> ToolResult:
+            workdir: str = None, timeout: int = 60) -> ToolResult:
+        # Validate command against blocklist
+        block_reason = validate_command(command)
+        if block_reason:
+            return ToolResult(success=False, error=block_reason)
+        
+        # Enforce minimum timeout to prevent premature termination
+        timeout = max(10, min(timeout, 300))
         # Support both working_dir and workdir (model sometimes uses wrong name)
         cwd = working_dir or workdir
         result = self.exec_tool.run(

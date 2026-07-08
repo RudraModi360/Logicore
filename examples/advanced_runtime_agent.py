@@ -142,7 +142,7 @@ class ToolAgent:
         # Create runtime
         self.runtime = AgentRuntime(
             config=self.config,
-            llm_provider=self.provider,
+            provider=self.provider,
             model_name=model_name,
             tool_executor=demo_tool_executor,
         )

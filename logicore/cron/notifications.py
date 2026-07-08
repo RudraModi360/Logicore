@@ -150,8 +150,10 @@ def _resolve_logicore_logo_uri() -> str:
 
 def _run_powershell_toast_script(ps_script: str) -> bool:
     try:
+        import base64
+        encoded_script = base64.b64encode(ps_script.encode('utf-16-le')).decode('ascii')
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_script],
             check=True,
             capture_output=True,
             creationflags=subprocess.CREATE_NO_WINDOW,
@@ -170,12 +172,23 @@ def _send_powershell_toast_generic(
     duration: str,
     logo_uri: str,
 ) -> bool:
+    # Use proper XML escaping for title and message (already done with html.escape)
     xml_title = html.escape(title, quote=False)
     xml_message = html.escape(message, quote=False)
     toast_duration = "long" if duration == "long" else "short"
+    
+    # Sanitize logo_uri to prevent injection
+    def sanitize_uri(uri: str) -> str:
+        # Only allow http/https/file URIs
+        if uri and not uri.startswith(('http://', 'https://', 'file:///')):
+            return ""
+        # Escape any special characters
+        return uri.replace('"', '`"').replace("'", "''")
+    
+    logo_uri_clean = sanitize_uri(logo_uri)
     logo_line = (
-        f"<image placement='appLogoOverride' hint-crop='circle' src='{logo_uri}'/>"
-        if logo_uri
+        f"<image placement='appLogoOverride' hint-crop='circle' src='{logo_uri_clean}'/>"
+        if logo_uri_clean
         else ""
     )
 
@@ -192,7 +205,16 @@ def _send_powershell_toast_generic(
 </toast>
 """.strip()
 
-    app_id_escaped = app_id.replace('"', '`"')
+    # Proper PowerShell escaping for app_id
+    def escape_ps_string(s: str) -> str:
+        s = s.replace('`', '``')
+        s = s.replace('"', '`"')
+        s = s.replace('$', '`$')
+        s = s.replace('{', '`{')
+        s = s.replace('}', '`}')
+        return s
+    
+    app_id_escaped = escape_ps_string(app_id)
     use_explicit_notifier = bool(app_id.strip())
     notifier_expr = (
         f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(\"{app_id_escaped}\")"
@@ -218,9 +240,24 @@ def _send_powershell_toast_generic(
 
 
 def _send_powershell_toast_basic(title: str, message: str, app_id: str) -> bool:
-    title_escaped = title.replace('"', '`"')
-    message_escaped = message.replace('"', '`"')
-    app_id_escaped = app_id.replace('"', '`"')
+    # Use proper PowerShell string escaping to prevent injection
+    # Replace special characters that could be used for injection
+    def escape_ps_string(s: str) -> str:
+        # Escape backticks first (PowerShell escape character)
+        s = s.replace('`', '``')
+        # Escape double quotes
+        s = s.replace('"', '`"')
+        # Escape dollar signs (variable expansion)
+        s = s.replace('$', '`$')
+        # Escape opening curly braces (subexpression)
+        s = s.replace('{', '`{')
+        # Escape closing curly braces
+        s = s.replace('}', '`}')
+        return s
+    
+    title_escaped = escape_ps_string(title)
+    message_escaped = escape_ps_string(message)
+    app_id_escaped = escape_ps_string(app_id)
     use_explicit_notifier = bool(app_id.strip())
     notifier_expr = (
         f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(\"{app_id_escaped}\")"

@@ -104,3 +104,16 @@ logicore = ["py.typed"]
 
 [tool.logicore]
 built-by = "Rudra Modi"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "unit: Unit tests (fast, no I/O)",
+    "integration: Integration tests (may need APIs)",
+    "validation: Production validation tests",
+    "slow: Tests that take a long time",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

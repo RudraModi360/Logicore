@@ -30,9 +30,9 @@ async def main():
     provider = OpenAIProvider(model_name="gpt-4o-mini")
 
     agent = Agent(
-        llm=provider,
+        provider=provider,
         role="Cloud Assistant",
-        system_message="Provide concise and reliable answers."
+        system_prompt="Provide concise and reliable answers."
     )
 
     result = await agent.chat("Explain event-driven architecture in simple terms.")
@@ -48,7 +48,7 @@ def calculate_tax(amount: float, rate: float) -> str:
     """Calculate tax amount from value and rate."""
     return str(amount * rate)
 
-agent = Agent(llm=provider, tools=[calculate_tax])
+agent = Agent(provider=provider, tools=[calculate_tax])
 ```
 
 ## Multimodal input support
@@ -57,7 +57,7 @@ agent = Agent(llm=provider, tools=[calculate_tax])
 
 ```python
 agent = Agent(
-    llm=OpenAIProvider(model_name="gpt-4o-mini"),
+    provider=OpenAIProvider(model_name="gpt-4o-mini"),
     role="Vision Assistant"
 )
 

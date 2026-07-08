@@ -97,7 +97,7 @@ This keeps integration straightforward in APIs and chat frontends.
 ```python
 from logicore.agents.agent_smart import SmartAgent
 
-agent = SmartAgent(llm="ollama", mode="solo")
+agent = SmartAgent(provider="ollama", mode="solo")
 response = await agent.chat("Find latest Python async best practices")
 print(response)
 ```
@@ -109,7 +109,7 @@ Use this for discovery, brainstorming, and ad-hoc technical queries.
 ### 2) Project Mode
 
 ```python
-agent = SmartAgent(llm="ollama", mode="project")
+agent = SmartAgent(provider="ollama", mode="project")
 
 agent.create_project(
     project_id="api-core",
