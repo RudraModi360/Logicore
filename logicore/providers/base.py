@@ -65,12 +65,13 @@ class LLMProvider(ABC):
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
-        on_token: Optional[Callable[[str], None]] = None
+        on_token: Optional[Callable[[str], None]] = None,
+        on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Any:
         """Streaming chat via gateway delegation. Subclasses inherit this for free."""
         from logicore.gateway.gateway import get_gateway_for_provider
         gw = get_gateway_for_provider(self)
-        return await gw.chat_stream(messages, tools=tools, on_token=on_token)
+        return await gw.chat_stream(messages, tools=tools, on_token=on_token, on_event=on_event)
     
     async def health_check(self) -> bool:
         """

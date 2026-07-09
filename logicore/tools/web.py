@@ -4,7 +4,7 @@ import re
 import html as html_mod
 import ipaddress
 from urllib.parse import urlparse
-from typing import Literal, List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolResult
 from logicore.config.settings import get_api_key
@@ -71,10 +71,9 @@ def _validate_url_safety(url: str) -> tuple[bool, str]:
 
 class WebSearchParams(BaseModel):
     user_input: str = Field(..., description='Content to search for.')
-    search_type: Literal['quick', 'detailed', 'deep'] = Field(
-        'quick', 
-        description='Search depth: "quick" returns snippets only (fast, low context), '
-                    '"detailed" fetches top 2 page summaries, "deep" for comprehensive research.'
+    num_results: int = Field(
+        5,
+        description='Number of search results to return (1-10). Default is 5.'
     )
 
 class UrlFetchParams(BaseModel):
@@ -140,44 +139,26 @@ def fetch_page_content(url: str, max_chars: int = 3000) -> Optional[str]:
 class WebSearchTool(BaseTool):
     name = "web_search"
     description = (
-        "Search the internet using Exa. "
-        "Use 'quick' for fast snippet-based answers (recommended), "
-        "'detailed' to fetch top page content, "
-        "'deep' for comprehensive LLM-analyzed research."
+        "Search the internet using Exa and return the raw search results as-is. "
+        "Returns the same result set that a direct Exa web search would produce "
+        "(title, URL, full text/highlights, author, and publish date for each result)."
     )
     args_schema = WebSearchParams
 
     EXA_SEARCH_URL = "https://api.exa.ai/search"
 
-    def _exa_search(self, query: str, num_results: int = 5, search_type: str = "quick") -> List[Dict[str, str]]:
-        """Perform an Exa Search."""
+    def _exa_search(self, query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+        """Perform an Exa Search and return the raw results as-is."""
         api_key = get_api_key("exa")
         
         if not api_key:
             raise ValueError("EXA_API_KEY environment variable must be set")
         
-        # Map our search_type to Exa search type
-        exa_type_map = {
-            "quick": "fast",
-            "detailed": "auto",
-            "deep": "deep"
-        }
-        exa_type = exa_type_map.get(search_type, "auto")
-        
-        # Configure contents based on search type
-        contents = {}
-        if search_type == "quick":
-            contents = {"highlights": True}
-        elif search_type == "detailed":
-            contents = {"highlights": True, "text": True}
-        elif search_type == "deep":
-            contents = {"text": True, "highlights": True}
-        
         payload = {
             "query": query,
-            "type": exa_type,
-            "numResults": min(num_results, 10),
-            "contents": contents
+            "type": "auto",
+            "numResults": min(max(1, num_results), 10),
+            "contents": {"text": True, "highlights": True}
         }
         
         headers = {
@@ -199,79 +180,48 @@ class WebSearchTool(BaseTool):
         if "results" not in data:
             return []
         
-        results = []
-        for item in data["results"]:
-            # Extract highlights or text content
-            snippet = ""
-            if "highlights" in item and item["highlights"]:
-                snippet = " | ".join(item["highlights"])
-            elif "text" in item and item["text"]:
-                snippet = item["text"][:300]
-            
-            results.append({
-                "title": item.get("title", ""),
-                "link": item.get("url", ""),
-                "snippet": snippet
-            })
-        
-        return results
+        # Return raw Exa results unmodified so callers get the same data
+        # a direct Exa call would produce.
+        return data["results"]
 
-    def _is_video_link(self, url: str) -> bool:
-        """Check if a URL is a video link."""
-        video_domains = [
-            'youtube.com', 'youtu.be', 'vimeo.com', 
-            'dailymotion.com', 'twitch.tv', 'tiktok.com'
-        ]
-        return any(domain in url.lower() for domain in video_domains)
-
-    def _format_quick_results(self, results: List[Dict[str, str]]) -> str:
-        """Format results using just snippets (low context usage)."""
+    def _format_results(self, results: List[Dict[str, Any]]) -> str:
+        """Format the raw Exa results into readable output without losing data."""
         if not results:
             return "No results found."
         
-        lines = ["📊 **Web Search Results** (Quick Mode)\n"]
+        lines = ["📊 **Web Search Results**\n"]
         
-        for i, r in enumerate(results, 1):
-            icon = "🎬" if self._is_video_link(r['link']) else "🔗"
-            lines.append(f"{icon} **{i}. {r['title']}**")
-            lines.append(f"   {r['snippet']}")
-            lines.append(f"   *Source: {r['link']}*\n")
-        
-        return "\n".join(lines)
-
-    def _format_detailed_results(self, results: List[Dict[str, str]], query: str) -> str:
-        """Format results with extracted page content for top 2 results."""
-        if not results:
-            return "No results found."
-        
-        lines = ["📊 **Web Search Results** (Detailed Mode)\n"]
-        
-        # Show all snippets first
-        lines.append("### Summary of Results:\n")
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r['title']} - {r['snippet'][:100]}...")
-        
-        # Fetch detailed content from top 2 non-video results
-        lines.append("\n### Detailed Content:\n")
-        fetched = 0
-        
-        for r in results:
-            if fetched >= 2:
-                break
-            if self._is_video_link(r['link']):
-                continue
+        for i, item in enumerate(results, 1):
+            title = item.get("title", "(untitled)")
+            url = item.get("url", "")
+            author = item.get("author", "")
+            published = item.get("publishedDate", "")
+            text = item.get("text", "")
+            highlights = item.get("highlights", [])
             
-            content = fetch_page_content(r['link'], max_chars=2000)
+            lines.append(f"{i}. **{title}**")
+            lines.append(f"   *Source: {url}*")
+            
+            meta = []
+            if author:
+                meta.append(f"Author: {author}")
+            if published:
+                meta.append(f"Published: {published}")
+            if meta:
+                lines.append("   " + " | ".join(meta))
+            
+            content = text or (" ".join(highlights) if highlights else "")
             if content:
-                fetched += 1
-                lines.append(f"**📄 {r['title']}**")
-                lines.append(f"*{r['link']}*\n")
-                lines.append(content[:1500])
-                lines.append("\n---\n")
+                snippet = content[:1500]
+                if len(content) > 1500:
+                    snippet += "..."
+                lines.append(f"   {snippet}")
+            
+            lines.append("")
         
         return "\n".join(lines)
 
-    def run(self, user_input: str = None, search_type: str = 'quick', query: str = None, **kwargs) -> ToolResult:
+    def run(self, user_input: str = None, query: str = None, num_results: int = 5, **kwargs) -> ToolResult:
         # Accept 'query' as alias for 'user_input' (models often use 'query')
         if query and not user_input:
             user_input = query
@@ -282,61 +232,8 @@ class WebSearchTool(BaseTool):
             return ToolResult(success=False, error="Search query is required")
         
         try:
-            # Determine result count based on search type
-            num_results = 5 if search_type == 'quick' else 8
-            results = self._exa_search(user_input, num_results, search_type)
-
-            if search_type == 'quick':
-                # Fast: Just return formatted snippets
-                return ToolResult(success=True, content=self._format_quick_results(results))
-            
-            elif search_type == 'detailed':
-                # Medium: Snippets + top 2 page content
-                return ToolResult(success=True, content=self._format_detailed_results(results, user_input))
-            
-            elif search_type == 'deep':
-                # Deep: Use LLM to analyze and synthesize
-                groq_api_key = get_api_key("groq")
-                
-                # First get detailed content
-                detailed = self._format_detailed_results(results, user_input)
-                
-                if not groq_api_key:
-                    return ToolResult(success=True, content=f"[Deep Search - Analysis Unavailable]\n\n{detailed}")
-                
-                from groq import Groq
-                client = Groq(api_key=groq_api_key)
-                
-                response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a research assistant. Analyze the provided search results "
-                                "and give a comprehensive, well-structured answer. Include key facts, "
-                                "cite sources, and highlight any important information the user should know."
-                            )
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Query: {user_input}\n\nSearch Results:\n{detailed}"
-                        }
-                    ],
-                    max_tokens=1500
-                )
-                
-                analysis = response.choices[0].message.content
-                
-                # Add sources at the end
-                sources = "\n\n**Sources:**\n"
-                for i, r in enumerate(results[:5], 1):
-                    sources += f"{i}. [{r['title'][:50]}...]({r['link']})\n"
-                
-                return ToolResult(success=True, content=analysis + sources)
-
-            return ToolResult(success=True, content=self._format_quick_results(results))
-
+            results = self._exa_search(user_input, num_results)
+            return ToolResult(success=True, content=self._format_results(results))
         except Exception as e:
             return ToolResult(success=False, error="Search failed. Check API key and network connection.")
 

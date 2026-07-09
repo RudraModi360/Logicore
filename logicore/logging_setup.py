@@ -56,7 +56,9 @@ def setup_debug_logging(level: int = logging.DEBUG) -> None:
 
     # Quiet down chatty third-party network libraries so debug output stays
     # focused on LogiCore's own traces (gateway/tool/orchestration/etc.).
-    for noisy in ("httpx", "httpcore", "urllib3", "openai", "anthropic"):
+    # These SDKs inherit the root level and would otherwise dump the full
+    # request payload (system prompt, tool schemas, ...) on every call.
+    for noisy in ("httpx", "httpcore", "urllib3", "openai", "anthropic", "groq"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     _CONFIGURED = True

@@ -28,6 +28,9 @@ from logicore.agent.session import AgentSession
 from logicore.agent.tool_executor import ToolExecutor
 from logicore.agent.chat_orchestrator import ChatOrchestrator
 from logicore.agent.input_enricher import InputEnricher
+from logicore.stream.emitter import StreamEmitter
+from logicore.stream.result import AgentRunResult
+from logicore.stream.events import StreamEvent, StreamEventType
 
 logger = logging.getLogger(__name__)
 
@@ -786,6 +789,154 @@ class Agent:
             stream=stream,
             streaming_funct=streaming_funct,
             generate_walkthrough=generate_walkthrough,
+        )
+
+    # === Streaming (event-based) API ===
+
+    async def stream_run(
+        self,
+        user_input: Union[str, List[Dict[str, Any]]],
+        session_id: str = "default",
+        callbacks: Dict[str, Callable] = None,
+        generate_walkthrough: bool = False,
+        new_session: bool = False,
+        session_tags: Dict[str, str] = None,
+        **kwargs,
+    ) -> "AgentRunResult":
+        """
+        Start a streaming agent run and return an :class:`AgentRunResult`.
+
+        The returned object is both awaitable (``final = await run``) and an
+        async iterator of :class:`StreamEvent` (``async for ev in run.stream_events()``).
+        The agent loop runs as a background task, so a UI that raises or stops
+        early only affects its own drain loop — call ``run.cancel()`` to stop
+        the run early. This is the recommended API for frontend integration.
+
+        Example:
+            run = await agent.stream_run("summarize this repo", session_id="s1")
+            async for ev in run.stream_events():
+                await sse_send(ev)        # ev.to_sse() built-in
+            final = await run              # final text
+        """
+        if new_session:
+            session_id = self.create_session(tags=session_tags)
+        elif session_tags and session_id not in self.sessions:
+            session = self.get_session(session_id)
+            session.metadata["tags"] = session_tags
+
+        self._ensure_task_manager(session_id)
+        self.execution_log = []
+        self.execution_log.append(f"Agent Started Task. User Request: {str(user_input)[:200]}")
+
+        user_input = await self.input_enricher.enrich_async(user_input)
+
+        active_callbacks = self.callbacks.copy()
+        if callbacks:
+            active_callbacks.update(callbacks)
+
+        import uuid
+        emitter = StreamEmitter(session_id=session_id, run_id=uuid.uuid4().hex)
+
+        async def _produce() -> None:
+            try:
+                final = await self._chat_orchestrator.run(
+                    user_input=user_input,
+                    session_id=session_id,
+                    callbacks=active_callbacks,
+                    generate_walkthrough=generate_walkthrough,
+                    emitter=emitter,
+                )
+                emitter.final = final
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # isolate unexpected producer errors
+                try:
+                    emitter.emit(StreamEvent.create(
+                        StreamEventType.ERROR, {"message": str(e), "recoverable": False}
+                    ))
+                except Exception:
+                    pass
+                emitter.final = f"Error during execution: {e}"
+            finally:
+                emitter.close()
+
+        task = asyncio.ensure_future(_produce())
+        return AgentRunResult(emitter, task, self)
+
+    async def stream(
+        self,
+        user_input: Union[str, List[Dict[str, Any]]],
+        session_id: str = "default",
+        **kwargs,
+    ):
+        """
+        Convenience async generator that yields :class:`StreamEvent` objects for
+        a single agent run. Cancels the underlying run if the consumer stops
+        iterating early.
+
+        Example:
+            async for ev in agent.stream("hello", session_id="s1"):
+                print(ev.type, ev.data)
+        """
+        run = await self.stream_run(user_input, session_id=session_id, **kwargs)
+        async for ev in run.stream_events():
+            yield ev
+
+    def cancel_run(self, run: "AgentRunResult") -> None:
+        """Cancel an in-flight streaming run."""
+        if run is not None:
+            run.cancel()
+
+    def stream_sync(
+        self,
+        user_input: Union[str, List[Dict[str, Any]]],
+        session_id: str = "default",
+        on_event: Callable = None,
+        **kwargs,
+    ) -> str:
+        """
+        Synchronous streaming — **no server and no async framework required**.
+
+        Runs the agent run to completion and invokes ``on_event(event)`` for
+        every :class:`StreamEvent` as it arrives (e.g. print tokens, update a
+        local UI). This is the simplest way to get live token streaming in a
+        plain script; a web server is only needed if you want to push the same
+        events to a browser, and is entirely optional.
+
+        Args:
+            user_input: User message (str or multimodal list).
+            session_id: Session identifier.
+            on_event: Callable invoked with each ``StreamEvent`` (optional).
+            **kwargs: forwarded to :meth:`stream_run`.
+
+        Returns:
+            The final agent response as a string.
+
+        Example (no server):
+            agent = Agent(provider="ollama", model="llama3.2:3b")
+            agent.stream_sync(
+                "summarize this repo",
+                on_event=lambda ev: (
+                    print(ev.data.get("delta", ""), end="", flush=True)
+                    if ev.type == "token" else None
+                ),
+            )
+        """
+        async def _drive():
+            run = await self.stream_run(user_input, session_id=session_id, **kwargs)
+            async for ev in run.stream_events():
+                if on_event:
+                    on_event(ev)
+            return await run
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # Not inside a running loop — safe to drive one to completion.
+            return asyncio.run(_drive())
+        raise RuntimeError(
+            "stream_sync() cannot be called from within a running event loop. "
+            "Use `async for ev in agent.stream(...)` instead."
         )
 
     # === Walkthrough Generation ===

@@ -11,6 +11,7 @@ from .base import (
     NormalizedMessage,
     _gateway_debug,
     _dispatch_stream_text,
+    _dispatch_event,
     _convert_local_images_to_base64,
     _normalize_openai_tool_calls,
     _accumulate_openai_stream_tool_calls,
@@ -27,12 +28,12 @@ class AzureGateway(ProviderGateway):
         else:
             return await self._chat_openai(messages, tools, max_tokens)
 
-    async def chat_stream(self, messages, tools=None, on_token=None, max_tokens=None) -> NormalizedMessage:
+    async def chat_stream(self, messages, tools=None, on_token=None, on_event=None, max_tokens=None) -> NormalizedMessage:
         model_type = getattr(self.provider, "model_type", "openai")
         if model_type == "anthropic":
-            return await self._chat_anthropic_stream(messages, tools, on_token, max_tokens)
+            return await self._chat_anthropic_stream(messages, tools, on_token, on_event, max_tokens)
         else:
-            return await self._chat_openai_stream(messages, tools, on_token, max_tokens)
+            return await self._chat_openai_stream(messages, tools, on_token, on_event, max_tokens)
 
     async def _chat_openai(self, messages, tools=None, max_tokens=None) -> NormalizedMessage:
         messages = _convert_local_images_to_base64(messages)
@@ -59,7 +60,10 @@ class AzureGateway(ProviderGateway):
         else:
             return await self._chat_inference_http(messages, tools)
 
-    async def _chat_openai_stream(self, messages, tools=None, on_token=None, max_tokens=None) -> NormalizedMessage:
+    async def _chat_openai_stream(self, messages, tools=None, on_token=None, on_event=None, max_tokens=None) -> NormalizedMessage:
+        import queue
+        import threading
+        
         messages = _convert_local_images_to_base64(messages)
         deployment = getattr(self.provider, "deployment_name", self.model_name)
         kwargs = {"model": deployment, "messages": messages, "stream": True}
@@ -68,31 +72,65 @@ class AzureGateway(ProviderGateway):
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
 
-        stream = self.provider.client.chat.completions.create(**kwargs)
+        # Use thread-based streaming for reliability (OpenAI SDK sync streaming blocks event loop)
+        q = queue.Queue()
+        
+        def worker():
+            try:
+                stream = self.provider.client.chat.completions.create(**kwargs)
+                for chunk in stream:
+                    q.put(("chunk", chunk))
+                q.put(("done", None))
+            except Exception as e:
+                q.put(("error", e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
         accumulated = ""
         tool_call_chunks = {}
 
-        for chunk in stream:
-            if not chunk or not hasattr(chunk, "choices") or not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
+        while True:
+            try:
+                msg_type, data = q.get(timeout=60)
+                if msg_type == "done":
+                    break
+                if msg_type == "error":
+                    raise data
 
-            if hasattr(delta, "content") and delta.content:
-                accumulated += delta.content
-                await _dispatch_stream_text(on_token, delta.content)
+                chunk = data
+                if not chunk or not hasattr(chunk, "choices") or not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
 
-            if hasattr(delta, "tool_calls") and delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    if idx not in tool_call_chunks:
-                        tool_call_chunks[idx] = {"id": "", "name": "", "args": ""}
-                    if tc.id and not tool_call_chunks[idx]["id"]:
-                        tool_call_chunks[idx]["id"] = tc.id
-                    if tc.function:
-                        if tc.function.name:
-                            tool_call_chunks[idx]["name"] += tc.function.name
-                        if tc.function.arguments:
-                            tool_call_chunks[idx]["args"] += tc.function.arguments
+                if hasattr(delta, "content") and delta.content:
+                    accumulated += delta.content
+                    await _dispatch_stream_text(on_token, delta.content)
+                    await _dispatch_event(on_event, "token", {"delta": delta.content})
+
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_call_chunks:
+                            tool_call_chunks[idx] = {"id": "", "name": "", "args": ""}
+                        if tc.id and not tool_call_chunks[idx]["id"]:
+                            tool_call_chunks[idx]["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                if not tool_call_chunks[idx]["name"]:
+                                    await _dispatch_event(
+                                        on_event, "tool_call_chunk",
+                                        {"call_id": tc.id, "name": tc.function.name, "args_delta": ""},
+                                    )
+                                tool_call_chunks[idx]["name"] += tc.function.name
+                            if tc.function.arguments:
+                                tool_call_chunks[idx]["args"] += tc.function.arguments
+                                await _dispatch_event(
+                                    on_event, "tool_call_chunk",
+                                    {"call_id": tc.id, "name": tool_call_chunks[idx]["name"], "args_delta": tc.function.arguments},
+                                )
+
+            except queue.Empty:
+                break
 
         tool_calls = _accumulate_openai_stream_tool_calls(tool_call_chunks)
         if not accumulated and not tool_calls:
@@ -150,7 +188,7 @@ class AzureGateway(ProviderGateway):
                 })
         return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls)
 
-    async def _chat_anthropic_stream(self, messages, tools=None, on_token=None, max_tokens=None) -> NormalizedMessage:
+    async def _chat_anthropic_stream(self, messages, tools=None, on_token=None, on_event=None, max_tokens=None) -> NormalizedMessage:
         import queue, threading
         system_content, anthropic_msgs = self._format_for_anthropic(messages)
         deployment = getattr(self.provider, "deployment_name", self.model_name)
@@ -187,18 +225,37 @@ class AzureGateway(ProviderGateway):
                 if event.type == "content_block_delta" and hasattr(event.delta, "text"):
                     acc_text += event.delta.text
                     await _dispatch_stream_text(on_token, event.delta.text)
+                    await _dispatch_event(on_event, "token", {"delta": event.delta.text})
+                elif event.type == "content_block_delta" and hasattr(event.delta, "thinking"):
+                    await _dispatch_event(on_event, "reasoning", {"delta": event.delta.thinking})
                 elif event.type == "content_block_start" and event.content_block.type == "tool_use":
                     acc_tools.append({"id": event.content_block.id, "name": event.content_block.name, "args": ""})
+                    await _dispatch_event(
+                        on_event, "tool_call_chunk",
+                        {"call_id": event.content_block.id, "name": event.content_block.name, "args_delta": ""},
+                    )
                 elif event.type == "content_block_delta" and hasattr(event.delta, "partial_json"):
                     if acc_tools:
                         acc_tools[-1]["args"] += event.delta.partial_json
+                        await _dispatch_event(
+                            on_event, "tool_call_chunk",
+                            {"call_id": acc_tools[-1]["id"], "name": acc_tools[-1]["name"], "args_delta": event.delta.partial_json},
+                        )
             except queue.Empty:
                 break
 
-        tool_calls = [
-            {"id": t["id"], "type": "function", "function": {"name": t["name"], "arguments": t["args"]}}
-            for t in acc_tools
-        ]
+        tool_calls = []
+        for t in acc_tools:
+            # Parse JSON string arguments into objects
+            try:
+                arguments = json.loads(t["args"]) if t["args"] else {}
+            except json.JSONDecodeError:
+                arguments = t["args"]
+            tool_calls.append({
+                "id": t["id"],
+                "type": "function",
+                "function": {"name": t["name"], "arguments": arguments}
+            })
         return NormalizedMessage(role="assistant", content=acc_text, tool_calls=tool_calls)
 
     def _format_for_anthropic(self, messages):

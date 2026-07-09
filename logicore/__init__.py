@@ -20,6 +20,10 @@ from .session.manager import SessionManager
 from .telemetry.tracker import TelemetryTracker
 from .gateway.gateway import ProviderGateway
 from .skills import Skill, SkillMetadata, SkillLoader, SkillIndexEntry
+from .stream.events import StreamEvent, StreamEventType
+from .stream.emitter import StreamEmitter
+from .stream.result import AgentRunResult
+from .stream.sse import as_sse, events_to_sse, SSE_DONE
 
 __all__ = [
     # Core Agent
@@ -52,4 +56,12 @@ __all__ = [
     "SkillMetadata",
     "SkillLoader",
     "SkillIndexEntry",
+    # Streaming
+    "StreamEvent",
+    "StreamEventType",
+    "StreamEmitter",
+    "AgentRunResult",
+    "as_sse",
+    "events_to_sse",
+    "SSE_DONE",
 ]

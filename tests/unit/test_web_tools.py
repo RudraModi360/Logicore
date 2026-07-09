@@ -92,29 +92,30 @@ class TestWebSearchTool:
         assert result["success"] is False
         assert "required" in result["error"].lower() or "query" in result["error"].lower()
     
-    def test_video_link_detection(self):
-        """Test video link detection."""
-        tool = WebSearchTool()
-        assert tool._is_video_link("https://youtube.com/watch?v=123") is True
-        assert tool._is_video_link("https://youtu.be/123") is True
-        assert tool._is_video_link("https://vimeo.com/123") is True
-        assert tool._is_video_link("https://example.com") is False
-    
-    def test_format_quick_results(self):
-        """Test quick results formatting."""
+    def test_format_results(self):
+        """Test results formatting from raw Exa output."""
         tool = WebSearchTool()
         results = [
-            {"title": "Test Title", "link": "https://example.com", "snippet": "Test snippet"}
+            {
+                "title": "Test Title",
+                "url": "https://example.com",
+                "author": "Jane Doe",
+                "publishedDate": "2026-01-01",
+                "text": "Test body content",
+                "highlights": ["Test highlight"],
+            }
         ]
-        formatted = tool._format_quick_results(results)
+        formatted = tool._format_results(results)
         assert "Test Title" in formatted
-        assert "Test snippet" in formatted
         assert "https://example.com" in formatted
+        assert "Test body content" in formatted
+        assert "Jane Doe" in formatted
+        assert "2026-01-01" in formatted
     
-    def test_format_quick_results_empty(self):
-        """Test quick results formatting with empty results."""
+    def test_format_results_empty(self):
+        """Test results formatting with empty results."""
         tool = WebSearchTool()
-        formatted = tool._format_quick_results([])
+        formatted = tool._format_results([])
         assert "No results" in formatted
 
 

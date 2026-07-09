@@ -137,64 +137,48 @@ class TaskNextArgs(BaseModel):
 # They use TaskManager internally, which is initialized by the Agent.
 #
 # WARNING: These are module-level globals. If multiple Agent instances
-# run concurrently in the same process, the last one to call set_task_manager()
-# wins. This is a known limitation. For multi-agent scenarios, each agent
-# should run in a separate process.
+# Context-local storage for task manager and agent ID.
+# Uses contextvars so each async task/thread gets its own isolated state,
+# preventing crosstalk between concurrent agents in the same process.
 
 import logging as _logging
+from contextvars import ContextVar
+
 _task_logger = _logging.getLogger(__name__)
 
-_task_manager = None
-_task_manager_owner: str | None = None  # Track which agent owns the globals
+# Context variables for per-task state isolation
+_task_manager_var: ContextVar = ContextVar('task_manager', default=None)
+_agent_id_var: ContextVar = ContextVar('agent_id', default=None)
 
 
 def set_task_manager(manager, owner_id: str = "unknown"):
-    """Set the task manager instance for tools to use.
+    """Set the task manager instance for the current context.
 
     Args:
         manager: The TaskManager instance
-        owner_id: Identifier of the agent claiming ownership (for conflict detection)
+        owner_id: Identifier of the agent (for logging/debugging)
     """
-    global _task_manager, _task_manager_owner
-    if _task_manager is not None and _task_manager_owner != owner_id:
-        _task_logger.warning(
-            f"[TaskTools] Global task manager being overwritten by agent '{owner_id}' "
-            f"(previous owner: '{_task_manager_owner}'). "
-            f"If running multiple agents concurrently, this causes state crosstalk."
-        )
-    _task_manager = manager
-    _task_manager_owner = owner_id
+    _task_manager_var.set(manager)
 
 
 def get_task_manager():
-    """Get the current task manager instance."""
-    return _task_manager
-
-
-_agent_id = None
-_agent_id_owner: str | None = None
+    """Get the task manager instance for the current context."""
+    return _task_manager_var.get()
 
 
 def set_agent_id(agent_id: str, owner_id: str = "unknown"):
-    """Set the agent ID for task claiming (multi-agent coordination).
+    """Set the agent ID for the current context.
 
     Args:
         agent_id: The agent identifier
-        owner_id: Identifier of the agent claiming ownership (for conflict detection)
+        owner_id: Identifier of the agent (for logging/debugging)
     """
-    global _agent_id, _agent_id_owner
-    if _agent_id is not None and _agent_id != agent_id and _agent_id_owner != owner_id:
-        _task_logger.warning(
-            f"[TaskTools] Global agent_id being overwritten: '{_agent_id}' -> '{agent_id}' "
-            f"(owner: '{owner_id}')."
-        )
-    _agent_id = agent_id
-    _agent_id_owner = owner_id
+    _agent_id_var.set(agent_id)
 
 
 def get_agent_id() -> str:
-    """Get the current agent ID."""
-    return _agent_id or "agent"
+    """Get the agent ID for the current context."""
+    return _agent_id_var.get() or "agent"
 
 
 class TaskCreateTool(BaseTool):

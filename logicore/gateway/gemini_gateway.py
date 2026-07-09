@@ -1,5 +1,10 @@
 """
 Gemini gateway for Google's Gemini API (google-genai SDK).
+
+Supports:
+- Implicit caching (automatic on Gemini 2.5+ models)
+- Explicit caching via `create_cache()` method
+- Streaming with proper async iteration
 """
 
 from typing import Any, Dict, List, Optional
@@ -11,13 +16,20 @@ from .base import (
     NormalizedMessage,
     _gateway_debug,
     _dispatch_stream_text,
+    _dispatch_event,
     _extract_cache_control,
     _strip_cache_annotations,
 )
 
 
 class GeminiGateway(ProviderGateway):
-    """Gateway for Google Gemini API (google-genai SDK)."""
+    """Gateway for Google Gemini API (google-genai SDK).
+    
+    Caching:
+        Gemini 2.5+ models support implicit caching automatically.
+        For explicit control, use `create_cache()` to create named caches
+        that persist across requests.
+    """
 
     # Gemini 3 / 2.5 "thinking" models attach a thought_signature to every
     # function-call part. That signature is cryptographically bound to the
@@ -29,6 +41,96 @@ class GeminiGateway(ProviderGateway):
     # that tells the API to skip thought-signature validation.
     #   https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
     DUMMY_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
+
+    # Cache name for explicit caching (set via create_cache())
+    _cached_content_name: Optional[str] = None
+
+    # -----------------------------------------------------------------------
+    # Caching methods
+    # -----------------------------------------------------------------------
+
+    def create_cache(
+        self,
+        contents: List[Dict[str, Any]],
+        system_instruction: Optional[str] = None,
+        display_name: Optional[str] = None,
+        ttl_seconds: int = 3600,
+    ) -> str:
+        """Create an explicit cache for repeated content.
+        
+        Args:
+            contents: Content to cache (list of Content dicts).
+            system_instruction: Optional system instruction to cache.
+            display_name: Optional display name for the cache.
+            ttl_seconds: Time-to-live in seconds (default: 1 hour).
+            
+        Returns:
+            Cache name to use with set_cache().
+        """
+        from google.genai import types
+        
+        config = types.CreateCachedContentConfig(
+            display_name=display_name or f"logicore-cache-{id(self)}",
+            ttl=f"{ttl_seconds}s",
+        )
+        
+        if system_instruction:
+            config.system_instruction = system_instruction
+            
+        cache = self.provider.client.caches.create(
+            model=self.model_name,
+            config=config,
+            contents=contents,
+        )
+        
+        _gateway_debug(self, f"Created cache: {cache.name} ({cache.usage_metadata.total_token_count} tokens)")
+        return cache.name
+
+    def set_cache(self, cache_name: str) -> None:
+        """Set the active cache for subsequent requests.
+        
+        Args:
+            cache_name: Cache name from create_cache().
+        """
+        self._cached_content_name = cache_name
+        _gateway_debug(self, f"Set active cache: {cache_name}")
+
+    def get_cache(self) -> Optional[str]:
+        """Get the current active cache name."""
+        return self._cached_content_name
+
+    def clear_cache(self) -> None:
+        """Clear the active cache (stops using cached content)."""
+        self._cached_content_name = None
+
+    def delete_cache(self, cache_name: str) -> None:
+        """Delete a cache from the server.
+        
+        Args:
+            cache_name: Cache name to delete.
+        """
+        self.provider.client.caches.delete(name=cache_name)
+        if self._cached_content_name == cache_name:
+            self._cached_content_name = None
+        _gateway_debug(self, f"Deleted cache: {cache_name}")
+
+    def list_caches(self) -> List[Dict[str, Any]]:
+        """List all active caches.
+        
+        Returns:
+            List of cache metadata dicts.
+        """
+        caches = self.provider.client.caches.list()
+        return [
+            {
+                "name": c.name,
+                "display_name": c.display_name,
+                "token_count": c.usage_metadata.total_token_count,
+                "create_time": c.create_time,
+                "expire_time": c.expire_time,
+            }
+            for c in caches
+        ]
 
     def _sanitize_schema_for_gemini(self, schema: Any) -> Dict[str, Any]:
         """Normalize JSON schema to Gemini-compatible subset."""
@@ -235,12 +337,23 @@ class GeminiGateway(ProviderGateway):
         if max_tokens:
             config.max_output_tokens = max_tokens
 
-        _gateway_debug(self, f"chat request: messages={len(messages)}, tools={len(tools) if tools else 0}, cache_control={cache_control}")
+        # Add cached content if available
+        if self._cached_content_name:
+            config.cached_content = self._cached_content_name
+
+        _gateway_debug(self, f"chat request: messages={len(messages)}, tools={len(tools) if tools else 0}, cache_control={cache_control}, cached_content={self._cached_content_name}")
 
         try:
             response = self.provider.client.models.generate_content(
                 model=self.model_name, contents=contents, config=config,
             )
+            
+            # Log cache usage if available
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                cached_tokens = getattr(response.usage_metadata, 'cached_content_token_count', 0)
+                if cached_tokens:
+                    _gateway_debug(self, f"Cache hit: {cached_tokens} tokens served from cache")
+            
             return self._parse_response(response)
         except Exception as e:
             error_msg = str(e)
@@ -251,8 +364,10 @@ class GeminiGateway(ProviderGateway):
                 raise ValueError(f"Gemini returned empty response. Original: {error_msg}")
             raise
 
-    async def chat_stream(self, messages, tools=None, on_token=None, max_tokens=None) -> NormalizedMessage:
+    async def chat_stream(self, messages, tools=None, on_token=None, on_event=None, max_tokens=None) -> NormalizedMessage:
         from google.genai import types
+        import queue
+        import threading
 
         cache_control = _extract_cache_control(messages)
         messages = _strip_cache_annotations(messages)
@@ -265,53 +380,111 @@ class GeminiGateway(ProviderGateway):
         if max_tokens:
             config.max_output_tokens = max_tokens
 
+        # Add cached content if available
+        if self._cached_content_name:
+            config.cached_content = self._cached_content_name
+
+        _gateway_debug(self, f"chat_stream request: messages={len(messages)}, tools={len(tools) if tools else 0}, cached_content={self._cached_content_name}")
+
+        # Use async streaming directly for proper token-by-token delivery
+        _gateway_debug(self, "Starting async generate_content_stream")
+        
         try:
-            content = ""
-            tool_calls = []
-            fc_index = {}
-
-            def get_stream():
-                return self.provider.client.models.generate_content_stream(
-                    model=self.model_name, contents=contents, config=config,
-                )
-
-            loop = asyncio.get_event_loop()
-            stream = await loop.run_in_executor(None, get_stream)
-
-            for chunk in stream:
-                if chunk.text:
-                    content += chunk.text
-                    await _dispatch_stream_text(on_token, chunk.text)
-
-                chunk_parts = (
-                    chunk.candidates[0].content.parts
-                    if (chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts)
-                    else []
-                )
-                for part in chunk_parts:
-                    if part.function_call:
-                        fc = part.function_call
-                        cid = fc.id or f"call_{fc.name}"
-                        if cid not in fc_index:
-                            fc_index[cid] = len(tool_calls)
-                            tool_calls.append({
-                                "id": cid,
-                                "type": "function",
-                                "function": {
-                                    "name": fc.name,
-                                    "arguments": json.dumps(fc.args) if fc.args else "{}",
-                                },
-                            })
-                        else:
-                            idx = fc_index[cid]
-                            try:
-                                existing = json.loads(tool_calls[idx]["function"]["arguments"] or "{}")
-                            except Exception:
-                                existing = {}
-                            if fc.args:
-                                existing.update(fc.args)
-                            tool_calls[idx]["function"]["arguments"] = json.dumps(existing)
-
-            return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls)
+            # Use the async client for proper streaming
+            stream = await self.provider.client.aio.models.generate_content_stream(
+                model=self.model_name, contents=contents, config=config,
+            )
+            _gateway_debug(self, f"Got async stream: {type(stream)}")
         except Exception as e:
-            raise
+            _gateway_debug(self, f"Failed to get async stream: {e}")
+            # Fallback to sync with thread if async fails
+            import concurrent.futures
+            q = queue.Queue()
+            
+            def worker():
+                try:
+                    _gateway_debug(self, "Fallback: Starting sync generate_content_stream in worker thread")
+                    sync_stream = self.provider.client.models.generate_content_stream(
+                        model=self.model_name, contents=contents, config=config,
+                    )
+                    for chunk in sync_stream:
+                        q.put(("chunk", chunk))
+                    q.put(("done", None))
+                except Exception as e:
+                    _gateway_debug(self, f"Fallback stream error: {e}")
+                    q.put(("error", e))
+            
+            threading.Thread(target=worker, daemon=True).start()
+            stream = None
+
+        content = ""
+        tool_calls = []
+        fc_index = {}
+
+        async def _process_chunk(chunk):
+            nonlocal content, tool_calls, fc_index
+            
+            # Process text content
+            if chunk.text:
+                content += chunk.text
+                await _dispatch_stream_text(on_token, chunk.text)
+                await _dispatch_event(on_event, "token", {"delta": chunk.text})
+
+            # Process parts (thinking, function calls)
+            chunk_parts = (
+                chunk.candidates[0].content.parts
+                if (chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts)
+                else []
+            )
+            for part in chunk_parts:
+                # Extended thinking / reasoning blocks (Gemini).
+                if getattr(part, "thought", False) and getattr(part, "text", None):
+                    await _dispatch_event(on_event, "reasoning", {"delta": part.text})
+                    continue
+                if part.function_call:
+                    fc = part.function_call
+                    cid = fc.id or f"call_{fc.name}"
+                    if cid not in fc_index:
+                        fc_index[cid] = len(tool_calls)
+                        tool_calls.append({
+                            "id": cid,
+                            "type": "function",
+                            "function": {
+                                "name": fc.name,
+                                "arguments": json.dumps(fc.args) if fc.args else "{}",
+                            },
+                        })
+                        await _dispatch_event(
+                            on_event, "tool_call_chunk",
+                            {"call_id": cid, "name": fc.name, "args_delta": json.dumps(fc.args) if fc.args else "{}"},
+                        )
+                    else:
+                        idx = fc_index[cid]
+                        try:
+                            existing = json.loads(tool_calls[idx]["function"]["arguments"] or "{}")
+                        except Exception:
+                            existing = {}
+                        if fc.args:
+                            existing.update(fc.args)
+                        tool_calls[idx]["function"]["arguments"] = json.dumps(existing)
+
+        if stream is not None:
+            # Async streaming path
+            _gateway_debug(self, "Using async streaming path")
+            async for chunk in stream:
+                await _process_chunk(chunk)
+        else:
+            # Sync fallback with queue
+            _gateway_debug(self, "Using sync fallback with queue")
+            while True:
+                try:
+                    msg_type, data = q.get(timeout=60)
+                    if msg_type == "done":
+                        break
+                    if msg_type == "error":
+                        raise data
+                    await _process_chunk(data)
+                except queue.Empty:
+                    break
+
+        return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls)

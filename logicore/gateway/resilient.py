@@ -156,6 +156,7 @@ class ResilientGateway(ProviderGateway):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         on_token: Optional[Callable[[str], None]] = None,
+        on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> NormalizedMessage:
         from .policies import RetryIterator
 
@@ -181,10 +182,15 @@ class ResilientGateway(ProviderGateway):
                         if on_token:
                             await _dispatch_token(on_token, token)
 
+                    async def capturing_on_event(event: Dict[str, Any]):
+                        if on_event:
+                            await _dispatch_event(on_event, event["type"], event.get("data", {}))
+
                     result = await self._inner_gateway.chat_stream(
                         messages,
                         tools=tools,
-                        on_token=capturing_on_token
+                        on_token=capturing_on_token,
+                        on_event=capturing_on_event,
                     )
 
                     if self.availability:

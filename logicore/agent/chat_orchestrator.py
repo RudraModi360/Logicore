@@ -19,6 +19,8 @@ import logging
 
 from logicore.gateway.gateway import NormalizedMessage
 from logicore.security.input_sanitizer import InputSanitizer, InjectionAction
+from logicore.stream.events import StreamEvent, StreamEventType
+from logicore.stream.emitter import StreamEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +182,7 @@ class ChatOrchestrator:
         stream: bool = False,
         streaming_funct: Optional[Callable] = None,
         generate_walkthrough: bool = False,
+        emitter: Optional["StreamEmitter"] = None,
         **kwargs,
     ) -> str:
         """
@@ -219,6 +222,14 @@ class ChatOrchestrator:
             stream = True
 
         session = self.agent.get_session(session_id)
+
+        # Streaming event bus. ``emitter`` is None for the legacy
+        # (callback-based) path; when set, we publish semantic events. Token /
+        # reasoning / tool-call-chunk events are forwarded from the gateway via
+        # ``on_event`` (see the LLM call below).
+        on_event = emitter.emit if emitter else None
+        if emitter:
+            emitter.emit(StreamEvent.create(StreamEventType.RUN_START, {}))
 
         # Wire up reasoning controller (dynamically adjusts reasoning depth
         # based on the query - this is a prompt/context concern, not a routing
@@ -287,7 +298,13 @@ class ChatOrchestrator:
                 logger.debug(f"\n[ChatOrchestrator] ITERATION {i+1}/{self.agent.max_iterations}")
 
             llm_start_time = time.time()
-            
+
+            if emitter:
+                emitter.emit(StreamEvent.create(
+                    StreamEventType.RUN_STEP,
+                    {"iteration": i + 1, "max_iterations": self.agent.max_iterations},
+                ))
+
             # 1. Get LLM response
             response = None
             try:
@@ -298,16 +315,24 @@ class ChatOrchestrator:
 
                 on_token = active_callbacks.get("on_token")
                 has_stream = hasattr(self.agent.gateway, 'chat_stream')
-                use_stream = bool(has_stream and (stream or on_token is not None))
+                use_stream = bool(has_stream and (stream or on_token is not None or emitter is not None))
+
+                if emitter:
+                    emitter.emit(StreamEvent.create(StreamEventType.MESSAGE_START, {"iteration": i + 1}))
 
                 if use_stream:
-                    response = await self.agent.gateway.chat_stream(llm_messages, tools=all_tools, on_token=on_token)
+                    response = await self.agent.gateway.chat_stream(
+                        llm_messages, tools=all_tools, on_token=on_token, on_event=on_event
+                    )
                 else:
                     response = await self.agent.gateway.chat(llm_messages, tools=all_tools)
 
             except Exception as e:
                 response = await self._handle_llm_error(e, session, all_tools, session_id, generate_walkthrough, active_callbacks)
                 if response is not None:
+                    if emitter:
+                        emitter.emit(StreamEvent.create(StreamEventType.ERROR, {"message": str(e), "recoverable": False}))
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": response}))
                     self._clear_injected_hints(session, injected_hints)
                     return response
                 continue
@@ -342,10 +367,13 @@ class ChatOrchestrator:
             # 3. No tool calls = final response
             if not tool_calls:
                 self._clear_injected_hints(session, injected_hints)
-                return await self._finalize_response(
+                final = await self._finalize_response(
                     content, session, session_id, active_callbacks,
                     generate_walkthrough, text_for_reminder, successful_tools_this_chat
                 )
+                if emitter:
+                    emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": final}))
+                return final
 
             # 4. Execute tools
             for tc in tool_calls:
@@ -356,6 +384,17 @@ class ChatOrchestrator:
                 if self.debug:
                     args_preview = str(args)[:200] if args else "{}"
                     logger.debug(f"[Tool] Calling: {name}({args_preview})")
+
+                if emitter:
+                    emitter.emit(StreamEvent.create(
+                        StreamEventType.TOOL_CALL_START,
+                        {
+                            "name": name,
+                            "call_id": tc_id,
+                            "args": args if isinstance(args, dict) else {},
+                            "iteration": i + 1,
+                        },
+                    ))
 
                 result = await self._execute_single_tool(
                     name, args, tc_id, session, session_id,
@@ -368,10 +407,25 @@ class ChatOrchestrator:
                     status = "OK" if success else "FAILED"
                     logger.debug(f"[Tool] Result: {name} -> {status} | {content_preview}")
 
+                if emitter:
+                    preview = str(result.get("content", ""))[:280]
+                    emitter.emit(StreamEvent.create(
+                        StreamEventType.TOOL_CALL_END,
+                        {
+                            "name": name,
+                            "call_id": tc_id,
+                            "success": bool(result.get("success", True)),
+                            "preview": preview,
+                            "iteration": i + 1,
+                        },
+                    ))
+
                 if result.get("success", True):
                     successful_tools_this_chat += 1
 
         self._clear_injected_hints(session, injected_hints)
+        if emitter:
+            emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": "Max iterations reached."}))
         return "Max iterations reached."
 
     def _parse_response(self, response) -> tuple[str, list, list]:
@@ -609,6 +663,7 @@ class ChatOrchestrator:
 
             # Token counting
             session = self.agent.get_session(session_id)
+
             _system_tokens = self.agent.context_engine.token_estimator.count_tokens(
                 " ".join(str(m.get("content", "")) for m in session.messages if m.get("role") == "system")
             )

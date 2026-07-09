@@ -11,6 +11,7 @@ from .base import (
     NormalizedMessage,
     _gateway_debug,
     _dispatch_stream_text,
+    _dispatch_event,
 )
 
 
@@ -21,7 +22,14 @@ OLLAMA_EMPTY_RETRY_BACKOFF = 0.5
 
 
 class OllamaGateway(ProviderGateway):
-    """Gateway for Ollama (local models via ollama SDK)."""
+    """Gateway for Ollama (local models via ollama SDK).
+    
+    Configuration options:
+        think (bool): Enable thinking/reasoning in requests. Default: None (let model decide).
+        treat_thinking_as_content (bool): If True, treat thinking tokens as normal content
+            instead of reasoning events. Useful for models that don't properly separate
+            thinking from content. Default: False.
+    """
 
     def _prepare_messages(
         self,
@@ -129,6 +137,11 @@ class OllamaGateway(ProviderGateway):
             kwargs = dict(model=self.model_name, messages=filtered, tools=sdk_tools)
             if max_tokens:
                 kwargs["options"] = {"num_predict": max_tokens}
+            
+            # Enable thinking if configured
+            think = getattr(self, "think", None)
+            if think is not None:
+                kwargs["think"] = think
 
             # Retry a few times: local Ollama occasionally returns an empty
             # message under concurrent load, which is transient (not a real
@@ -215,18 +228,23 @@ class OllamaGateway(ProviderGateway):
                 raise ValueError("Model does not support image/media input. Please remove media from your request.") from e
             raise
 
-    async def chat_stream(self, messages, tools=None, on_token=None, max_tokens=None) -> NormalizedMessage:
+    async def chat_stream(self, messages, tools=None, on_token=None, on_event=None, max_tokens=None) -> NormalizedMessage:
         filtered, has_images = self._prepare_messages(messages)
         if not filtered:
             raise ValueError("No valid messages to send to Ollama")
 
         sdk_tools = self._simplify_tools(tools, has_images)
-        token_queue = asyncio.Queue()
+        # Queue carries dicts: {"kind": "token"|"event", ...} or None sentinel.
+        item_queue = asyncio.Queue()
         result_holder = {"message": None, "error": None}
 
         loop = asyncio.get_event_loop()
+        
+        # Get configuration options
+        treat_thinking_as_content = getattr(self, "treat_thinking_as_content", False)
+        think = getattr(self, "think", None)
 
-        _gateway_debug(self, f"chat_stream request: messages={len(filtered)}, tools={len(sdk_tools) if sdk_tools else 0}")
+        _gateway_debug(self, f"chat_stream request: messages={len(filtered)}, tools={len(sdk_tools) if sdk_tools else 0}, treat_thinking_as_content={treat_thinking_as_content}")
 
         def sync_stream(stream_messages):
             full_content = ""
@@ -236,6 +254,11 @@ class OllamaGateway(ProviderGateway):
                 kwargs = dict(model=self.model_name, messages=stream_messages, tools=sdk_tools, stream=True)
                 if max_tokens:
                     kwargs["options"] = {"num_predict": max_tokens}
+                
+                # Enable thinking if configured
+                if think is not None:
+                    kwargs["think"] = think
+                    
                 stream = self.provider.client.chat(**kwargs)
 
                 for chunk in stream:
@@ -249,11 +272,22 @@ class OllamaGateway(ProviderGateway):
                         token = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
                         if token:
                             full_content += token
-                            asyncio.run_coroutine_threadsafe(token_queue.put(token), loop)
+                            asyncio.run_coroutine_threadsafe(item_queue.put({"kind": "token", "text": token}), loop)
 
+                        # Reasoning / extended-thinking tokens.
+                        # If treat_thinking_as_content is True, treat thinking tokens as normal content.
                         think_token = msg.get("thinking") if isinstance(msg, dict) else getattr(msg, "thinking", None)
                         if think_token:
-                            pass
+                            if treat_thinking_as_content:
+                                # Treat thinking as normal content (useful for models that don't separate thinking)
+                                full_content += think_token
+                                asyncio.run_coroutine_threadsafe(item_queue.put({"kind": "token", "text": think_token}), loop)
+                            else:
+                                # Emit as reasoning event (default behavior)
+                                asyncio.run_coroutine_threadsafe(
+                                    item_queue.put({"kind": "event", "event": {"type": "reasoning", "data": {"delta": think_token}}}),
+                                    loop,
+                                )
 
                         tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
                         if tc:
@@ -269,17 +303,21 @@ class OllamaGateway(ProviderGateway):
             except Exception as e:
                 result_holder["error"] = e
             finally:
-                asyncio.run_coroutine_threadsafe(token_queue.put(None), loop)
+                asyncio.run_coroutine_threadsafe(item_queue.put(None), loop)
 
         import concurrent.futures
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = executor.submit(sync_stream, filtered)
 
         while True:
-            token = await token_queue.get()
-            if token is None:
+            item = await item_queue.get()
+            if item is None:
                 break
-            await _dispatch_stream_text(on_token, token)
+            if item["kind"] == "token":
+                await _dispatch_stream_text(on_token, item["text"])
+                await _dispatch_event(on_event, "token", {"delta": item["text"]})
+            elif item["kind"] == "event":
+                await _dispatch_event(on_event, item["event"]["type"], item["event"].get("data", {}))
 
         await asyncio.get_event_loop().run_in_executor(None, future.result)
 

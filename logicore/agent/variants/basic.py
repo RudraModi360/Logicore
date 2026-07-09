@@ -243,6 +243,32 @@ You are ready to help. Use your tools effectively.
         """
         return await self._agent.chat(message, session_id=session_id, stream=stream, generate_walkthrough=generate_walkthrough, **kwargs)
     
+    async def stream_run(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", **kwargs) -> "AgentRunResult":
+        """
+        Start a streaming run and return an ``AgentRunResult``.
+
+        See :meth:`logicore.agent.base.Agent.stream_run` for the event model.
+        """
+        return await self._agent.stream_run(message, session_id=session_id, **kwargs)
+
+    async def stream(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", **kwargs):
+        """Async generator yielding :class:`StreamEvent` objects for a run."""
+        async for ev in self._agent.stream(message, session_id=session_id, **kwargs):
+            yield ev
+
+    def cancel_run(self, run) -> None:
+        """Cancel an in-flight streaming run."""
+        self._agent.cancel_run(run)
+
+    def stream_sync(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", on_event: Callable = None, **kwargs) -> str:
+        """
+        Synchronous streaming — no server or async framework required.
+
+        See :meth:`logicore.agent.base.Agent.stream_sync`. Each event is passed
+        to ``on_event`` as it arrives.
+        """
+        return self._agent.stream_sync(message, session_id=session_id, on_event=on_event, **kwargs)
+
     def chat_sync(self, message: str, session_id: str = "default", generate_walkthrough: bool = False) -> str:
         """
         Synchronous version of chat.

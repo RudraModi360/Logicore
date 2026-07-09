@@ -7,6 +7,7 @@ used by all provider gateways.
 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Callable
+import asyncio
 import inspect
 import logging
 
@@ -69,6 +70,7 @@ class ProviderGateway(ABC):
         self, messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         on_token: Optional[Callable[[str], None]] = None,
+        on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
         max_tokens: Optional[int] = None,
     ) -> NormalizedMessage:
         pass
@@ -85,6 +87,35 @@ async def _dispatch_token(on_token, token):
             await on_token(token)
         else:
             on_token(token)
+
+
+async def _dispatch_event(on_event, type: str, data: Dict[str, Any]) -> None:
+    """
+    Emit a structured stream event to the consumer's ``on_event`` sink.
+
+    ``on_event`` receives a plain dict ``{"type": ..., "data": ...}`` so it can
+    be forwarded straight into a :class:`~logicore.stream.emitter.StreamEmitter`.
+    Handles both sync and async sinks. Exceptions in the sink are swallowed so a
+    broken UI callback can never break the agent loop.
+
+    **Suspension guarantee** — even when ``on_event`` is a sync callback, this
+    function yields control back to the event loop so a concurrent consumer (e.g.
+    ``async for ev in run.stream_events()``) can drain the event. Without this,
+    all events pile up in the asyncio queue and burst out together once the
+    provider stream ends, defeating the purpose of streaming.
+    """
+    if not on_event:
+        return
+    event = {"type": str(type), "data": data or {}}
+    try:
+        if inspect.iscoroutinefunction(on_event):
+            await on_event(event)
+        else:
+            on_event(event)
+            await asyncio.sleep(0)  # yield so consumer can drain the event
+    except Exception:
+        # Isolation: a failing consumer must not crash the provider stream.
+        pass
 
 
 async def _dispatch_stream_text(on_token, text: str):
@@ -119,6 +150,74 @@ def _strip_cache_annotations(messages: List[Dict[str, Any]]) -> List[Dict[str, A
         if "_cache_control" in msg:
             msg = {k: v for k, v in msg.items() if k != "_cache_control"}
         cleaned.append(msg)
+    return cleaned
+
+
+# Keys that belong to non-OpenAI providers (Anthropic, Gemini, ...).
+# OpenAI-compatible APIs (OpenAI, Groq, etc.) reject them with a 400.
+_OPENAI_UNSUPPORTED_MESSAGE_KEYS = ("tool_call_ids", "gemini_content", "_cache_control")
+
+
+def _strip_provider_specific_fields(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Remove message keys that are unsupported by OpenAI-compatible APIs.
+
+    The orchestrator emits provider-agnostic messages that may carry fields
+    specific to Anthropic (``tool_call_ids``) or Gemini (``gemini_content``).
+    Forwarding those to OpenAI/Groq yields a 400 such as
+    ``property 'tool_call_ids' is unsupported``. This returns a new list with
+    those keys removed so OpenAI-style providers stay happy, while other
+    providers keep using the keys untouched.
+    """
+    cleaned = []
+    for msg in messages:
+        if isinstance(msg, dict) and any(k in msg for k in _OPENAI_UNSUPPORTED_MESSAGE_KEYS):
+            msg = {k: v for k, v in msg.items() if k not in _OPENAI_UNSUPPORTED_MESSAGE_KEYS}
+        cleaned.append(msg)
+    return cleaned
+
+
+def _serialize_tool_call_arguments(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Ensure every assistant tool_call's ``function.arguments`` is a JSON string.
+
+    The orchestrator may store already-parsed tool calls (``arguments`` as a
+    dict/object) when echoing assistant turns back to the model. OpenAI-
+    compatible APIs require ``arguments`` to be a JSON-encoded string, and
+    reject objects with a 400 (``value must be a string``). This re-serializes
+    any non-string arguments so the request is valid for OpenAI/Groq.
+    """
+    import json
+
+    cleaned = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            cleaned.append(msg)
+            continue
+        tool_calls = msg.get("tool_calls")
+        if not tool_calls:
+            cleaned.append(msg)
+            continue
+        fixed_calls = []
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                fixed_calls.append(tc)
+                continue
+            tc = dict(tc)
+            func = tc.get("function")
+            if isinstance(func, dict):
+                args = func.get("arguments")
+                if args is not None and not isinstance(args, str):
+                    try:
+                        func = dict(func)
+                        func["arguments"] = json.dumps(args)
+                        tc["function"] = func
+                    except (TypeError, ValueError):
+                        pass
+            fixed_calls.append(tc)
+        new_msg = dict(msg)
+        new_msg["tool_calls"] = fixed_calls
+        cleaned.append(new_msg)
     return cleaned
 
 
@@ -184,13 +283,26 @@ def _normalize_openai_tool_calls(raw_tool_calls) -> List[Dict[str, Any]]:
 
 
 def _accumulate_openai_stream_tool_calls(tool_call_chunks: dict) -> List[Dict[str, Any]]:
-    """Reassemble streamed tool-call deltas into complete tool calls."""
+    """Reassemble streamed tool-call deltas into complete tool calls.
+    
+    Parses the accumulated JSON string arguments into proper objects.
+    """
+    import json
     result = []
     for idx in sorted(tool_call_chunks.keys()):
         tc = tool_call_chunks[idx]
+        args_str = tc["args"]
+        
+        # Parse JSON string into object
+        try:
+            arguments = json.loads(args_str) if args_str else {}
+        except json.JSONDecodeError:
+            # If JSON parsing fails, keep as string (some providers may return non-JSON)
+            arguments = args_str
+        
         result.append({
             "id": tc["id"],
             "type": "function",
-            "function": {"name": tc["name"], "arguments": tc["args"]},
+            "function": {"name": tc["name"], "arguments": arguments},
         })
     return result
