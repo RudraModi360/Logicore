@@ -1,14 +1,14 @@
 """SmartAgent with persistent memory across sessions."""
 import asyncio
-from logicore import SmartAgent,BasicAgent
-from logicore.memory import MemoryManager
+from logicore import BasicAgent
+from logicore.memory.manager import MemoryManager
 
 async def main():
     # Initialize memory manager with LLM for background extraction.
     # llm_provider may be a provider instance OR a name string; llm_model
     # selects a (optionally different/cheaper) model for memory tasks.
     memory = MemoryManager(
-        memory_dir="./agent_memory",
+        # memory_dir="./agent_memory",
         llm_provider="ollama",
         llm_model="gemma3:4b-cloud",  # model used for extraction/retrieval
         throttle_interval=1.0,
@@ -26,10 +26,11 @@ async def main():
         # (use_llm_selection=True engages LLM re-ranking for recall/question intent)
         messages = [{"role": "user", "content": msg}]
         messages = await memory.inject_context(messages, user_input=msg, use_llm_selection=True)
-
-        # Chat with memory context
+        print(messages)  # --- IGNORE ---
+        # Chat with memory context — pass the enriched messages list so the
+        # orchestrator adds both the system-reminder and user message to the session.
         resp = await agent.chat(
-            msg,
+            messages,
             stream=True,
             streaming_funct=lambda t: print(t, end="", flush=True),
         )

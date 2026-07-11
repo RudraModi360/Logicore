@@ -31,12 +31,10 @@ Usage:
 
 from logicore.caching.prompt_cache import (
     PromptCacheManager,
-    CacheStats,
     get_prompt_cache_manager,
 )
 
 __all__ = [
     "PromptCacheManager",
-    "CacheStats",
     "get_prompt_cache_manager",
 ]

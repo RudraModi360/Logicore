@@ -5,7 +5,7 @@ Creates markdown files for each session to track:
 - plan.md: Task list and dependencies (static view)
 - progress.md: Live activity feed with timestamps
 
-Files are written to {workspace_root}/.logicore/sessions/{session_id}/
+Files are written to settings.paths.sessions_dir/{session_id}/ (config-controlled root)
 """
 
 from __future__ import annotations
@@ -59,8 +59,8 @@ class SessionProgressWriter:
         self.session_tags = session_tags or {}
         self.auto_write = auto_write
         
-        # Session directory for progress files
-        self._session_dir = self.workspace_root / ".logicore" / "sessions" / session_id
+        # Session directory for progress files (under config-controlled root)
+        self._session_dir = Path(workspace_root) / session_id
         self._plan_path = self._session_dir / "plan.md"
         self._progress_path = self._session_dir / "progress.md"
         

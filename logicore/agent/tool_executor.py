@@ -19,6 +19,27 @@ from logicore.tools.dedup import result_cache, semantic_analyzer, hash_tool_call
 logger = logging.getLogger(__name__)
 
 
+# Tools that share a single trust boundary: they all send data to a
+# third-party API (network egress). Approving one of them for a session
+# implies consent for the others, so they are gated by a single
+# per-session decision rather than a per-call prompt.
+_NETWORK_EGRESS_TOOLS = {
+    "web_search",
+    "image_search",
+    "url_fetch",
+}
+
+# Tools that must NEVER be session-cached as approved. These are
+# destructive/mutating and must re-prompt on every invocation regardless
+# of any earlier decision in the session.
+_NON_CACHABLE_TOOLS = {
+    "delete_file",
+    "execute_command",
+    "git_command",
+    "code_execute",
+}
+
+
 class ToolExecutor:
     """
     Unified tool execution engine.
@@ -45,7 +66,12 @@ class ToolExecutor:
         
         # Approval settings
         self.auto_approve_all = False
-        
+
+        # Session-scoped approval cache: session_id -> {group_key: decision(bool)}.
+        # Lets a single per-session grant (e.g. "allow internet access") cover
+        # all subsequent calls in that session without re-prompting.
+        self._approval_cache: Dict[str, Dict[str, bool]] = {}
+
         # Callbacks
         self.callbacks = {
             "on_tool_start": None,
@@ -80,24 +106,47 @@ class ToolExecutor:
         """Set execution callbacks."""
         self.callbacks.update(kwargs)
     
-    async def _default_approval_callback(self, session_id: str, tool_name: str, args: Dict[str, Any]) -> bool:
+    async def _default_approval_callback(
+        self,
+        session_id: str,
+        tool_name: str,
+        args: Dict[str, Any],
+        group: Optional[str] = None,
+    ) -> bool:
         """
         Default approval callback that prompts user in terminal.
-        
+
         Used when no on_tool_approval callback is configured.
         Prompts user with tool name and args, asks for yes/no approval.
+
+        When ``group`` is provided the prompt is framed as a one-time grant
+        for the whole session (e.g. allowing internet/egress access), so the
+        agent does not have to ask again for the remainder of the session.
         """
         args_preview = json.dumps(args, default=str)[:200] if args else "{}"
-        print(f"\n{'='*60}")
-        print(f"TOOL APPROVAL REQUIRED")
-        print(f"{'='*60}")
-        print(f"Tool: {tool_name}")
-        print(f"Args: {args_preview}")
-        print(f"{'='*60}")
-        
+
+        if group == "network_egress":
+            print(f"\n{'='*60}")
+            print(f"INTERNET ACCESS REQUESTED (session: {session_id})")
+            print(f"{'='*60}")
+            print(f"The agent wants to use web tools (e.g. `{tool_name}`) which send")
+            print(f"your query to a third-party API. Allow this for the rest of the")
+            print(f"current session? It will not ask again this session.")
+            print(f"Args: {args_preview}")
+            print(f"{'='*60}")
+            prompt = "Allow internet access for this session? (yes/no): "
+        else:
+            print(f"\n{'='*60}")
+            print(f"TOOL APPROVAL REQUIRED")
+            print(f"{'='*60}")
+            print(f"Tool: {tool_name}")
+            print(f"Args: {args_preview}")
+            print(f"{'='*60}")
+            prompt = "Approve? (yes/no): "
+
         while True:
             try:
-                response = input("Approve? (yes/no): ").strip().lower()
+                response = input(prompt).strip().lower()
                 if response in ('yes', 'y'):
                     return True
                 elif response in ('no', 'n'):
@@ -107,6 +156,25 @@ class ToolExecutor:
             except (EOFError, KeyboardInterrupt):
                 print("\nApproval denied (no input)")
                 return False
+
+    def _approval_group(self, name: str) -> Optional[str]:
+        """
+        Return the session-cache group for a tool, or None if the tool must
+        re-prompt on every call.
+
+        Network-egress tools share one group so a single per-session decision
+        covers all of them. Destructive/mutating tools return None and are
+        never session-cached.
+        """
+        if name in _NON_CACHABLE_TOOLS:
+            return None
+        if name in _NETWORK_EGRESS_TOOLS:
+            return "network_egress"
+        return None
+
+    def clear_session_approvals(self, session_id: str) -> None:
+        """Forget any cached approval decisions for a session."""
+        self._approval_cache.pop(session_id, None)
     
     def requires_approval(self, name: str) -> bool:
         """Check if a tool requires user approval."""
@@ -118,6 +186,24 @@ class ToolExecutor:
             return False
         return True
     
+    def get_registered_tool_names(self) -> set:
+        """Return the set of tool names that can actually be executed.
+
+        Covers custom tools, skill tools, MCP tools, and internal registry
+        tools. Used by the prompt-verification gate to detect "phantom" tools
+        that are documented in the system prompt but have no executor.
+        """
+        names = set(self.custom_tool_executors) | set(self.skill_tool_executors)
+        try:
+            from logicore.tools.registry import registry as _global_registry
+            names |= set(_global_registry.tool_names)
+        except Exception:
+            pass
+        for manager in self.mcp_managers:
+            if hasattr(manager, "server_tools_map"):
+                names |= set(manager.server_tools_map.keys())
+        return names
+
     def parse_tool_arguments(self, name: str, raw_args: Any) -> tuple[Dict[str, Any], Optional[str]]:
         """Parse tool-call arguments into a JSON object."""
         if raw_args is None:
@@ -183,16 +269,31 @@ class ToolExecutor:
         # Check approval
         approved = True
         if self.requires_approval(name):
-            if self.callbacks.get("on_tool_approval"):
+            group = self._approval_group(name)
+            session_cache = self._approval_cache.get(session_id)
+            cached = session_cache.get(group) if (group is not None and session_cache is not None) else None
+
+            if cached is not None:
+                # Reuse the per-session decision — no re-prompt.
+                approved = cached
+                if self.debug:
+                    logger.debug(
+                        f"[ToolExecutor] Reusing session approval={approved} for group '{group}'"
+                    )
+            elif self.callbacks.get("on_tool_approval"):
                 approval_result = await self.callbacks["on_tool_approval"](session_id, name, args)
                 if isinstance(approval_result, dict):
                     args = approval_result
                     approved = True
                 else:
                     approved = bool(approval_result)
+                if group is not None:
+                    self._approval_cache.setdefault(session_id, {})[group] = approved
             else:
                 # No approval callback configured - use default terminal prompt
-                approved = await self._default_approval_callback(session_id, name, args)
+                approved = await self._default_approval_callback(session_id, name, args, group)
+                if group is not None:
+                    self._approval_cache.setdefault(session_id, {})[group] = approved
         
         if not approved:
             return result or self.normalize_tool_result(name, {"success": False, "error": "Denied by user"})

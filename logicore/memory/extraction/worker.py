@@ -174,6 +174,11 @@ def _parse_operations_validated(response: str) -> List[_Operation]:
         raw = json.loads(match.group(0))
     except json.JSONDecodeError:
         return []
+    if isinstance(raw, dict):
+        for key in ("memories", "operations", "results", "items", "extracted"):
+            if isinstance(raw.get(key), list):
+                raw = raw[key]
+                break
     if not isinstance(raw, list):
         return []
 
@@ -395,6 +400,9 @@ class ExtractionWorker:
                 logger.debug(
                     "[ExtractionWorker] Unparseable LLM response; marking for retry"
                 )
+                logger.debug(
+                    f"[ExtractionWorker] Raw response (first 500 chars): {response}"
+                )
             return False
 
         extracted: List[MemoryMetadata] = []
@@ -419,12 +427,15 @@ class ExtractionWorker:
     def _is_explicit_empty(response: str) -> bool:
         """True if the model explicitly returned an empty array (genuine
         'nothing to remember') versus malformed/no JSON output."""
-        stripped = response.strip().strip("`").strip()
-        if stripped in ("[]", '[]', ""):
+        # Strip code fences (```json ... ```) before checking
+        import re as _re
+        fence_match = _re.search(r'```(?:json)?\s*\n?(.*?)\n?```', response, _re.DOTALL)
+        text = fence_match.group(1).strip() if fence_match else response.strip()
+        if text in ("[]", ""):
             return True
         try:
             import json as _json
-            data = _json.loads(stripped)
+            data = _json.loads(text)
             return isinstance(data, list) and len(data) == 0
         except (json.JSONDecodeError, ValueError):
             return False
@@ -529,6 +540,13 @@ class ExtractionWorker:
             raw = json.loads(json_str)
         except json.JSONDecodeError:
             return []
+        # Unwrap dict responses — models often return {"memories": [...]}
+        # or {"operations": [...]} instead of a bare array.
+        if isinstance(raw, dict):
+            for key in ("memories", "operations", "results", "items", "extracted"):
+                if isinstance(raw.get(key), list):
+                    raw = raw[key]
+                    break
         if not isinstance(raw, list):
             return []
         ops: List[Dict[str, Any]] = []

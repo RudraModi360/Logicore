@@ -1,7 +1,8 @@
-import os
 import logging
 from typing import Optional
 from .base import LLMProvider
+from logicore.config.settings import get_api_key
+from logicore.config.env import _raw
 
 logger = logging.getLogger("logicore.providers.azure")
 
@@ -33,8 +34,8 @@ class AzureProvider(LLMProvider):
         **kwargs
     ):
         self.deployment_name = model_name
-        self.api_key = api_key or os.environ.get("AZURE_API_KEY") or os.environ.get("AZURE_OPENAI_API_KEY")
-        self.endpoint = (endpoint or os.environ.get("AZURE_ENDPOINT") or os.environ.get("AZURE_OPENAI_ENDPOINT", "")).rstrip("/")
+        self.api_key = api_key or get_api_key("azure")
+        self.endpoint = (endpoint or _raw("AZURE_ENDPOINT") or _raw("AZURE_OPENAI_ENDPOINT", "")).rstrip("/")
         self.kwargs = kwargs
 
         if not self.api_key:

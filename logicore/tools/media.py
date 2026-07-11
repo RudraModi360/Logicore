@@ -6,7 +6,7 @@ Fetches relevant images and YouTube videos to embed inline in responses.
 """
 
 import requests
-import os
+from logicore.config.env import _raw
 import re
 from typing import Literal, List, Dict, Optional
 from pydantic import BaseModel, Field
@@ -48,8 +48,8 @@ class MediaSearchTool(BaseTool):
         Search for images using Google Custom Search API with image search enabled.
         Returns image URLs, titles, and source info.
         """
-        api_key = os.environ.get("GOOGLE_API_KEY")
-        cx = os.environ.get("GOOGLE_CX")
+        api_key = _raw("GOOGLE_API_KEY")
+        cx = _raw("GOOGLE_CX")
         
         if not api_key or not cx:
             return []
@@ -95,7 +95,7 @@ class MediaSearchTool(BaseTool):
         Search for YouTube videos using YouTube Data API or Google Custom Search.
         Returns video URLs, titles, thumbnails, and metadata.
         """
-        youtube_api_key = os.environ.get("YOUTUBE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        youtube_api_key = _raw("YOUTUBE_API_KEY") or _raw("GOOGLE_API_KEY")
         
         if not youtube_api_key:
             return []
@@ -142,8 +142,8 @@ class MediaSearchTool(BaseTool):
 
     def _search_youtube_via_google(self, query: str, num_results: int = 2) -> List[Dict[str, str]]:
         """Fallback: Search YouTube videos via Google Custom Search."""
-        api_key = os.environ.get("GOOGLE_API_KEY")
-        cx = os.environ.get("GOOGLE_CX")
+        api_key = _raw("GOOGLE_API_KEY")
+        cx = _raw("GOOGLE_CX")
         
         if not api_key or not cx:
             return []

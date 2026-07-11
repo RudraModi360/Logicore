@@ -357,7 +357,6 @@ class TelemetryCollector:
             "exported_at": datetime.now().isoformat(),
             "config": {
                 "enabled": self.config.telemetry.enabled,
-                "log_prompts": self.config.telemetry.log_prompts,
             },
             "loop_statistics": self.get_loop_statistics().to_dict(),
         }

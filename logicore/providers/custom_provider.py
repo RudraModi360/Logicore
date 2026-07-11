@@ -1,6 +1,7 @@
-import os
 from typing import Optional
 from .base import LLMProvider, ProviderCapability
+from logicore.config.settings import get_api_key
+from logicore.config.env import _raw
 
 
 class CustomProvider(LLMProvider):
@@ -47,8 +48,8 @@ class CustomProvider(LLMProvider):
 
         self.model_name = (
             model_name
-            or os.environ.get("CUSTOM_PROVIDER_MODEL")
-            or os.environ.get("CUSTOM_MODEL_NAME")
+            or _raw("CUSTOM_PROVIDER_MODEL")
+            or _raw("CUSTOM_MODEL_NAME")
         )
         if not self.model_name:
             raise ValueError(
@@ -58,15 +59,14 @@ class CustomProvider(LLMProvider):
 
         self.api_key = (
             api_key
-            or os.environ.get("CUSTOM_PROVIDER_API_KEY")
-            or os.environ.get("CUSTOM_API_KEY")
+            or get_api_key("custom")
             or "not-needed"
         )
 
         self.endpoint = (
             endpoint
-            or os.environ.get("CUSTOM_PROVIDER_ENDPOINT")
-            or os.environ.get("CUSTOM_MODEL_ENDPOINT")
+            or _raw("CUSTOM_PROVIDER_ENDPOINT")
+            or _raw("CUSTOM_MODEL_ENDPOINT")
         )
         if not self.endpoint:
             raise ValueError(
@@ -77,7 +77,7 @@ class CustomProvider(LLMProvider):
         # Context window for context management (optional, auto-detected if not set)
         self.context_window = (
             context_window
-            or int(os.environ.get("CUSTOM_PROVIDER_CTX_WINDOW", 0))
+            or int(_raw("CUSTOM_PROVIDER_CTX_WINDOW", "0"))
             or None
         )
 

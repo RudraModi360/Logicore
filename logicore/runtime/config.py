@@ -8,9 +8,8 @@ This module consolidates all thresholds previously scattered across the codebase
 - And 8+ other hardcoded values
 
 All values are configurable via:
-1. Environment variables (highest priority)
-2. logicore.toml configuration file
-3. Default values (lowest priority)
+1. Environment variables in ``.env`` (highest priority)
+2. Default values (lowest priority)
 
 Usage:
     from logicore.runtime.config import RuntimeConfig
@@ -30,10 +29,12 @@ Usage:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Dict, Any, List
 from enum import Enum
+
+# All environment access flows through the single config gateway.
+from logicore.config.env import _raw
 
 
 def _get_canonical_model_windows() -> Dict[str, int]:
@@ -223,18 +224,6 @@ class TelemetryConfig:
     
     # Enable telemetry collection
     enabled: bool = True
-    
-    # Log all prompts (may contain sensitive data)
-    log_prompts: bool = False
-    
-    # Enable distributed tracing
-    traces_enabled: bool = False
-    
-    # Structured log format (json, text)
-    log_format: str = "json"
-    
-    # Metrics export interval (seconds)
-    export_interval_seconds: int = 60
 
 
 from logicore.runtime.reasoning.config import ReasoningConfig, ReasoningLevel
@@ -253,8 +242,13 @@ class PlannerConfig:
     # Auto-enter plan mode for complex tasks
     auto_plan_threshold: int = 5  # Number of steps that trigger auto-plan
     
-    # Storage directory for plans
-    storage_dir: str = ".logicore/plans"
+    # Storage directory for plans (resolved through logicore.config)
+    storage_dir: str = field(default_factory=lambda: str(_default_plans_dir()))
+
+
+def _default_plans_dir() -> str:
+    from logicore.config import settings
+    return str(settings.paths.plans_dir)
 
 
 @dataclass
@@ -277,7 +271,7 @@ class RuntimeConfig:
     Master configuration for the agentic runtime.
     
     Consolidates all thresholds previously hardcoded across the codebase.
-    All values can be overridden via environment variables or logicore.toml.
+    All values can be overridden via environment variables in ``.env``.
     """
     
     # Maximum turns per chat session
@@ -327,27 +321,27 @@ class RuntimeConfig:
         Priority: Environment > Settings (TOML/defaults) > Hardcoded defaults
         """
         from logicore.config.settings import settings
-        
+
         def get_env_int(key: str, default: int) -> int:
-            val = os.getenv(key)
+            val = _raw(key)
             if val:
                 try:
                     return int(val)
                 except ValueError:
                     pass
             return default
-        
+
         def get_env_float(key: str, default: float) -> float:
-            val = os.getenv(key)
+            val = _raw(key)
             if val:
                 try:
                     return float(val)
                 except ValueError:
                     pass
             return default
-        
+
         def get_env_bool(key: str, default: bool) -> bool:
-            val = os.getenv(key)
+            val = _raw(key)
             if val:
                 return val.lower() in ("true", "1", "yes", "on")
             return default
@@ -390,7 +384,6 @@ class RuntimeConfig:
             ),
             telemetry=TelemetryConfig(
                 enabled=get_env_bool("LOGICORE_TELEMETRY_ENABLED", getattr(settings, "TELEMETRY_ENABLED", True)),
-                log_prompts=get_env_bool("LOGICORE_TELEMETRY_LOG_PROMPTS", getattr(settings, "TELEMETRY_LOG_PROMPTS", False)),
             ),
             prompt_cache=PromptCacheConfig(
                 enabled=get_env_bool("LOGICORE_PROMPT_CACHE_ENABLED", getattr(settings, "PROMPT_CACHE_ENABLED", True)),
@@ -438,7 +431,5 @@ class RuntimeConfig:
             },
             "telemetry": {
                 "enabled": self.telemetry.enabled,
-                "log_prompts": self.telemetry.log_prompts,
-                "traces_enabled": self.telemetry.traces_enabled,
             },
         }

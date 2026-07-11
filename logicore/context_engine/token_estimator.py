@@ -49,7 +49,7 @@ MODEL_CONTEXT_WINDOWS = {
     "qwen": 32768,
     "qwen-2.5": 128000,
     "qwen3": 128000,
-    "qwen3:0.6b": 4096,
+    "qwen3:0.6b": 32768,
     # DeepSeek
     "deepseek-chat": 128000,
     "deepseek-coder": 128000,

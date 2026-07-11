@@ -19,6 +19,7 @@ import logging
 
 from logicore.providers.base import LLMProvider
 from logicore.providers.factory import create_provider
+from logicore.config import settings
 from logicore.gateway.gateway import ProviderGateway, get_gateway_for_provider
 from logicore.tools import ALL_TOOL_SCHEMAS, SAFE_TOOLS, TOOL_PRESETS
 from logicore.config.prompts import get_system_prompt
@@ -64,6 +65,8 @@ class Agent:
         reasoning_level: str = "medium",
         plan_mode: bool = False,
         agent_id: str = None,
+        # Storage (optional — enables session persistence)
+        storage=None,
         # Composable components (optional overrides)
         tool_executor: Optional[ToolExecutor] = None,
         chat_orchestrator: Optional[ChatOrchestrator] = None,
@@ -105,6 +108,9 @@ class Agent:
         self.telemetry_enabled = telemetry
         self.telemetry_tracker = TelemetryTracker(enabled=telemetry)
 
+        # Storage (optional session persistence)
+        self._storage = storage
+
         # Context engine
         from logicore.context_engine import ContextEngine
         from logicore.runtime.config import RuntimeConfig
@@ -118,6 +124,20 @@ class Agent:
         )
 
         # Reasoning level
+        # Loop detection / recovery engine, wired into the chat loop via
+        # ChatOrchestrator. Built once from the shared runtime config so the
+        # agent can detect and recover from tool/content loops instead of
+        # silently burning its iteration budget and dying with no explanation.
+        try:
+            from logicore.runtime.loop_detection import LoopDetectionEngine
+            from logicore.runtime.turn_manager import TurnManager
+            self._loop_engine = LoopDetectionEngine(_rt_config)
+            self._turn_manager = TurnManager(_rt_config)
+        except Exception as e:
+            logger.debug(f"[Agent] Loop detection/recovery unavailable: {e}")
+            self._loop_engine = None
+            self._turn_manager = None
+
         self._reasoning_level = reasoning_level
         self._reasoning_controller = None
         try:
@@ -136,7 +156,10 @@ class Agent:
         
         # Task Management
         from logicore.tasks import TaskManager, TaskStore, ActivityTracker, SessionProgressWriter, set_task_manager
-        self._task_base_dir = workspace_root or os.getcwd()
+        from logicore.config import settings
+        # Task/session/plan history lives under the config-controlled root,
+        # never the cwd. workspace_root (if any) stays for project-scoped use.
+        self._task_base_dir = str(settings.paths.tasks_dir)
         self._task_store = None
         self._task_manager = None
         self._task_tool_context = None  # Context for dependency injection
@@ -150,7 +173,7 @@ class Agent:
         if plan_mode:
             try:
                 from logicore.runtime.planner import PlanService
-                self._planner = PlanService(project_dir=workspace_root)
+                self._planner = PlanService(project_dir=None)
             except ImportError:
                 pass
 
@@ -181,7 +204,7 @@ class Agent:
         # Handle tools parameter
         if tool_preset and tool_preset in TOOL_PRESETS:
             self.load_tools_preset(tool_preset)
-        elif isinstance(tools, list) and len(tools) > 0:
+        elif isinstance(tools, list):
             for tool in tools:
                 if callable(tool):
                     self.register_tool_from_function(tool)
@@ -227,6 +250,47 @@ class Agent:
         elif len(session_ids) == 0:
             return {"message": "No telemetry data recorded yet."}
         return self.telemetry_tracker.get_total_summary()
+
+    # === Storage Persistence ===
+
+    def _persist_session(self, session_id: str, response: str = "") -> None:
+        """Persist session and telemetry to storage (non-blocking, best-effort)."""
+        if not self._storage or not self._storage.initialized:
+            return
+        try:
+            session_obj = self.sessions.get(session_id)
+            if not session_obj:
+                return
+            provider_name = self.provider.__class__.__name__ if hasattr(self, "provider") else ""
+
+            # Persist VFS files to Tier-3 assets folder (binary bytes); SQL keeps the
+            # filename -> path mapping so restore can rehydrate session.files.
+            file_refs = []
+            if session_obj.files:
+                for fname, content in session_obj.files.items():
+                    file_id = self._safe_file_id(fname)
+                    data = content.encode("utf-8") if isinstance(content, str) else content
+                    mime = self._guess_mime(fname)
+                    info = self._storage.save_attachment(session_id, file_id, data, mime)
+                    file_refs.append({"name": fname, "path": info.path, "mime": info.mime})
+
+            # Merge file refs into metadata (stored in SQL context column)
+            meta = dict(session_obj.metadata) if session_obj.metadata else {}
+            if file_refs:
+                meta["_vfs_files"] = file_refs
+
+            self._storage.save_session(
+                session_id, session_obj.messages,
+                provider=provider_name, model=getattr(self, "model_name", ""),
+                metadata=meta if meta else None,
+            )
+            if self.telemetry_enabled:
+                summary = self.telemetry_tracker.get_session_summary(session_id)
+                if summary:
+                    self._storage.save_telemetry(session_id, summary)
+        except Exception as e:
+            if self.debug:
+                logger.warning(f"[Agent] Storage persistence failed: {e}")
 
     # === Reasoning Level API ===
     
@@ -304,6 +368,62 @@ class Agent:
         for session in self.sessions.values():
             if session.messages and session.messages[0].get("role") == "system":
                 session.messages[0]["content"] = self.default_system_message
+
+        # Verification gate: the system prompt is intentionally decoupled from
+        # the tool registry (users may ship custom tools or disable internals
+        # and edit the prompt freely), but a tool documented in the prompt that
+        # has no executor is a "phantom" the model will try to call and fail on.
+        # This is a soft check - it warns rather than failing - so customization
+        # stays unblocked while real drift is still surfaced.
+        self._verify_prompt_tools(self.internal_tools, self.default_system_message)
+
+    def _verify_prompt_tools(self, tool_schemas: list, prompt_text: str) -> list:
+        """Verify prompt-documented tools are actually executable.
+
+        The prompt is built from two sources that can drift from the executor:
+        the ``internal_tools`` schemas (the "Available Tools" section) and the
+        hardcoded few-shot examples (e.g. ``write_file(...)``). We reconcile
+        both against the live executor registry.
+
+        Severity is split so production stays quiet:
+        - Schema-level phantoms (a tool we tell the model is "available" but
+          cannot execute) are authoritative wiring bugs -> always warned.
+        - Example/prose-referenced names (incl. Agent API methods documented as
+          if they were tools) are documentation drift -> debug-only.
+
+        Args:
+            tool_schemas: Tool schemas that were just fed into prompt construction.
+            prompt_text: The fully assembled system prompt (examples included).
+
+        Returns:
+            Sorted list of phantom tool names found (empty if none).
+        """
+        executable = set(self.tool_executor.get_registered_tool_names())
+
+        # 1. Every schema documented in the prompt must be executable.
+        schema_phantoms: set = set()
+        for t in (tool_schemas or []):
+            name = t.get("function", {}).get("name") if isinstance(t, dict) else None
+            if name and name not in executable:
+                schema_phantoms.add(name)
+
+        # 2. Scan few-shot examples / prose for ``name(`` call references.
+        import re
+        call_refs = set(re.findall(r"`([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", prompt_text or ""))
+        ref_phantoms = {n for n in call_refs if n not in executable}
+
+        if schema_phantoms:
+            logger.warning(
+                "[Agent] System prompt lists tools with no registered executor "
+                "(phantom tools): %s", sorted(schema_phantoms)
+            )
+        if ref_phantoms:
+            logger.debug(
+                "[Agent] Prompt references tool-like names with no executor "
+                "(review for drift): %s", sorted(ref_phantoms)
+            )
+
+        return sorted(schema_phantoms | ref_phantoms)
 
     # === Skill Management ===
     
@@ -589,12 +709,94 @@ class Agent:
 
     def get_session(self, session_id: str = "default") -> AgentSession:
         if session_id not in self.sessions:
-            self.sessions[session_id] = AgentSession(session_id, self.default_system_message)
+            # If storage is available, try to restore a previous session
+            restored = self._restore_session_from_storage(session_id)
+            if restored is None:
+                restored = AgentSession(session_id, self.default_system_message)
+            self.sessions[session_id] = restored
         return self.sessions[session_id]
+
+    def _restore_session_from_storage(self, session_id: str):
+        """Load a previous session from storage and reconstruct the in-memory state.
+
+        Returns ``None`` when no prior data exists or storage is not configured.
+        The current agent's system prompt is always used (not the stored one),
+        so prompt updates are automatically picked up.
+        """
+        if not self._storage or not self._storage.initialized:
+            return None
+        try:
+            stored = self._storage.load_session(session_id)
+            if not stored:
+                return None
+            logger.debug(
+                "[Agent] restoring session %s from storage | messages=%d",
+                session_id, len(stored),
+            )
+            # Reconstruct: use current system prompt, restore conversation history
+            session = AgentSession(session_id, self.default_system_message)
+            # Strip any old system message(s) from stored history
+            history = [m for m in stored if m.get("role") != "system"]
+            # Rebuild messages list: current system prompt + old conversation
+            session.messages = [{"role": "system", "content": self.default_system_message}] + history
+            # Restore metadata (tags, last_tool_directory, etc.)
+            saved_meta = self._storage.load_session_metadata(session_id)
+            if saved_meta:
+                # Rehydrate VFS files from Tier-3 assets folder using the stored refs
+                refs = saved_meta.pop("_vfs_files", None)
+                if refs:
+                    for ref in refs:
+                        try:
+                            data = self._storage.load_attachment(ref["path"])
+                            if data is None:
+                                continue
+                            content = data.decode("utf-8") if ref.get("mime", "").startswith("text/") or self._is_text(data) else data.decode("utf-8", "replace")
+                            session.files[ref["name"]] = content
+                        except Exception as fe:
+                            if self.debug:
+                                logger.warning("[Agent] failed to restore file %s: %s", ref.get("name"), fe)
+                session.metadata.update(saved_meta)
+            return session
+        except Exception as e:
+            if self.debug:
+                logger.warning("[Agent] failed to restore session %s: %s", session_id, e)
+            return None
+
+    @staticmethod
+    def _is_text(data: bytes) -> bool:
+        """Heuristic: treat content as text if it decodes cleanly as UTF-8."""
+        try:
+            data.decode("utf-8")
+            return True
+        except UnicodeDecodeError:
+            return False
+
+    @staticmethod
+    def _safe_file_id(name: str) -> str:
+        """Turn a VFS filename into a filesystem-safe, unique-per-session id."""
+        import re
+        base = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+        if not base:
+            base = "file"
+        return base
+
+    @staticmethod
+    def _guess_mime(name: str) -> str:
+        """Best-effort MIME guess from a filename extension."""
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        return {
+            "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
+            "pdf": "application/pdf", "txt": "text/plain", "csv": "text/csv",
+            "json": "application/json", "md": "text/markdown", "html": "text/html",
+            "htm": "text/html", "css": "text/css", "js": "text/javascript",
+            "zip": "application/zip",
+        }.get(ext, "application/octet-stream")
 
     def clear_session(self, session_id: str = "default"):
         if session_id in self.sessions:
             self.sessions[session_id].clear_history()
+        self.tool_executor.clear_session_approvals(session_id)
     
     def create_session(self, session_id: str = None, tags: Dict[str, str] = None) -> str:
         if session_id is None:
@@ -623,6 +825,7 @@ class Agent:
         if session_id not in self.sessions:
             return False
         del self.sessions[session_id]
+        self.tool_executor.clear_session_approvals(session_id)
         if self._task_store and self._task_store.task_list_id == session_id:
             self._task_manager = None
             self._task_store = None
@@ -751,7 +954,7 @@ class Agent:
         set_agent_id(self._agent_id, owner_id=self._agent_id)
         if session_id not in self._session_progress_writers:
             self._session_progress_writers[session_id] = SessionProgressWriter(
-                workspace_root=self._task_base_dir,
+                workspace_root=str(settings.paths.sessions_dir),
                 session_id=session_id,
             )
 
@@ -760,7 +963,7 @@ class Agent:
     async def chat(
         self, 
         user_input: Union[str, List[Dict[str, Any]]], 
-        session_id: str = "default", 
+        session_id: str = None, 
         callbacks: Dict[str, Callable] = None, 
         stream: bool = False, 
         streaming_funct: Callable = None,
@@ -769,7 +972,7 @@ class Agent:
         session_tags: Dict[str, str] = None,
         **kwargs
     ) -> str:
-        if new_session:
+        if new_session or session_id is None:
             session_id = self.create_session(tags=session_tags)
         elif session_tags and session_id not in self.sessions:
             session = self.get_session(session_id)
@@ -782,21 +985,35 @@ class Agent:
         # Enrich input
         user_input = await self.input_enricher.enrich_async(user_input)
         
-        return await self._chat_orchestrator.run(
-            user_input=user_input,
-            session_id=session_id,
-            callbacks=callbacks,
-            stream=stream,
-            streaming_funct=streaming_funct,
-            generate_walkthrough=generate_walkthrough,
-        )
+        try:
+            response = await self._chat_orchestrator.run(
+                user_input=user_input,
+                session_id=session_id,
+                callbacks=callbacks,
+                stream=stream,
+                streaming_funct=streaming_funct,
+                generate_walkthrough=generate_walkthrough,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Global guard: an unexpected error (e.g. a tool raising outside the
+            # executor's own try/except) must not kill the whole process. The
+            # streaming path already isolates producer errors; mirror that here.
+            logger.error(f"[Agent] Chat loop terminated unexpectedly: {e}")
+            response = f"Error during execution: {e}"
+
+        # Persist session + telemetry to storage (best-effort)
+        self._persist_session(session_id, response)
+
+        return response
 
     # === Streaming (event-based) API ===
 
     async def stream_run(
         self,
         user_input: Union[str, List[Dict[str, Any]]],
-        session_id: str = "default",
+        session_id: str = None,
         callbacks: Dict[str, Callable] = None,
         generate_walkthrough: bool = False,
         new_session: bool = False,
@@ -818,7 +1035,7 @@ class Agent:
                 await sse_send(ev)        # ev.to_sse() built-in
             final = await run              # final text
         """
-        if new_session:
+        if new_session or session_id is None:
             session_id = self.create_session(tags=session_tags)
         elif session_tags and session_id not in self.sessions:
             session = self.get_session(session_id)
@@ -866,7 +1083,7 @@ class Agent:
     async def stream(
         self,
         user_input: Union[str, List[Dict[str, Any]]],
-        session_id: str = "default",
+        session_id: str = None,
         **kwargs,
     ):
         """

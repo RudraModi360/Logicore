@@ -11,6 +11,8 @@ from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 import logging
 
+from logicore.config import settings
+from logicore.config.env import _raw
 from logicore.memory.types import MemoryMetadata
 from logicore.memory.storage import MemoryStore
 from logicore.memory.retrieval.retriever import MemoryRetriever
@@ -18,7 +20,7 @@ from logicore.memory.extraction.worker import ExtractionWorker
 
 logger = logging.getLogger(__name__)
 
-# Default global memory path: ~/.logicore/memory/
+# Default global memory path (resolved through logicore.config).
 DEFAULT_MEMORY_DIR = os.path.join(os.path.expanduser("~"), ".logicore", "memory")
 
 # Environment variable for custom memory path
@@ -28,29 +30,29 @@ MEMORY_DIR_ENV_VAR = "LOGICORE_MEMORY_DIR"
 def resolve_memory_dir(custom_path: Optional[str] = None) -> str:
     """
     Resolve the memory directory path.
-    
+
     Priority:
     1. Custom path (explicit parameter)
     2. Environment variable (LOGICORE_MEMORY_DIR)
-    3. Default global path (~/.logicore/memory/)
-    
+    3. Centralized config default (settings.paths.memory_dir → ~/.logicore/memory)
+
     Args:
         custom_path: Optional custom path to memory directory
-        
+
     Returns:
         Resolved memory directory path
     """
     # 1. Explicit custom path
     if custom_path:
         return custom_path
-    
-    # 2. Environment variable
-    env_path = os.environ.get(MEMORY_DIR_ENV_VAR)
+
+    # 2. Environment variable (explicit override over the config default)
+    env_path = _raw(MEMORY_DIR_ENV_VAR)
     if env_path:
         return env_path
-    
-    # 3. Default global path
-    return DEFAULT_MEMORY_DIR
+
+    # 3. Centralized config default
+    return str(settings.paths.memory_dir)
 
 
 class MemoryManager:

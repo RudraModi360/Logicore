@@ -21,6 +21,7 @@ from logicore.gateway.gateway import NormalizedMessage
 from logicore.security.input_sanitizer import InputSanitizer, InjectionAction
 from logicore.stream.events import StreamEvent, StreamEventType
 from logicore.stream.emitter import StreamEmitter
+from logicore.runtime.loop_detection.engine import AgentEventType
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +83,14 @@ class ChatOrchestrator:
         Returns None when budget enforcement is not configured.
         """
         try:
-            import os
-            raw_mode = os.environ.get("LOGICORE_TOOL_BUDGET_MODE")
+            from logicore.config.env import _raw
+            raw_mode = _raw("LOGICORE_TOOL_BUDGET_MODE")
             if not raw_mode:
                 return None
             raw = {
                 "mode": raw_mode,
-                "max_schema_tokens": os.environ.get("LOGICORE_TOOL_BUDGET_MAX_TOKENS"),
-                "threshold_pct": os.environ.get("LOGICORE_TOOL_BUDGET_PCT", "25"),
+                "max_schema_tokens": _raw("LOGICORE_TOOL_BUDGET_MAX_TOKENS"),
+                "threshold_pct": _raw("LOGICORE_TOOL_BUDGET_PCT", "25"),
             }
             from logicore.tools.tool_budget import ToolBudgetConfig
             return ToolBudgetConfig.from_raw(raw)
@@ -223,6 +224,12 @@ class ChatOrchestrator:
 
         session = self.agent.get_session(session_id)
 
+        # Loop detection / recovery state (graceful termination instead of a
+        # silent "deadly" death when the model gets stuck after many tool calls).
+        loop_engine = getattr(self.agent, "_loop_engine", None)
+        tools_used_this_chat: List[str] = []
+        last_tool_name: Optional[str] = None
+
         # Streaming event bus. ``emitter`` is None for the legacy
         # (callback-based) path; when set, we publish semantic events. Token /
         # reasoning / tool-call-chunk events are forwarded from the gateway via
@@ -231,12 +238,18 @@ class ChatOrchestrator:
         if emitter:
             emitter.emit(StreamEvent.create(StreamEventType.RUN_START, {}))
 
+        # Extract text for reminder routing and reasoning (needed early)
+        text_for_reminder = user_input
+        if isinstance(user_input, list):
+            text_for_reminder, _ = extract_content(user_input)
+
         # Wire up reasoning controller (dynamically adjusts reasoning depth
         # based on the query - this is a prompt/context concern, not a routing
         # brain that decides plan vs act).
         if self.agent._reasoning_controller:
             try:
-                self.agent._reasoning_controller.adjust_for_query(user_input)
+                query_text = text_for_reminder if isinstance(text_for_reminder, str) else str(text_for_reminder)
+                self.agent._reasoning_controller.adjust_for_query(query_text)
                 reasoning_addon = self.agent._reasoning_controller.get_system_prompt_addon()
                 if reasoning_addon:
                     self.agent.context_engine.inject_hint(session.messages, reasoning_addon)
@@ -245,13 +258,13 @@ class ChatOrchestrator:
                 if self.debug:
                     logger.warning(f"[ChatOrchestrator] ReasoningController adjustment failed: {e}")
 
-        # Extract text for reminder routing
-        text_for_reminder = user_input
-        if isinstance(user_input, list):
-            text_for_reminder, _ = extract_content(user_input)
-
         start_time = time.time()
-        session.add_message({"role": "user", "content": user_input})
+        # Add messages to session — handle both single string and message list
+        if isinstance(user_input, list):
+            for msg in user_input:
+                session.add_message(msg)
+        else:
+            session.add_message({"role": "user", "content": user_input})
 
         # Get tools
         all_tools = None
@@ -304,6 +317,14 @@ class ChatOrchestrator:
                     StreamEventType.RUN_STEP,
                     {"iteration": i + 1, "max_iterations": self.agent.max_iterations},
                 ))
+
+            # Loop detection: mark turn start (drives stagnant-state detection).
+            if loop_engine:
+                await self._check_loop(AgentEventType.TURN_START, session_id)
+
+            # Drop tools currently in loop cooldown so the model can't repeat them.
+            if all_tools is not None:
+                all_tools = self._filter_cooled_down_tools(all_tools, session_id)
 
             # 1. Get LLM response
             response = None
@@ -364,6 +385,22 @@ class ChatOrchestrator:
                     session_id, llm_start_time, content, tool_calls, _ctx_result
                 )
 
+            # Loop detection: end-of-turn bookkeeping (stagnant detection), then
+            # content repetition check. Either may trigger recovery instead of a
+            # silent hard stop.
+            if loop_engine:
+                await self._check_loop(AgentEventType.TURN_END, session_id)
+            if content:
+                rec = await self._maybe_recover_loop(
+                    await self._check_loop(AgentEventType.CONTENT, session_id, content=content[:4000]),
+                    session, session_id, tools_used_this_chat, last_tool_name,
+                )
+                if rec and rec[0] == "terminate":
+                    self._clear_injected_hints(session, injected_hints)
+                    if emitter:
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": rec[1]}))
+                    return rec[1]
+
             # 3. No tool calls = final response
             if not tool_calls:
                 self._clear_injected_hints(session, injected_hints)
@@ -375,10 +412,47 @@ class ChatOrchestrator:
                     emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": final}))
                 return final
 
-            # 4. Execute tools
+            # 4. Execute tools (with per-call loop detection)
             for tc in tool_calls:
                 name, args, tc_id = self._extract_tool_call_details(tc)
                 if not name:
+                    continue
+
+                # Loop detection: feed the tool call. Detects consecutive repeats
+                # (e.g. hammering a wrong/non-existent tool like `open_file`).
+                call_detected = await self._check_loop(
+                    AgentEventType.TOOL_CALL, session_id,
+                    tool_name=name, tool_args=args,
+                )
+                rec = await self._maybe_recover_loop(
+                    call_detected, session, session_id,
+                    tools_used_this_chat, last_tool_name,
+                )
+                if rec and rec[0] == "terminate":
+                    self._clear_injected_hints(session, injected_hints)
+                    if emitter:
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": rec[1]}))
+                    return rec[1]
+
+                # If recovery put this tool into cooldown, skip executing it now
+                # and tell the model to use a different approach.
+                engine = getattr(self.agent, "_loop_engine", None)
+                if engine and engine.is_tool_cooled_down(session_id, name):
+                    blocked = {
+                        "success": False,
+                        "error": (
+                            f"Tool '{name}' is temporarily disabled (loop cooldown). "
+                            f"Use a different tool or approach."
+                        ),
+                    }
+                    tool_msg = {
+                        "role": "tool",
+                        "name": name,
+                        "content": self.agent.tool_executor.normalize_tool_result(name, blocked),
+                    }
+                    if tc_id:
+                        tool_msg["tool_call_id"] = tc_id
+                    session.add_message(tool_msg)
                     continue
 
                 if self.debug:
@@ -422,6 +496,26 @@ class ChatOrchestrator:
 
                 if result.get("success", True):
                     successful_tools_this_chat += 1
+                    tools_used_this_chat.append(name)
+                    last_tool_name = name
+
+                # Loop detection: feed the tool result (failed repeats escalate
+                # to stagnant-state detection and recovery).
+                res_detected = await self._check_loop(
+                    AgentEventType.TOOL_RESULT, session_id,
+                    tool_name=name,
+                    tool_result=str(result.get("content") or result.get("error") or ""),
+                    tool_success=bool(result.get("success", True)),
+                )
+                rec = await self._maybe_recover_loop(
+                    res_detected, session, session_id,
+                    tools_used_this_chat, last_tool_name,
+                )
+                if rec and rec[0] == "terminate":
+                    self._clear_injected_hints(session, injected_hints)
+                    if emitter:
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": rec[1]}))
+                    return rec[1]
 
         self._clear_injected_hints(session, injected_hints)
         if emitter:
@@ -500,6 +594,71 @@ class ChatOrchestrator:
             if self.debug:
                 logger.warning(f"[ChatOrchestrator] Continuation failed: {e}")
             return "", []
+
+    # === Loop detection / recovery helpers ===
+
+    def _filter_cooled_down_tools(self, all_tools, session_id: str):
+        """Drop tools currently in loop cooldown so the model can't call them."""
+        engine = getattr(self.agent, "_loop_engine", None)
+        if not engine:
+            return all_tools
+        cooled = set(engine.get_cooled_down_tools(session_id))
+        if not cooled:
+            return all_tools
+        return [
+            t for t in all_tools
+            if (t.get("function") or {}).get("name") not in cooled
+        ]
+
+    async def _check_loop(self, event_type, session_id: str, **kwargs):
+        """Feed one execution event to the loop-detection engine (if enabled)."""
+        engine = getattr(self.agent, "_loop_engine", None)
+        if not engine or engine.is_disabled(session_id):
+            return None
+        from logicore.runtime.loop_detection.engine import AgentEvent
+        event = AgentEvent(type=event_type, **kwargs)
+        try:
+            return await engine.check(event, session_id)
+        except Exception as e:
+            if self.debug:
+                logger.warning(f"[ChatOrchestrator] loop check failed: {e}")
+            return None
+
+    async def _maybe_recover_loop(self, result, session, session_id: str,
+                                  tools_used, last_tool):
+        """Turn a detected loop into a recovery action.
+
+        Returns ``None`` when nothing was detected, ``("continue", None)`` when
+        guidance was injected and the loop should keep going, or
+        ``("terminate", message)`` when execution should stop gracefully.
+        """
+        if not result or not result.detected:
+            return None
+        engine = getattr(self.agent, "_loop_engine", None)
+        if not engine:
+            return None
+        from logicore.runtime.loop_detection.recovery import (
+            RecoveryActionType, get_recovery_action,
+        )
+        session_context = {
+            "tools_used": list(tools_used),
+            "last_tool_name": last_tool,
+            "model_name": getattr(self.agent, "model_name", ""),
+        }
+        action = get_recovery_action(
+            result.loop_type.value if result.loop_type else "default",
+            result.detail,
+            result.suggested_escalation,
+            session_context,
+        )
+        if action.action_type in (RecoveryActionType.TERMINATE, RecoveryActionType.SWITCH_MODEL):
+            return ("terminate", action.guidance_message or
+                    "Stopped: a persistent loop was detected and could not be resolved.")
+        if action.action_type == RecoveryActionType.COOL_DOWN_TOOL and action.tool_name:
+            engine.apply_tool_cooldown(session_id, action.tool_name)
+        if action.guidance_message:
+            session.add_message({"role": "user", "content": action.guidance_message})
+        return ("continue", None)
 
     def _extract_tool_call_details(self, tc) -> tuple[str, dict, str]:
         """Extract name, args, id from a tool call."""
@@ -662,8 +821,6 @@ class ChatOrchestrator:
             duration_ms = (llm_end_time - llm_start_time) * 1000
 
             # Token counting
-            session = self.agent.get_session(session_id)
-
             _system_tokens = self.agent.context_engine.token_estimator.count_tokens(
                 " ".join(str(m.get("content", "")) for m in session.messages if m.get("role") == "system")
             )

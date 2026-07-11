@@ -71,7 +71,7 @@ class SmartAgent(Agent):
         if self.skills:
             self._rebuild_system_prompt_with_tools()
 
-    async def reason(self, problem: str, session_id: str = "default") -> str:
+    async def reason(self, problem: str, session_id: str = None) -> str:
         """
         Explicitly request step-by-step reasoning for a problem.
         """

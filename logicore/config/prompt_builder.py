@@ -224,6 +224,7 @@ def get_tool_guidance_section(enabled_tools: List[str]) -> str:
         guidance_parts.append("### Web Access")
         if "web_search" in enabled_tools:
             guidance_parts.append("- Use `web_search` for current/recent information")
+            guidance_parts.append("- Use web tools autonomously when the task benefits — you do not need to ask the user before each search")
             guidance_parts.append("- Use specific, narrow search queries (2-4 keywords)")
         if "web_fetch" in enabled_tools:
             guidance_parts.append("- Use `web_fetch` to retrieve specific URLs")

@@ -354,8 +354,8 @@ def _get_session_awareness_section() -> str:
 ### Understanding Sessions
 Each execution instance (chat session) has its own isolated session with:
 - **Unique Session ID**: Auto-generated or user-specified
-- **Isolated Task Storage**: `.logicore/tasks/{session_id}/`
-- **Isolated Progress Files**: `.logicore/sessions/{session_id}/plan.md` and `progress.md`
+- **Isolated Task Storage**: `~/.logicore/tasks/{session_id}/` (config-controlled root)
+- **Isolated Progress Files**: `~/.logicore/sessions/{session_id}/plan.md` and `progress.md`
 - **Independent History**: Message history is session-scoped
 
 ### Session Lifecycle

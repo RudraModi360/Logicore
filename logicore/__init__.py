@@ -16,7 +16,6 @@ from .providers.custom_provider import CustomProvider
 from .providers.base import LLMProvider
 from .providers.factory import create_provider, register_provider
 from .mcp.client import MCPClientManager
-from .session.manager import SessionManager
 from .telemetry.tracker import TelemetryTracker
 from .gateway.gateway import ProviderGateway
 from .skills import Skill, SkillMetadata, SkillLoader, SkillIndexEntry
@@ -48,7 +47,6 @@ __all__ = [
     "register_provider",
     # Infrastructure
     "MCPClientManager",
-    "SessionManager",
     "TelemetryTracker",
     "ProviderGateway",
     # Skills

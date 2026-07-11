@@ -1,8 +1,8 @@
 """
 File-per-task storage with locking infrastructure.
 
-Storage layout:
-    .logicore/tasks/{task_list_id}/
+Storage layout (under logicore.config settings.paths.tasks_dir):
+    {tasks_dir}/{task_list_id}/
         .lock              # File-lock for list-level operations
         .highwatermark     # Max task ID ever assigned
         1.json             # Task #1
@@ -149,8 +149,8 @@ class TaskStore:
     """
     File-per-task storage with locking infrastructure.
     
-    Storage layout:
-        .logicore/tasks/{task_list_id}/
+    Storage layout (under logicore.config settings.paths.tasks_dir):
+        {tasks_dir}/{task_list_id}/
             .lock              # List-level lock
             .highwatermark     # Max task ID ever assigned
             1.json             # Task #1
@@ -179,7 +179,7 @@ class TaskStore:
         """
         self.base_dir = Path(base_dir)
         self.task_list_id = task_list_id
-        self.tasks_dir = self.base_dir / ".logicore" / "tasks" / task_list_id
+        self.tasks_dir = self.base_dir / task_list_id
         self.lock_file = self.tasks_dir / ".lock"
         self.highwatermark_file = self.tasks_dir / ".highwatermark"
         

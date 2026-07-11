@@ -205,10 +205,6 @@ class PromptCacheManager:
         """Get cache statistics."""
         return self._stats.to_dict()
     
-    def clear_stats(self) -> None:
-        """Reset cache statistics."""
-        self._stats = CacheStats()
-    
     def clear_cache(self) -> None:
         """Clear all cache state."""
         self._current_system_hash = None

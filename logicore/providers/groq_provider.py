@@ -1,6 +1,6 @@
-import os
 from typing import Optional
 from .base import LLMProvider
+from logicore.config.settings import get_api_key
 
 
 class GroqProvider(LLMProvider):
@@ -15,7 +15,7 @@ class GroqProvider(LLMProvider):
         from groq import Groq
 
         self.model_name = model_name
-        self.api_key = api_key or os.environ.get("GROQ_API_KEY")
+        self.api_key = api_key or get_api_key("groq")
         if not self.api_key:
             raise ValueError("Groq API key is required.")
         self.client = Groq(api_key=self.api_key, timeout=120.0)

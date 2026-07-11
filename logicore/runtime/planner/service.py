@@ -8,7 +8,6 @@ Provides structured planning with user approval before execution.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -247,8 +246,10 @@ class PlanService:
             auto_save: Automatically save after modifications
             approval_callback: Optional callback for approval (returns True/False)
         """
-        self.project_dir = Path(project_dir or os.getcwd())
-        self.plans_dir = self.project_dir / ".logicore" / "plans"
+        # Plans persist under the config-controlled root, never the cwd.
+        from logicore.config import settings
+        self.project_dir = Path(project_dir) if project_dir else settings.paths.storage_root
+        self.plans_dir = settings.paths.plans_dir
         self.auto_save = auto_save
         self.approval_callback = approval_callback
         

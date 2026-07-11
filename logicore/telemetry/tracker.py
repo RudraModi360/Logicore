@@ -31,181 +31,9 @@ Usage:
 """
 
 import statistics
-from typing import Dict, Optional, List, Callable
+from typing import Dict, Optional, List
 from dataclasses import dataclass, field
 from datetime import datetime
-
-
-class ContextWindowFetcher:
-    """
-    Fetches context window sizes from cloud providers dynamically.
-    Caches results to avoid repeated API calls.
-    """
-    
-    def __init__(self):
-        self._cache: Dict[str, int] = {}
-        self._fetchers: Dict[str, Callable] = {}
-        self._setup_default_fetchers()
-    
-    def _setup_default_fetchers(self):
-        """Setup default fetcher functions for known providers."""
-        self._fetchers["openai"] = self._fetch_openai
-        self._fetchers["anthropic"] = self._fetch_anthropic
-        self._fetchers["google"] = self._fetch_google
-        self._fetchers["groq"] = self._fetch_groq
-        self._fetchers["ollama"] = self._fetch_ollama
-    
-    def register_fetcher(self, provider: str, fetcher: Callable[[str], Optional[int]]):
-        """Register a custom context window fetcher for a provider."""
-        self._fetchers[provider] = fetcher
-    
-    def get_context_window(self, model: str, provider: str) -> Optional[int]:
-        """
-        Get context window for a model from cache or by fetching from provider.
-        
-        Args:
-            model: Model identifier (e.g., "gpt-4", "claude-3-opus")
-            provider: Provider name (e.g., "openai", "anthropic")
-        
-        Returns:
-            Context window size in tokens, or None if unknown
-        """
-        cache_key = f"{provider}:{model}"
-        
-        # Check cache first
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-        
-        # Try to fetch from provider
-        if provider in self._fetchers:
-            try:
-                context_size = self._fetchers[provider](model)
-                if context_size:
-                    self._cache[cache_key] = context_size
-                    return context_size
-            except Exception as e:
-                print(f"Warning: Failed to fetch context window for {model} from {provider}: {e}")
-        
-        return None
-    
-    def _fetch_openai(self, model: str) -> Optional[int]:
-        """Fetch OpenAI model context window from API."""
-        try:
-            import openai
-            client = openai.OpenAI()
-            mod = client.models.retrieve(model)
-            if hasattr(mod, 'context_window'):
-                return mod.context_window
-        except Exception:
-            pass
-        return None
-    
-    def _fetch_anthropic(self, model: str) -> Optional[int]:
-        """Fetch Anthropic model context window from API."""
-        return None
-    
-    def _fetch_google(self, model: str) -> Optional[int]:
-        """Fetch Google Gemini model context window from API."""
-        try:
-            import google.generativeai as genai
-            models = genai.list_models()
-            for m in models:
-                model_name = m.name.split('/')[-1]
-                if model_name == model or m.name == model:
-                    if hasattr(m, 'input_token_limit'):
-                        return m.input_token_limit
-        except Exception:
-            pass
-        return None
-    
-    def _fetch_groq(self, model: str) -> Optional[int]:
-        """
-        Fetch Groq model context window from API.
-        """
-        try:
-            from groq import Groq
-            client = Groq()
-            models_response = client.models.list()
-            for m in models_response.data:
-                if m.id == model:
-                    if hasattr(m, 'context_window'):
-                        return m.context_window
-                    if hasattr(m, 'context_length'):
-                        return m.context_length
-        except Exception:
-            pass
-        return None
-    
-    def _fetch_ollama(self, model: str) -> Optional[int]:
-        """Fetch Ollama model context window from local instance."""
-        try:
-            import subprocess
-            import json
-            import re
-            if not re.match(r'^[a-zA-Z0-9._:-]+$', model):
-                return None
-            result = subprocess.run(
-                ["ollama", "show", model, "--json"],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                num_ctx = data.get("parameters", {}).get("num_ctx")
-                if num_ctx:
-                    if isinstance(num_ctx, list) and len(num_ctx) > 0:
-                        return int(num_ctx[0])
-                    return int(num_ctx)
-                
-                model_info = data.get("model_info", {})
-                for key, val in model_info.items():
-                    if "context_length" in key:
-                        return int(val)
-        except Exception:
-            pass
-
-        # Fallback to python ollama API if the subprocess --json fails
-        try:
-            import ollama
-            info = ollama.show(model)
-            
-            # Check for python client output format
-            if hasattr(info, "parameters"):
-                # some older versions return objects
-                return int(info.parameters.get("num_ctx"))
-                
-            if isinstance(info, dict) and "parameters" in info:
-                # new versions return dict, but parameters could be a string block
-                params = info.get("parameters", "")
-                if isinstance(params, str):
-                    for line in params.split("\n"):
-                        if "num_ctx" in line:
-                            return int(line.split()[-1])
-                elif isinstance(params, dict) and "num_ctx" in params:
-                    num_ctx = params["num_ctx"]
-                    if isinstance(num_ctx, list) and len(num_ctx) > 0:
-                        return int(num_ctx[0])
-                    return int(num_ctx)
-            
-            # Also check model_info
-            if isinstance(info, dict) and "model_info" in info:
-                model_info = info["model_info"]
-                for key, val in model_info.items():
-                    if "context_length" in key:
-                        return int(val)
-        except Exception:
-            pass
-            
-        return None
-    
-    def clear_cache(self):
-        """Clear the context window cache."""
-        self._cache.clear()
-
-
-# Global context window fetcher instance
-_context_fetcher = ContextWindowFetcher()
 
 
 @dataclass
@@ -307,8 +135,12 @@ class SessionMetrics:
     requests: List[RequestMetrics] = field(default_factory=list)
 
     def _get_context_window(self) -> Optional[int]:
-        """Get context window for the model by fetching from provider."""
-        return _context_fetcher.get_context_window(self.model, self.provider)
+        """Get context window for the model from canonical lookup."""
+        try:
+            from logicore.context_engine.token_estimator import get_model_context_window
+            return get_model_context_window(self.model, self.provider)
+        except Exception:
+            return None
 
     @property
     def context_used_percent(self) -> float:
@@ -467,25 +299,6 @@ class TelemetryTracker:
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
         self.sessions: Dict[str, SessionMetrics] = {}
-
-    def register_context_fetcher(self, provider: str, fetcher: Callable[[str], Optional[int]]):
-        """
-        Register a custom context window fetcher for a provider.
-        
-        Args:
-            provider: Provider name (e.g., "custom_provider")
-            fetcher: Function that takes model name and returns context window size
-                    Should return None if model not found
-        
-        Example:
-            def fetch_custom_context(model: str) -> Optional[int]:
-                '''Fetch from your cloud provider API'''
-                response = requests.get(f'https://api.provider.com/models/{model}')
-                return response.json().get('context_window')
-            
-            tracker.register_context_fetcher('custom_provider', fetch_custom_context)
-        """
-        _context_fetcher.register_fetcher(provider, fetcher)
 
     def _get_session(self, session_id: str) -> SessionMetrics:
         if session_id not in self.sessions:
@@ -695,9 +508,4 @@ class TelemetryTracker:
         """Get list of all session IDs."""
         return list(self.sessions.keys())
 
-    def reset(self, session_id: str = None):
-        """Reset telemetry data for a session or all sessions."""
-        if session_id:
-            self.sessions.pop(session_id, None)
-        else:
-            self.sessions.clear()
+

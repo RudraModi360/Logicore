@@ -5,11 +5,9 @@ Provides:
 - InputSanitizer: Protection against prompt injection attacks
 """
 
-from .input_sanitizer import InputSanitizer, SanitizationResult, InjectionAction, create_sanitizer
+from .input_sanitizer import InputSanitizer, InjectionAction
 
 __all__ = [
     "InputSanitizer",
-    "SanitizationResult",
     "InjectionAction",
-    "create_sanitizer",
 ]

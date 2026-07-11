@@ -23,6 +23,7 @@ _DEBUG_LOGGERS = [
     "logicore.memory",
     "logicore.runtime",
     "logicore.skills",
+    "logicore.storage",
 ]
 
 

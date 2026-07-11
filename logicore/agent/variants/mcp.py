@@ -162,12 +162,17 @@ class MCPAgent(Agent):
         self.mcp_config = mcp_config
         self._mcp_initialized = False
         
+        # Enable tools support if MCP servers are configured
+        if mcp_config_path or mcp_config:
+            self.supports_tools = True
+        
         # Deferred tool loading configuration
         self.deferred_tools = deferred_tools  # User explicitly requested deferred mode
         self.tool_threshold = tool_threshold
         self._tool_registry: Dict[str, Dict[str, Any]] = {}  # name -> full schema
         self._loaded_tools: Set[str] = set()  # Tools currently loaded for use
         self._auto_deferred = False  # Tracks if deferred mode was auto-enabled
+        self._defer_mcp_only = False  # Tracks if only MCP tools are deferred (built-in tools remain loaded)
         self._default_tools_count = len(self.internal_tools)  # Track default tools
         
         # NOTE: Don't register default tools in deferred registry here.
@@ -208,11 +213,20 @@ class MCPAgent(Agent):
         except re.error as e:
             return [{"error": f"Invalid regex pattern: {e}"}]
         
+        # Get built-in tool names to exclude them when in MCP-only deferral mode
+        builtin_tool_names = set()
+        if self._defer_mcp_only:
+            builtin_tool_names = {t.get("function", {}).get("name") for t in self.internal_tools}
+        
         matches = []
         for name, schema in self._tool_registry.items():
             func = schema.get("function", {})
             tool_name = func.get("name", "")
             description = func.get("description", "")
+            
+            # In MCP-only deferral mode, skip built-in tools
+            if self._defer_mcp_only and tool_name in builtin_tool_names:
+                continue
             
             # Match against name or description
             if regex.search(tool_name) or regex.search(description):
@@ -303,14 +317,30 @@ class MCPAgent(Agent):
             
             return all_tools
         
-        # Deferred mode is active: Return search tool + loaded tools
-        tools = [TOOL_SEARCH_SCHEMA]
-        
-        for tool_name in self._loaded_tools:
-            if tool_name in self._tool_registry:
-                tools.append(self._tool_registry[tool_name])
-        
-        return tools
+        # Deferred mode is active
+        if self._defer_mcp_only:
+            # MCP-only deferral: Return built-in tools + search tool for MCP tools
+            tools = list(self.internal_tools)  # All built-in tools remain loaded
+            tools.append(TOOL_SEARCH_SCHEMA)  # Add search tool for MCP tools
+            
+            # Also include any explicitly loaded MCP tools
+            for tool_name in self._loaded_tools:
+                if tool_name in self._tool_registry:
+                    tools.append(self._tool_registry[tool_name])
+            
+            if self.debug:
+                logger.debug(f"[MCPAgent] [OK] MCP-only deferral: {len(self.internal_tools)} built-in + search tool + {len(self._loaded_tools)} loaded MCP tools")
+            
+            return tools
+        else:
+            # Full deferral: Return search tool + loaded tools only
+            tools = [TOOL_SEARCH_SCHEMA]
+            
+            for tool_name in self._loaded_tools:
+                if tool_name in self._tool_registry:
+                    tools.append(self._tool_registry[tool_name])
+            
+            return tools
     
     async def init_mcp_servers(self):
         """
@@ -343,7 +373,7 @@ class MCPAgent(Agent):
             
             # Collect all MCP tools
             total_mcp_tools = 0
-            for manager in self.mcp_managers:
+            for manager in self.tool_executor.mcp_managers:
                 mcp_tools = await manager.get_tools()
                 total_mcp_tools += len(mcp_tools)
                 for tool in mcp_tools:
@@ -356,19 +386,30 @@ class MCPAgent(Agent):
             # Calculate total tools including default tools
             total_tools = self._default_tools_count + total_mcp_tools
             
-            # Check if total tools >= threshold and enable deferred mode if needed
-            if total_tools >= self.tool_threshold and not self.deferred_tools and not self._auto_deferred:
-                if self.debug:
-                    logger.warning(f"[MCPAgent] [!] Total tools ({total_tools} = {self._default_tools_count} default + {total_mcp_tools} MCP) >= threshold ({self.tool_threshold})")
-                    logger.debug(f"[MCPAgent] [*] Auto-enabling deferred tool mode for dynamic selection...")
-                # Switch to deferred mode for dynamic tool loading
-                self.deferred_tools = True
-                self._auto_deferred = True
-                # Register all tools in the registry
-                self._register_all_tools_in_registry()
-            elif self.debug and not self.deferred_tools:
-                # Only print this if deferred mode wasn't enabled and isn't explicitly requested
-                logger.info(f"[MCPAgent] [OK] Total tools ({total_tools} = {self._default_tools_count} default + {total_mcp_tools} MCP) < threshold ({self.tool_threshold}) - all tools will be loaded normally")
+            # Determine deferred mode based on two conditions:
+            # 1. MCP tools > 20 → defer MCP tools only (keep built-in tools loaded)
+            # 2. Total tools > 45 → defer ALL tools (including built-in)
+            if not self.deferred_tools and not self._auto_deferred:
+                if total_mcp_tools > 20:
+                    # Condition 1: MCP tools > 20 → defer MCP tools only
+                    if self.debug:
+                        logger.warning(f"[MCPAgent] [!] MCP tools ({total_mcp_tools}) > 20 - enabling deferred mode for MCP tools only")
+                        logger.debug(f"[MCPAgent] [*] Built-in tools ({self._default_tools_count}) will remain loaded, MCP tools will use regex search")
+                    self.deferred_tools = True
+                    self._auto_deferred = True
+                    self._defer_mcp_only = True  # Flag to indicate MCP-only deferral
+                elif total_tools > 45:
+                    # Condition 2: Total tools > 45 → defer ALL tools
+                    if self.debug:
+                        logger.warning(f"[MCPAgent] [!] Total tools ({total_tools}) > 45 - enabling deferred mode for all tools")
+                        logger.debug(f"[MCPAgent] [*] Auto-enabling deferred tool mode for dynamic tool selection...")
+                    self.deferred_tools = True
+                    self._auto_deferred = True
+                    self._defer_mcp_only = False
+                    # Register all tools in the registry
+                    self._register_all_tools_in_registry()
+                elif self.debug:
+                    logger.info(f"[MCPAgent] [OK] Total tools ({total_tools} = {self._default_tools_count} default + {total_mcp_tools} MCP) - all tools will be loaded normally")
             elif self.debug and self.deferred_tools and not self._auto_deferred:
                 # User explicitly requested deferred mode
                 logger.info(f"[MCPAgent] [OK] Deferred mode explicitly enabled - {total_tools} total tools ({self._default_tools_count} default + {total_mcp_tools} MCP)")
@@ -376,7 +417,8 @@ class MCPAgent(Agent):
             self._mcp_initialized = True
             if self.debug:
                 logger.info("[MCPAgent] [OK] MCP servers initialized successfully")
-                logger.debug(f"[MCPAgent] [*] Tool summary: {self._default_tools_count} default + {total_mcp_tools} MCP = {total_tools} total")
+                mode = "MCP-only deferred" if self._defer_mcp_only else ("full deferred" if self.deferred_tools else "normal")
+                logger.debug(f"[MCPAgent] [*] Tool summary: {self._default_tools_count} default + {total_mcp_tools} MCP = {total_tools} total (mode: {mode})")
         except Exception as e:
             if self.debug:
                 logger.error(f"[MCPAgent] [!] Failed to initialize MCP servers: {e}")
@@ -628,7 +670,7 @@ class MCPAgent(Agent):
     async def chat(
         self, 
         user_input: str, 
-        session_id: str = "default",
+        session_id: str = None,
         create_if_missing: bool = True,
         stream: bool = False,
         streaming_funct: Optional[Callable[[str], None]] = None,
@@ -643,7 +685,7 @@ class MCPAgent(Agent):
         
         Args:
             user_input: The user's message
-            session_id: The session identifier
+            session_id: The session identifier (auto-generated if None)
             create_if_missing: Whether to create the session if it doesn't exist
             stream: Whether to stream the response
             streaming_funct: Callback for streaming tokens

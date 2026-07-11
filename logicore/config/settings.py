@@ -2,62 +2,44 @@
 Logicore Unified Configuration
 Single source of truth for all deployment and runtime settings.
 
-Priority: Environment Variables > logicore.toml > defaults
+Priority: Environment Variables (.env) > defaults
 
 Usage:
     from logicore.config.settings import settings
     print(settings.MODE)
     print(settings.OLLAMA_URL)
 """
-import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
-from dotenv import load_dotenv
 
-# Load .env file
-load_dotenv()
-
-# Load TOML config if available
-_toml_config: Dict[str, Any] = {}
-try:
-    import tomllib  # Python 3.11+
-    _toml_path = Path(__file__).parent.parent.parent / "logicore.toml"
-    if _toml_path.exists():
-        with open(_toml_path, "rb") as f:
-            _toml_config = tomllib.load(f)
-except ImportError:
-    try:
-        import tomli as tomllib  # Fallback for older Python
-        _toml_path = Path(__file__).parent.parent.parent / "logicore.toml"
-        if _toml_path.exists():
-            with open(_toml_path, "rb") as f:
-                _toml_config = tomllib.load(f)
-    except ImportError:
-        pass  # No TOML support
-
-
-def _get_toml(section: str, key: str, default=None):
-    """Get value from TOML config."""
-    if section in _toml_config:
-        return _toml_config[section].get(key, default)
-    return default
+# All environment access is owned by logicore.config.env. This module only
+# reads configuration through that single gateway (never os.environ directly).
+from .env import _raw, _expand, resolve, storage_root
 
 
 def _get_env(key: str, default: str = None, toml_section: str = None, toml_key: str = None) -> Optional[str]:
-    """Get setting with priority: env > toml > default."""
-    # First check environment
-    env_val = os.getenv(key)
-    if env_val is not None:
-        return env_val
-    
-    # Then check TOML
-    if toml_section and toml_key:
-        toml_val = _get_toml(toml_section, toml_key)
-        if toml_val is not None:
-            return str(toml_val)
-    
-    return default
+    """Get a string setting from the environment (TOML support removed)."""
+    return _raw(key, default)
+
+
+def _get_bool(key: str, default: bool = False, toml_section: str = None, toml_key: str = None) -> bool:
+    """Get a boolean setting."""
+    val = _raw(key)
+    if val is None:
+        val = str(default)
+    return str(val).lower() in ("true", "1", "yes", "on")
+
+
+def _get_int(key: str, default: int, toml_section: str = None, toml_key: str = None) -> int:
+    """Get an integer setting."""
+    val = _raw(key)
+    if val is None:
+        val = str(default)
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
 
 
 def _get_bool(key: str, default: bool = False, toml_section: str = None, toml_key: str = None) -> bool:
@@ -78,22 +60,50 @@ def _get_int(key: str, default: int, toml_section: str = None, toml_key: str = N
 
 
 def get_api_key(provider: str):
-    """Get API key for a provider."""
+    """Get API key for a provider (provider-native env names)."""
     if provider == "groq":
-        return os.getenv("GROQ_API_KEY")
+        return _raw("GROQ_API_KEY")
     elif provider == "gemini":
-        return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        return _raw("GEMINI_API_KEY") or _raw("GOOGLE_API_KEY")
     elif provider == "openai":
-        return os.getenv("OPENAI_API_KEY")
+        return _raw("OPENAI_API_KEY")
     elif provider == "ollama":
-        return os.getenv("OLLAMA_API_KEY")
+        return _raw("OLLAMA_API_KEY")
     elif provider == "azure":
-        return os.getenv("AZURE_API_KEY")
+        return _raw("AZURE_API_KEY")
     elif provider == "exa":
-        return os.getenv("EXA_API_KEY")
+        return _raw("EXA_API_KEY")
     elif provider == "custom":
-        return os.getenv("CUSTOM_PROVIDER_API_KEY") or os.getenv("CUSTOM_API_KEY")
+        return _raw("CUSTOM_PROVIDER_API_KEY") or _raw("CUSTOM_API_KEY")
     return None
+
+
+@dataclass
+class PathSettings:
+    """Resolved, on-disk locations for all persisted framework state.
+
+    Every path is derived from a single master root (``LOGICORE_STORAGE_ROOT``,
+    default ``~/.logicore``) unless an explicit per-directory override env var
+    is supplied. This is the canonical source the rest of the framework uses
+    instead of building ``cwd/.logicore/...`` paths itself.
+    """
+
+    storage_root: Path
+    memory_dir: Path
+    tasks_dir: Path
+    sessions_dir: Path
+    plans_dir: Path
+    snapshots_dir: Path
+    assets_dir: Path
+    lancedb_path: Path
+    database_url: str
+    db_password: str
+    snapshot_enabled: bool
+    media_root: str
+    media_s3_endpoint: Optional[str]
+    media_s3_access_key: Optional[str]
+    media_s3_secret_key: Optional[str]
+    media_s3_region: Optional[str]
 
 
 @dataclass
@@ -130,10 +140,6 @@ class AgentrySettings:
         return self.UI_DIR / "media"
     
     @property
-    def DB_PATH(self) -> Path:
-        return self.UI_DIR / "scratchy_users.db"
-    
-    @property
     def LANCEDB_PATH(self) -> str:
         """LanceDB storage path (local or cloud)."""
         # Env > TOML > Default
@@ -153,16 +159,10 @@ class AgentrySettings:
     @property
     def CORS_ORIGINS(self) -> List[str]:
         """Allowed CORS origins."""
-        # Try env var first
         origins = _get_env("CORS_ORIGINS")
         if origins:
             return [o.strip() for o in origins.split(",")]
-            
-        # Try TOML
-        toml_origins = _get_toml("server", "cors_origins")
-        if toml_origins and isinstance(toml_origins, list):
-            return toml_origins
-            
+
         return [
             f"http://localhost:{self.PORT}",
             f"http://localhost:{self.FRONTEND_PORT}",
@@ -340,7 +340,69 @@ class AgentrySettings:
                 errors.append("SUPABASE_KEY is required in cloud mode")
         
         return errors
-    
+
+    # ==========================================================================
+    # STORAGE (3-tier session persistence)
+    # ==========================================================================
+
+    @property
+    def paths(self) -> "PathSettings":
+        """Canonical, resolved locations for all persisted framework state.
+
+        Every path is derived from ``LOGICORE_STORAGE_ROOT`` (default
+        ``~/.logicore``) with optional per-directory overrides. This is what
+        the rest of the framework should use instead of building
+        ``cwd/.logicore/...`` paths itself.
+        """
+        root = storage_root()
+        memory = _raw("LOGICORE_MEMORY_DIR")
+        tasks = _raw("LOGICORE_TASKS_DIR")
+        sessions = _raw("LOGICORE_SESSIONS_DIR")
+        plans = _raw("LOGICORE_PLANS_DIR")
+        snapshots = _raw("LOGICORE_SNAPSHOTS_DIR")
+        assets = _raw("LOGICORE_ASSETS_DIR")
+        lancedb = _raw("LOGICORE_LANCEDB_PATH")
+        db_url = _raw("LOGICORE_STORAGE_DB_URL") or f"sqlite:///{root / 'database' / 'logicore.db'}"
+        return PathSettings(
+            storage_root=root,
+            memory_dir=_expand(memory) if memory else root / "memory",
+            tasks_dir=_expand(tasks) if tasks else root / "tasks",
+            sessions_dir=_expand(sessions) if sessions else root / "sessions",
+            plans_dir=_expand(plans) if plans else root / "plans",
+            snapshots_dir=_expand(snapshots) if snapshots else root / "snapshots",
+            assets_dir=_expand(assets) if assets else root / "assets",
+            lancedb_path=_expand(lancedb) if lancedb else root / "lancedb_data",
+            database_url=db_url,
+            db_password=_raw("LOGICORE_STORAGE_DB_PASSWORD") or "",
+            snapshot_enabled=_get_bool("LOGICORE_STORAGE_SNAPSHOT_ENABLED", True),
+            media_root=_raw("LOGICORE_STORAGE_MEDIA_ROOT") or str(root / "assets"),
+            media_s3_endpoint=_raw("LOGICORE_STORAGE_S3_ENDPOINT") or None,
+            media_s3_access_key=_raw("LOGICORE_STORAGE_S3_ACCESS_KEY") or None,
+            media_s3_secret_key=_raw("LOGICORE_STORAGE_S3_SECRET_KEY") or None,
+            media_s3_region=_raw("LOGICORE_STORAGE_S3_REGION") or None,
+        )
+
+    # --- Backwards-compatible storage accessors (delegating to ``paths``) -----
+    @property
+    def STORAGE_ROOT(self) -> str:
+        """Base directory for session persistence (~/.logicore)."""
+        return str(self.paths.storage_root)
+
+    @property
+    def STORAGE_DB_URL(self) -> str:
+        """Database URL. SQLite if a path, PostgreSQL if postgres://..."""
+        return self.paths.database_url
+
+    @property
+    def STORAGE_SNAPSHOT_ENABLED(self) -> bool:
+        """Enable async snapshot worker (JSON manifests)."""
+        return self.paths.snapshot_enabled
+
+    @property
+    def STORAGE_MEDIA_ROOT(self) -> str:
+        """Binary media root. Local path or s3://bucket/prefix."""
+        return self.paths.media_root
+
     def to_dict(self) -> dict:
         """Convert settings to dictionary (for debugging)."""
         return {
@@ -353,6 +415,10 @@ class AgentrySettings:
             "LANCEDB_PATH": self.LANCEDB_PATH,
             "EMBEDDING_PROVIDER": self.EMBEDDING_PROVIDER,
             "EMBEDDING_MODEL": self.EMBEDDING_MODEL,
+            "STORAGE_ROOT": self.STORAGE_ROOT,
+            "STORAGE_DB_URL": self.STORAGE_DB_URL or "(sqlite default)",
+            "STORAGE_SNAPSHOT_ENABLED": self.STORAGE_SNAPSHOT_ENABLED,
+            "STORAGE_MEDIA_ROOT": self.STORAGE_MEDIA_ROOT or "(local default)",
             "is_cloud": self.is_cloud,
             "is_production": self.is_production,
         }
@@ -365,6 +431,33 @@ class AgentrySettings:
         for key, value in self.to_dict().items():
             print(f"  {key:25} = {value}")
         print("="*60 + "\n")
+
+    def create_storage(self):
+        """Create and initialize a StorageManager from current settings."""
+        from logicore.storage import StorageManager
+        from logicore.storage.config import StorageConfig, DatabaseConfig, SnapshotConfig, MediaConfig
+        from pathlib import Path
+
+        root = Path(self.STORAGE_ROOT)
+        config = StorageConfig(
+            database=DatabaseConfig(
+                url=self.STORAGE_DB_URL or f"sqlite:///{root / 'database' / 'logicore.db'}",
+            ),
+            snapshot=SnapshotConfig(
+                enabled=self.STORAGE_SNAPSHOT_ENABLED,
+                root=str(root / "snapshots"),
+            ),
+            media=MediaConfig(
+                root=self.STORAGE_MEDIA_ROOT or str(root / "assets"),
+                endpoint_url=self.paths.media_s3_endpoint,
+                aws_access_key_id=self.paths.media_s3_access_key,
+                aws_secret_access_key=self.paths.media_s3_secret_key,
+                region=self.paths.media_s3_region,
+            ),
+        )
+        manager = StorageManager(config)
+        manager.initialize()
+        return manager
 
 
 # Singleton instance

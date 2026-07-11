@@ -1,6 +1,6 @@
-import os
 from typing import Optional
 from .base import LLMProvider
+from logicore.config.settings import get_api_key
 
 
 class OpenAIProvider(LLMProvider):
@@ -18,7 +18,7 @@ class OpenAIProvider(LLMProvider):
             raise ImportError("openai package not installed. Run: pip install openai")
 
         self.model_name = model_name
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.api_key = api_key or get_api_key("openai")
         if not self.api_key:
             raise ValueError("OpenAI API key is required. Set api_key or OPENAI_API_KEY env var.")
         self.client = OpenAI(api_key=self.api_key, timeout=120.0, **kwargs)

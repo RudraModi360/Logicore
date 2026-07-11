@@ -228,13 +228,13 @@ You are ready to help. Use your tools effectively.
     
     # --- Public API ---
     
-    async def chat(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", stream: bool = False, generate_walkthrough: bool = False, **kwargs) -> str:
+    async def chat(self, message: Union[str, List[Dict[str, Any]]], session_id: str = None, stream: bool = False, generate_walkthrough: bool = False, **kwargs) -> str:
         """
         Send a message and get a response.
         
         Args:
             message: The user's message (str or list with multimodal content)
-            session_id: Session ID for conversation context
+            session_id: Session ID for conversation context (auto-generated if None)
             stream: Whether to stream the response
             generate_walkthrough: Provide a summary of execution at the end
             
@@ -243,7 +243,7 @@ You are ready to help. Use your tools effectively.
         """
         return await self._agent.chat(message, session_id=session_id, stream=stream, generate_walkthrough=generate_walkthrough, **kwargs)
     
-    async def stream_run(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", **kwargs) -> "AgentRunResult":
+    async def stream_run(self, message: Union[str, List[Dict[str, Any]]], session_id: str = None, **kwargs) -> "AgentRunResult":
         """
         Start a streaming run and return an ``AgentRunResult``.
 
@@ -251,7 +251,7 @@ You are ready to help. Use your tools effectively.
         """
         return await self._agent.stream_run(message, session_id=session_id, **kwargs)
 
-    async def stream(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", **kwargs):
+    async def stream(self, message: Union[str, List[Dict[str, Any]]], session_id: str = None, **kwargs):
         """Async generator yielding :class:`StreamEvent` objects for a run."""
         async for ev in self._agent.stream(message, session_id=session_id, **kwargs):
             yield ev
@@ -260,7 +260,7 @@ You are ready to help. Use your tools effectively.
         """Cancel an in-flight streaming run."""
         self._agent.cancel_run(run)
 
-    def stream_sync(self, message: Union[str, List[Dict[str, Any]]], session_id: str = "default", on_event: Callable = None, **kwargs) -> str:
+    def stream_sync(self, message: Union[str, List[Dict[str, Any]]], session_id: str = None, on_event: Callable = None, **kwargs) -> str:
         """
         Synchronous streaming — no server or async framework required.
 
@@ -269,13 +269,13 @@ You are ready to help. Use your tools effectively.
         """
         return self._agent.stream_sync(message, session_id=session_id, on_event=on_event, **kwargs)
 
-    def chat_sync(self, message: str, session_id: str = "default", generate_walkthrough: bool = False) -> str:
+    def chat_sync(self, message: str, session_id: str = None, generate_walkthrough: bool = False) -> str:
         """
         Synchronous version of chat.
         
         Args:
             message: The user's message
-            session_id: Session ID for conversation context
+            session_id: Session ID for conversation context (auto-generated if None)
             generate_walkthrough: Provide a summary of execution at the end
             
         Returns:
