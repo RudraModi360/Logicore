@@ -8,7 +8,7 @@ from logicore import Agent
 from logicore.storage import create_storage
 
 storage = create_storage(
-    db_url="postgresql://postgres:q78bJ0Urqad17p7B@db.ydvizrwvycdzqtrkpuq.supabase.co:5432/postgres",
+    db_url=os.environ.get("LOGICORE_DB_URL", ""),
     snapshot_enabled=True,
 )
 agent = Agent(provider="ollama", model="gpt-oss:20b-cloud", storage=storage, debug=True)
