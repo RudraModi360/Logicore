@@ -135,9 +135,25 @@ class OllamaGateway(ProviderGateway):
 
         try:
             kwargs = dict(model=self.model_name, messages=filtered, tools=sdk_tools)
+            options = {}
             if max_tokens:
-                kwargs["options"] = {"num_predict": max_tokens}
-            
+                options["num_predict"] = max_tokens
+            # Pass context window size to Ollama (default 4096 is too small for most agents)
+            ctx = getattr(self, "context_window", None)
+            if ctx is None:
+                try:
+                    from logicore.runtime.context.token_estimator import get_model_context_window
+                    ctx = get_model_context_window(self.model_name)
+                except Exception:
+                    pass
+            if ctx:
+                options["num_ctx"] = int(ctx)
+            if options:
+                kwargs["options"] = options
+
+            # Keep model resident for KV-cache reuse across turns
+            kwargs["keep_alive"] = getattr(self, "keep_alive", -1)
+
             # Enable thinking if configured
             think = getattr(self, "think", None)
             if think is not None:
@@ -189,10 +205,25 @@ class OllamaGateway(ProviderGateway):
             else:
                 _gateway_debug(self, f"Response: {len(content)} chars content, no tool calls")
 
+            usage = None
+            prompt_eval = getattr(response, "prompt_eval_count", None)
+            eval_count = getattr(response, "eval_count", None)
+            _gateway_debug(self, f"Ollama response: prompt_eval_count={prompt_eval} eval_count={eval_count}")
+            if prompt_eval is not None or eval_count is not None:
+                usage = {}
+                if prompt_eval is not None:
+                    usage["prompt_tokens"] = prompt_eval
+                if eval_count is not None:
+                    usage["completion_tokens"] = eval_count
+                if "prompt_tokens" in usage and "completion_tokens" in usage:
+                    usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            _gateway_debug(self, f"Ollama extracted usage: {usage}")
+
             return NormalizedMessage(
                 role=message.get("role", "assistant"),
                 content=content,
                 tool_calls=message.get("tool_calls", []),
+                usage=usage,
             )
         except Exception as e:
             error_msg = str(e).lower()
@@ -216,10 +247,28 @@ class OllamaGateway(ProviderGateway):
                 message = response["message"]
                 if not message.get("content") and not message.get("tool_calls"):
                     raise ValueError("Ollama retry returned empty message with no content or tool calls")
+
+                usage = None
+                raw_usage = response.get("usage") or {}
+                if raw_usage:
+                    usage = {k: v for k, v in raw_usage.items() if k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+                prompt_eval = response.get("prompt_eval_count")
+                eval_count = response.get("eval_count")
+                if prompt_eval is not None or eval_count is not None:
+                    if usage is None:
+                        usage = {}
+                    if "prompt_tokens" not in usage and prompt_eval is not None:
+                        usage["prompt_tokens"] = prompt_eval
+                    if "completion_tokens" not in usage and eval_count is not None:
+                        usage["completion_tokens"] = eval_count
+                    if "prompt_tokens" in usage and "completion_tokens" in usage:
+                        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+
                 return NormalizedMessage(
                     role=message.get("role", "assistant"),
                     content=message.get("content", ""),
                     tool_calls=message.get("tool_calls", []),
+                    usage=usage,
                 )
             if "empty" in error_msg or "invalid" in error_msg:
                 if "must be a string" not in error_msg:
@@ -236,7 +285,7 @@ class OllamaGateway(ProviderGateway):
         sdk_tools = self._simplify_tools(tools, has_images)
         # Queue carries dicts: {"kind": "token"|"event", ...} or None sentinel.
         item_queue = asyncio.Queue()
-        result_holder = {"message": None, "error": None}
+        result_holder = {"message": None, "error": None, "usage": None}
 
         loop = asyncio.get_event_loop()
         
@@ -249,12 +298,28 @@ class OllamaGateway(ProviderGateway):
         def sync_stream(stream_messages):
             full_content = ""
             tool_calls_result = []
+            stream_usage = None
 
             try:
                 kwargs = dict(model=self.model_name, messages=stream_messages, tools=sdk_tools, stream=True)
+                options = {}
                 if max_tokens:
-                    kwargs["options"] = {"num_predict": max_tokens}
+                    options["num_predict"] = max_tokens
+                ctx = getattr(self, "context_window", None)
+                if ctx is None:
+                    try:
+                        from logicore.runtime.context.token_estimator import get_model_context_window
+                        ctx = get_model_context_window(self.model_name)
+                    except Exception:
+                        pass
+                if ctx:
+                    options["num_ctx"] = int(ctx)
+                if options:
+                    kwargs["options"] = options
                 
+                # Keep model resident for KV-cache reuse across turns
+                kwargs["keep_alive"] = getattr(self, "keep_alive", -1)
+
                 # Enable thinking if configured
                 if think is not None:
                     kwargs["think"] = think
@@ -267,6 +332,22 @@ class OllamaGateway(ProviderGateway):
                         msg = chunk["message"]
                     elif hasattr(chunk, "message"):
                         msg = chunk.message
+
+                    # Capture usage from stream chunks (Ollama provides this)
+                    if isinstance(chunk, dict):
+                        pe = chunk.get("prompt_eval_count")
+                        ec = chunk.get("eval_count")
+                    else:
+                        pe = getattr(chunk, "prompt_eval_count", None)
+                        ec = getattr(chunk, "eval_count", None)
+                    if pe is not None or ec is not None:
+                        stream_usage = {}
+                        if pe is not None:
+                            stream_usage["prompt_tokens"] = pe
+                        if ec is not None:
+                            stream_usage["completion_tokens"] = ec
+                        if "prompt_tokens" in stream_usage and "completion_tokens" in stream_usage:
+                            stream_usage["total_tokens"] = stream_usage["prompt_tokens"] + stream_usage["completion_tokens"]
 
                     if msg is not None:
                         token = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
@@ -300,6 +381,7 @@ class OllamaGateway(ProviderGateway):
                 if tool_calls_result:
                     final["tool_calls"] = tool_calls_result
                 result_holder["message"] = final
+                result_holder["usage"] = stream_usage
             except Exception as e:
                 result_holder["error"] = e
             finally:
@@ -345,10 +427,22 @@ class OllamaGateway(ProviderGateway):
                 message = response["message"]
                 if not message.get("content") and not message.get("tool_calls"):
                     raise ValueError("Ollama sanitized retry returned empty message with no content or tool calls")
+                retry_usage = None
+                pe = response.get("prompt_eval_count")
+                ec = response.get("eval_count")
+                if pe is not None or ec is not None:
+                    retry_usage = {}
+                    if pe is not None:
+                        retry_usage["prompt_tokens"] = pe
+                    if ec is not None:
+                        retry_usage["completion_tokens"] = ec
+                    if "prompt_tokens" in retry_usage and "completion_tokens" in retry_usage:
+                        retry_usage["total_tokens"] = retry_usage["prompt_tokens"] + retry_usage["completion_tokens"]
                 return NormalizedMessage(
                     role=message.get("role", "assistant"),
                     content=message.get("content", ""),
                     tool_calls=message.get("tool_calls", []),
+                    usage=retry_usage,
                 )
             if ("support" in error_msg and "image" in error_msg) or "must be a string" in error_msg:
                 executor.shutdown(wait=False)
@@ -364,4 +458,5 @@ class OllamaGateway(ProviderGateway):
             role=msg.get("role", "assistant"),
             content=msg.get("content", ""),
             tool_calls=msg.get("tool_calls", []),
+            usage=result_holder.get("usage"),
         )

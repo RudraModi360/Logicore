@@ -127,7 +127,7 @@ SUMMARY:"""
         """
         self.config = config
         self.llm = llm_provider
-        from logicore.context_engine.token_estimator import TokenEstimator
+        from logicore.runtime.context.token_estimator import TokenEstimator
         self._estimator = token_counter if isinstance(token_counter, TokenEstimator) else TokenEstimator(token_counter)
         self._token_counter = self._estimator.count_tokens
         

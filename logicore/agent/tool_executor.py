@@ -8,15 +8,33 @@ execution path, replacing the dual execution pattern.
 import time
 import json
 import inspect
-import asyncio
-from typing import Dict, Any, Callable, List, Optional, Union
-from datetime import datetime
+from enum import Enum
+from typing import Dict, Any, Callable, List, Optional
 import logging
 
 from logicore.tools import execute_tool, SAFE_TOOLS
 from logicore.tools.dedup import result_cache, semantic_analyzer, hash_tool_call
 
 logger = logging.getLogger(__name__)
+
+
+class ApprovalDecision(Enum):
+    """
+    Return value contract for an ``on_tool_approval`` callback.
+
+    Callbacks may return:
+    - ``ApprovalDecision.DENY``          -> block this call
+    - ``ApprovalDecision.ALLOW_ONCE``   -> allow this call only (re-prompt next time)
+    - ``ApprovalDecision.ALLOW_SESSION`` -> allow and cache for the rest of the session
+
+    For backward compatibility a callback may also return a plain ``bool``
+    (``True`` == ALLOW_ONCE, ``False`` == DENY) or a ``dict`` of mutated args
+    (interpreted as ALLOW_ONCE with the returned args substituted).
+    """
+
+    DENY = "deny"
+    ALLOW_ONCE = "allow_once"
+    ALLOW_SESSION = "allow_session"
 
 
 # Tools that share a single trust boundary: they all send data to a
@@ -106,22 +124,49 @@ class ToolExecutor:
         """Set execution callbacks."""
         self.callbacks.update(kwargs)
     
+    @staticmethod
+    def _normalize_approval(result, args: Dict[str, Any]) -> tuple:
+        """
+        Normalize a callback return value into (approved, approve_all, args).
+
+        - ``ApprovalDecision`` -> explicit decision (+ session grant flag)
+        - ``bool``             -> True == allow once, False == deny
+        - ``dict``             -> allow once with the dict substituted as args
+        - anything else        -> truthiness used as allow-once
+        """
+        if isinstance(result, ApprovalDecision):
+            if result is ApprovalDecision.DENY:
+                return False, False, args
+            if result is ApprovalDecision.ALLOW_SESSION:
+                return True, True, args
+            return True, False, args
+        if isinstance(result, bool):
+            return result, False, args
+        if isinstance(result, dict):
+            # Backward-compatible: a dict means "approved, use these args".
+            return True, False, result
+        return bool(result), False, args
+
     async def _default_approval_callback(
         self,
         session_id: str,
         tool_name: str,
         args: Dict[str, Any],
         group: Optional[str] = None,
-    ) -> bool:
+    ) -> ApprovalDecision:
         """
         Default approval callback that prompts user in terminal.
 
-        Used when no on_tool_approval callback is configured.
-        Prompts user with tool name and args, asks for yes/no approval.
+        Used when no on_tool_approval callback is configured. Offers three
+        choices:
 
-        When ``group`` is provided the prompt is framed as a one-time grant
-        for the whole session (e.g. allowing internet/egress access), so the
-        agent does not have to ask again for the remainder of the session.
+        - ``y``  allow this single call (re-prompt next time)
+        - ``a``  allow and remember for the rest of the session (no re-prompt)
+        - ``n``  deny
+
+        When ``group`` is the network-egress group the grant is inherently
+        session-scoped, so ``y`` maps to a session grant (it will not ask
+        again this session) and only yes/no is offered.
         """
         args_preview = json.dumps(args, default=str)[:200] if args else "{}"
 
@@ -130,32 +175,49 @@ class ToolExecutor:
             print(f"INTERNET ACCESS REQUESTED (session: {session_id})")
             print(f"{'='*60}")
             print(f"The agent wants to use web tools (e.g. `{tool_name}`) which send")
-            print(f"your query to a third-party API. Allow this for the rest of the")
-            print(f"current session? It will not ask again this session.")
+            print("your query to a third-party API. Allow this for the rest of the")
+            print("current session? It will not ask again this session.")
             print(f"Args: {args_preview}")
             print(f"{'='*60}")
             prompt = "Allow internet access for this session? (yes/no): "
-        else:
-            print(f"\n{'='*60}")
-            print(f"TOOL APPROVAL REQUIRED")
-            print(f"{'='*60}")
-            print(f"Tool: {tool_name}")
-            print(f"Args: {args_preview}")
-            print(f"{'='*60}")
-            prompt = "Approve? (yes/no): "
+            while True:
+                try:
+                    response = input(prompt).strip().lower()
+                    if response in ('yes', 'y'):
+                        return ApprovalDecision.ALLOW_SESSION
+                    elif response in ('no', 'n'):
+                        return ApprovalDecision.DENY
+                    else:
+                        print("Please enter 'yes' or 'no'")
+                except (EOFError, KeyboardInterrupt):
+                    print("\nApproval denied (no input)")
+                    return ApprovalDecision.DENY
+
+        print(f"\n{'='*60}")
+        print("TOOL APPROVAL REQUIRED")
+        print(f"{'='*60}")
+        print(f"Tool: {tool_name}")
+        print(f"Args: {args_preview}")
+        print("  [y] Yes            - allow just this call")
+        print("  [a] Yes, this session - allow and don't ask again this session")
+        print("  [n] No             - deny")
+        print(f"{'='*60}")
+        prompt = "Approve? (y/a/n): "
 
         while True:
             try:
                 response = input(prompt).strip().lower()
                 if response in ('yes', 'y'):
-                    return True
+                    return ApprovalDecision.ALLOW_ONCE
+                elif response in ('all', 'a'):
+                    return ApprovalDecision.ALLOW_SESSION
                 elif response in ('no', 'n'):
-                    return False
+                    return ApprovalDecision.DENY
                 else:
-                    print("Please enter 'yes' or 'no'")
+                    print("Please enter 'y', 'a', or 'n'")
             except (EOFError, KeyboardInterrupt):
                 print("\nApproval denied (no input)")
-                return False
+                return ApprovalDecision.DENY
 
     def _approval_group(self, name: str) -> Optional[str]:
         """
@@ -270,30 +332,33 @@ class ToolExecutor:
         approved = True
         if self.requires_approval(name):
             group = self._approval_group(name)
+            # Network-egress tools share a group key; everything else is keyed
+            # per-tool so a "yes, this session" grant only covers that tool.
+            cache_key = group if group is not None else f"tool:{name}"
             session_cache = self._approval_cache.get(session_id)
-            cached = session_cache.get(group) if (group is not None and session_cache is not None) else None
+            cached = session_cache.get(cache_key) if session_cache is not None else None
 
             if cached is not None:
                 # Reuse the per-session decision — no re-prompt.
                 approved = cached
                 if self.debug:
                     logger.debug(
-                        f"[ToolExecutor] Reusing session approval={approved} for group '{group}'"
+                        f"[ToolExecutor] Reusing session approval={approved} for '{cache_key}'"
                     )
             elif self.callbacks.get("on_tool_approval"):
                 approval_result = await self.callbacks["on_tool_approval"](session_id, name, args)
-                if isinstance(approval_result, dict):
-                    args = approval_result
-                    approved = True
-                else:
-                    approved = bool(approval_result)
-                if group is not None:
-                    self._approval_cache.setdefault(session_id, {})[group] = approved
+                approved, approve_all, args = self._normalize_approval(approval_result, args)
+                # Cache when: a grouped decision was made (incl. a cached
+                # denial, so the network group keeps denying silently), or the
+                # user explicitly granted the tool for the whole session.
+                if group is not None or (approved and approve_all):
+                    self._approval_cache.setdefault(session_id, {})[cache_key] = approved
             else:
                 # No approval callback configured - use default terminal prompt
-                approved = await self._default_approval_callback(session_id, name, args, group)
-                if group is not None:
-                    self._approval_cache.setdefault(session_id, {})[group] = approved
+                approval_result = await self._default_approval_callback(session_id, name, args, group)
+                approved, approve_all, _ = self._normalize_approval(approval_result, args)
+                if group is not None or (approved and approve_all):
+                    self._approval_cache.setdefault(session_id, {})[cache_key] = approved
         
         if not approved:
             return result or self.normalize_tool_result(name, {"success": False, "error": "Denied by user"})

@@ -70,6 +70,20 @@ GUIDELINES:
 6. Include relevant tags for fuzzy matching
 7. If nothing new to remember, return an empty list
 
+GROUNDING (CRITICAL - prevents useless/misleading memories):
+8. The `body` MUST contain the actual substantive information (the concrete
+   facts, values, answers, or decisions) - NOT a restatement of the user's
+   question and NOT just the current date/timestamp.
+9. The `description` MUST accurately summarize what is IN the body. Never
+   describe content that the body does not actually contain.
+10. For time-sensitive/volatile facts (forecasts, statuses, prices), the body
+    MUST include BOTH the actual value AND the date it is valid for
+    (e.g. "As of 2026-06-15, rain probability in Vadodara is 40%").
+11. Do NOT create a memory if the conversation does not actually contain the
+    substantive content - a memory with an empty or trivial body is worse than
+    no memory. Set confidence to reflect real certainty (a bare timestamp is
+    not a high-confidence fact).
+
 OUTPUT FORMAT:
 Return a JSON array of memory operations. Each operation is one of:
 - {"action": "create", "filename": "name.md", "metadata": {...}, "body": "..."}
@@ -694,11 +708,49 @@ class ExtractionWorker:
                 tokens.add(word)
         return tokens
 
+    @staticmethod
+    def _is_grounded(body: str) -> bool:
+        """
+        Guard against ungrounded memories (GAP-2): reject bodies that carry no
+        substantive content (empty, whitespace, or nothing more than a bare
+        date/timestamp). This is a data-integrity check, not content extraction
+        - the LLM still decides *what* to store.
+        """
+        text = (body or "").strip()
+        if len(text) < 15:
+            return False
+        # Strip ISO dates / timestamps and common date words; if nothing of
+        # substance remains, the body is just a timestamp -> not grounded.
+        residual = re.sub(
+            r"\d{4}-\d{2}-\d{2}(?:[ t]\d{2}:\d{2}(?::\d{2})?)?", " ", text, flags=re.I
+        )
+        residual = re.sub(
+            r"\b(today|todays|today's|date|time|timestamp|utc|current|is|the|now|"
+            r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+            r"january|february|march|april|may|june|july|august|september|"
+            r"october|november|december)\b",
+            " ",
+            residual,
+            flags=re.I,
+        )
+        residual = re.sub(r"[^a-z0-9]+", "", residual, flags=re.I)
+        return len(residual) >= 8
+
     async def _create_memory(
         self, filename: str, op: _Operation
     ) -> Optional[MemoryMetadata]:
         metadata = await self._resolve_metadata(op)
         body = op.body or ""
+
+        # GAP-2 grounding guard: skip memories with no substantive body so we
+        # never persist a description that promises content the body lacks.
+        if not self._is_grounded(body):
+            if self.debug:
+                logger.debug(
+                    f"[ExtractionWorker] Skipping ungrounded memory "
+                    f"'{filename}' (body has no substantive content)"
+                )
+            return None
 
         # Update-detection: if a near-duplicate already exists, update it
         # instead of creating a redundant file (memory architecture 5.1).

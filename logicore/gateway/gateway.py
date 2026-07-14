@@ -18,8 +18,6 @@ from .base import (
     _gateway_debug,
     _dispatch_token,
     _dispatch_stream_text,
-    _extract_cache_control,
-    _strip_cache_annotations,
     _convert_local_images_to_base64,
     _normalize_openai_tool_calls,
     _accumulate_openai_stream_tool_calls,

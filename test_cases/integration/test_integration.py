@@ -16,7 +16,7 @@ from logicore.session.manager import SessionManager, SessionStorage
 from logicore.config.prompts import get_system_prompt
 from logicore.runtime.config import RuntimeConfig
 from logicore.providers.availability import ModelAvailabilityService
-from logicore.context_engine.token_estimator import TokenEstimator, estimate_tokens
+from logicore.runtime.context.token_estimator import TokenEstimator, estimate_tokens
 from logicore.mcp.client import MCPClientManager
 
 

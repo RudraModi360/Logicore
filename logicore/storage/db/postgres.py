@@ -91,6 +91,8 @@ class PostgresBackend(DatabaseBackend):
                     reasoning_tokens INTEGER DEFAULT 0,
                     tool_calls INTEGER DEFAULT 0,
                     api_calls INTEGER DEFAULT 0,
+                    estimated_cost_usd REAL DEFAULT 0,
+                    cost_status TEXT DEFAULT 'unknown',
                     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                         ON DELETE CASCADE
                 )
@@ -249,13 +251,15 @@ class PostgresBackend(DatabaseBackend):
 
     def save_telemetry(self, session_id, input_tokens=0, output_tokens=0,
                        cache_read_tokens=0, cache_write_tokens=0,
-                       reasoning_tokens=0, tool_calls=0, api_calls=0):
+                       reasoning_tokens=0, tool_calls=0, api_calls=0,
+                       estimated_cost_usd=0, cost_status="unknown"):
         with self._conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO session_telemetry
                    (session_id, input_tokens, output_tokens, cache_read_tokens,
-                    cache_write_tokens, reasoning_tokens, tool_calls, api_calls)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    cache_write_tokens, reasoning_tokens, tool_calls, api_calls,
+                    estimated_cost_usd, cost_status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (session_id) DO UPDATE SET
                      input_tokens = session_telemetry.input_tokens + EXCLUDED.input_tokens,
                      output_tokens = session_telemetry.output_tokens + EXCLUDED.output_tokens,
@@ -263,9 +267,16 @@ class PostgresBackend(DatabaseBackend):
                      cache_write_tokens = session_telemetry.cache_write_tokens + EXCLUDED.cache_write_tokens,
                      reasoning_tokens = session_telemetry.reasoning_tokens + EXCLUDED.reasoning_tokens,
                      tool_calls = session_telemetry.tool_calls + EXCLUDED.tool_calls,
-                     api_calls = session_telemetry.api_calls + EXCLUDED.api_calls""",
+                     api_calls = session_telemetry.api_calls + EXCLUDED.api_calls,
+                     estimated_cost_usd = session_telemetry.estimated_cost_usd + EXCLUDED.estimated_cost_usd,
+                     cost_status = CASE
+                       WHEN EXCLUDED.cost_status = 'actual' THEN 'actual'
+                       WHEN EXCLUDED.cost_status = 'estimated' AND session_telemetry.cost_status != 'actual' THEN 'estimated'
+                       ELSE session_telemetry.cost_status
+                     END""",
                 (session_id, input_tokens, output_tokens, cache_read_tokens,
-                 cache_write_tokens, reasoning_tokens, tool_calls, api_calls),
+                 cache_write_tokens, reasoning_tokens, tool_calls, api_calls,
+                 estimated_cost_usd, cost_status),
             )
             self._conn.commit()
 

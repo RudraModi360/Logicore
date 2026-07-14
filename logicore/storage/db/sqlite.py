@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from .base import DatabaseBackend
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 class SqliteBackend(DatabaseBackend):
@@ -93,6 +93,8 @@ class SqliteBackend(DatabaseBackend):
                     reasoning_tokens INTEGER DEFAULT 0,
                     tool_calls INTEGER DEFAULT 0,
                     api_calls INTEGER DEFAULT 0,
+                    estimated_cost_usd REAL DEFAULT 0,
+                    cost_status TEXT DEFAULT 'unknown',
                     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                         ON DELETE CASCADE
                 )
@@ -116,6 +118,27 @@ class SqliteBackend(DatabaseBackend):
                 cursor.execute(
                     "INSERT INTO schema_version (version) VALUES (?)",
                     (CURRENT_SCHEMA_VERSION,),
+                )
+
+            # Migrations for existing databases
+            cursor.execute("SELECT MAX(version) as v FROM schema_version")
+            row = cursor.fetchone()
+            current_version = row[0] if row and row[0] else 0
+
+            if current_version < 2:
+                for col, col_type, default in [
+                    ("estimated_cost_usd", "REAL", "0"),
+                    ("cost_status", "TEXT", "'unknown'"),
+                ]:
+                    try:
+                        cursor.execute(
+                            f"ALTER TABLE session_telemetry ADD COLUMN {col} {col_type} DEFAULT {default}"
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                cursor.execute(
+                    "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+                    (2,),
                 )
 
             conn.commit()
@@ -297,14 +320,17 @@ class SqliteBackend(DatabaseBackend):
         reasoning_tokens: int = 0,
         tool_calls: int = 0,
         api_calls: int = 0,
+        estimated_cost_usd: float = 0,
+        cost_status: str = "unknown",
     ) -> None:
         """Save or update telemetry counters for a session."""
         with self._get_connection() as conn:
             conn.execute(
                 """INSERT INTO session_telemetry
                    (session_id, input_tokens, output_tokens, cache_read_tokens,
-                    cache_write_tokens, reasoning_tokens, tool_calls, api_calls)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    cache_write_tokens, reasoning_tokens, tool_calls, api_calls,
+                    estimated_cost_usd, cost_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(session_id) DO UPDATE SET
                      input_tokens = input_tokens + excluded.input_tokens,
                      output_tokens = output_tokens + excluded.output_tokens,
@@ -312,11 +338,18 @@ class SqliteBackend(DatabaseBackend):
                      cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
                      reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
                      tool_calls = tool_calls + excluded.tool_calls,
-                     api_calls = api_calls + excluded.api_calls""",
+                     api_calls = api_calls + excluded.api_calls,
+                     estimated_cost_usd = estimated_cost_usd + excluded.estimated_cost_usd,
+                     cost_status = CASE
+                       WHEN excluded.cost_status = 'actual' THEN 'actual'
+                       WHEN excluded.cost_status = 'estimated' AND cost_status != 'actual' THEN 'estimated'
+                       ELSE cost_status
+                     END""",
                 (
                     session_id, input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens,
                     reasoning_tokens, tool_calls, api_calls,
+                    estimated_cost_usd, cost_status,
                 ),
             )
             conn.commit()
@@ -326,7 +359,8 @@ class SqliteBackend(DatabaseBackend):
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """SELECT input_tokens, output_tokens, cache_read_tokens,
-                          cache_write_tokens, reasoning_tokens, tool_calls, api_calls
+                          cache_write_tokens, reasoning_tokens, tool_calls, api_calls,
+                          estimated_cost_usd, cost_status
                    FROM session_telemetry
                    WHERE session_id = ?""",
                 (session_id,),

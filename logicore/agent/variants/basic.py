@@ -98,6 +98,7 @@ class BasicAgent:
         skills: list = None,
         workspace_root: str = None,
         tool_preset: str = None,
+        storage=None,
         **kwargs
     ):
         """
@@ -124,7 +125,12 @@ class BasicAgent:
         self.custom_tools = tools or []
         self.custom_system_prompt = system_prompt
         
-        # Create the underlying agent first
+        # Create the underlying agent first.
+        # An explicit empty list `tools=[]` is forwarded as an opt-out flag so
+        # the base agent loads NO internal tools and NO default/workspace skills.
+        # For any other value (None or a non-empty custom list) we let the base
+        # agent keep its default tool loading, then register custom tools on top.
+        agent_tools = tools if tools == [] else None
         self._agent = Agent(
             provider=provider,
             model=model,
@@ -133,9 +139,11 @@ class BasicAgent:
             debug=debug,
             telemetry=telemetry,
             max_iterations=max_iterations,
+            tools=agent_tools,
             skills=skills,
             workspace_root=workspace_root,
             tool_preset=tool_preset,
+            storage=storage,
         )
         
         # Register custom tools first (needed for tool descriptions in system prompt)

@@ -95,7 +95,6 @@ try:
         "GitCommandTool",
         "ReadDocumentTool", "ConvertDocumentTool",
         "NotesTool", "DateTimeTool", "ThinkTool", "SmartBashTool",
-        "MergePDFTool", "SplitPDFTool",
         "MediaSearchTool",
         "AddCronJobTool", "ListCronJobsTool", "RemoveCronJobTool",
         "TrackerCreateTool", "TrackerUpdateTool", "TrackerListTool",
@@ -122,8 +121,6 @@ try:
         "NotesTool": "logicore.tools.notes",
         "SmartBashTool": "logicore.tools.bash",
         "ThinkTool": "logicore.tools.think",
-        "MergePDFTool": "logicore.tools.pdf",
-        "SplitPDFTool": "logicore.tools.pdf",
         "MediaSearchTool": "logicore.tools.media",
         "AddCronJobTool": "logicore.tools.cron",
         "ListCronJobsTool": "logicore.tools.cron",
@@ -191,7 +188,7 @@ except Exception as e:
 section("5. Context & Token Budget System")
 
 try:
-    from logicore.context_engine.token_estimator import (
+    from logicore.runtime.context.token_estimator import (
         get_model_context_window, estimate_tokens, estimate_message_tokens,
         MODEL_CONTEXT_WINDOWS,
     )

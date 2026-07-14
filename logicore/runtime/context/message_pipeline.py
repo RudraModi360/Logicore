@@ -50,15 +50,33 @@ class MessagePipeline:
         content: str,
     ) -> bool:
         """
-        Remove the first system message matching exact content.
+        Remove the first system message matching content by key prefix.
+
+        Uses key-based matching so hints with slightly different values
+        (e.g., different reasoning levels) are still cleaned up.
+        Matches on the key portion (before first colon or first 30 chars).
 
         Returns True if a message was removed.
         """
+        # Extract key: part before first colon, or first 30 chars
+        if ":" in content:
+            key = content.split(":")[0].strip()
+        else:
+            key = content[:30].strip()
         for idx in range(len(messages) - 1, -1, -1):
             msg = messages[idx]
-            if msg.get("role") == "system" and msg.get("content") == content:
-                del messages[idx]
-                return True
+            if msg.get("role") == "system":
+                msg_content = msg.get("content", "")
+                # Exact match
+                if msg_content == content:
+                    del messages[idx]
+                    return True
+                # Key-based match
+                if key and ":" in msg_content:
+                    msg_key = msg_content.split(":")[0].strip()
+                    if msg_key == key:
+                        del messages[idx]
+                        return True
         return False
 
     @staticmethod

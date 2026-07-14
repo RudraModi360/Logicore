@@ -33,6 +33,7 @@ class CopilotAgent(Agent):
         skills: list = None,
         workspace_root: str = None,
         tool_preset: str = "copilot",
+        storage=None,
     ):
         # Use copilot-specific prompt if no custom message provided
         if not system_prompt:
@@ -51,6 +52,7 @@ class CopilotAgent(Agent):
             skills=skills,
             workspace_root=workspace_root,
             tool_preset=tool_preset,
+            storage=storage,
         )
         
     async def chat(self, user_input: Union[str, List[Dict[str, Any]]], session_id: str = None, stream: bool = False, generate_walkthrough: bool = False, **kwargs) -> str:

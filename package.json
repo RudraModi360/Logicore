@@ -8,7 +8,10 @@
     "preview": "mintlify preview",
     "lint-docs": "mintlify lint"
   },
+
   "dependencies": {
-    "mintlify": "^4.2.0"
+    "mintlify": "^4.2.0",
+    "pptxgenjs": "^3.3.0"
   }
+
 }

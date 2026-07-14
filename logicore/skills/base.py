@@ -1,13 +1,58 @@
 """
 Skill base classes and data models.
+
+Three-layer architecture:
+  Knowledge Layer  → SKILL.md, examples, templates, validation rules
+  Cognitive Layer  → LLM reasoning (not in code)
+  Execution Layer  → Capabilities (scripts, tools, MCP, generated code)
+
+Skills are Capability Packages. They may contain:
+  - Domain knowledge (reasoning guidance)
+  - Executable capabilities (optional scripts, tool definitions)
+  - Examples, templates, validation rules
+
+The LLM decides which capability to use. Skills do not force execution.
 """
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Callable
 from pathlib import Path
+from enum import Enum
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class CapabilityType(str, Enum):
+    """Types of executable capabilities a skill may provide."""
+    SCRIPT = "script"         # Python/JS/etc. script in scripts/
+    TOOL = "tool"             # Pre-defined tool function
+    MCP = "mcp"               # MCP server configuration
+    WORKFLOW = "workflow"      # Multi-step workflow
+    TEMPLATE = "template"     # Reusable code template
+
+
+@dataclass
+class Capability:
+    """
+    An executable capability provided by a skill.
+
+    Capabilities are registered in the Execution Layer.
+    The LLM decides whether to use them based on skill guidance.
+    """
+    name: str
+    cap_type: CapabilityType
+    description: str = ""
+    schema: Optional[Dict[str, Any]] = None      # OpenAI-style tool schema (for TOOL type)
+    executor: Optional[Callable] = None           # Callable executor (for TOOL type)
+    path: Optional[str] = None                    # File path (for SCRIPT type)
+    language: str = "python"                      # Script language
+    complexity: str = "simple"                    # simple | moderate | complex
+    alternatives: List[str] = field(default_factory=list)  # Alternative approaches
+
+    @property
+    def is_registered(self) -> bool:
+        return self.executor is not None or self.schema is not None
 
 
 @dataclass
@@ -18,26 +63,37 @@ class SkillMetadata:
     version: str = "1.0.0"
     author: str = ""
     tags: List[str] = field(default_factory=list)
-    requires: List[str] = field(default_factory=list)  # Dependencies
-    trigger: str = ""  # When this skill should be activated (for SKILL_INDEX.md)
-    cost_tier: str = "low"  # Token cost tier: low, medium, high
-    min_framework_version: str = ""  # Minimum Logicore version required
-    conflicts_with: List[str] = field(default_factory=list)  # Skills that cannot be loaded together
-    
+    requires: List[str] = field(default_factory=list)
+    trigger: str = ""
+    cost_tier: str = "low"
+    min_framework_version: str = ""
+    conflicts_with: List[str] = field(default_factory=list)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SkillMetadata":
+        """Create SkillMetadata from dict, ignoring unknown fields."""
+        known_fields = {
+            "name", "description", "version", "author", "tags",
+            "requires", "trigger", "cost_tier", "min_framework_version", "conflicts_with"
+        }
+        filtered = {k: v for k, v in data.items() if k in known_fields}
+        extra = {k: v for k, v in data.items() if k not in known_fields}
+        obj = cls(**filtered)
+        obj.extra = extra
+        return obj
+
     @property
     def version_tuple(self) -> tuple:
-        """Parse version string into comparable tuple (major, minor, patch)."""
         try:
             parts = self.version.split('.')
             return tuple(int(p) for p in parts[:3])
         except (ValueError, AttributeError):
             return (1, 0, 0)
-    
+
     def is_compatible_with(self, other_version: str) -> bool:
-        """Check if this skill is compatible with a given framework version."""
         if not self.min_framework_version:
             return True
-        
         try:
             required = tuple(int(p) for p in self.min_framework_version.split('.'))
             current = tuple(int(p) for p in other_version.split('.'))
@@ -48,35 +104,52 @@ class SkillMetadata:
 
 class Skill:
     """
-    A modular capability package for agents.
-    
+    A Capability Package for agents.
+
     Structure:
         skill_dir/
-        ├── SKILL.md          # Instructions + YAML frontmatter
-        ├── scripts/          # Helper scripts
-        ├── resources/        # Templates, assets
-        └── examples/         # Reference implementations
+        ├── SKILL.md              # Instructions + YAML frontmatter (Knowledge Layer)
+        ├── scripts/              # Optional executable capabilities
+        ├── examples/             # Example workflows
+        ├── templates/            # Reusable templates
+        └── validation_rules/     # Quality checklists
+
+    A Skill provides:
+        - Knowledge: reasoning guidance, best practices, workflows
+        - Capabilities: optional executable assets (scripts, tools, MCP)
+        - Examples: reference implementations
+        - Validation: quality checklists
+
+    The LLM decides how to use these. Skills do not force execution.
     """
-    
+
     def __init__(
         self,
         metadata: SkillMetadata,
         instructions: str,
-        tools: List[Dict[str, Any]] = None,
-        tool_executors: Dict[str, Callable] = None,
         system_prompt_addon: str = None,
-        skill_dir: Path = None
+        skill_dir: Path = None,
+        # Knowledge Layer fields
+        examples: List[str] = None,
+        templates: List[str] = None,
+        validation_rules: List[str] = None,
+        # Capability Layer fields
+        capabilities: List[Capability] = None,
     ):
         self.metadata = metadata
         self.instructions = instructions
-        self.tools = tools or []
-        self.tool_executors = tool_executors or {}
         self.system_prompt_addon = system_prompt_addon
         self.skill_dir = skill_dir
-        self._loaded = True  # Mark as loaded upon construction
-        self._enabled = True  # Enable/disable toggle
-        self._dependencies_met = True  # Track if dependencies are satisfied
-        self._missing_dependencies: List[str] = []  # List of missing dependencies
+        self._loaded = True
+        self._enabled = True
+        self._dependencies_met = True
+        self._missing_dependencies: List[str] = []
+        # Knowledge Layer
+        self.examples = examples or []
+        self.templates = templates or []
+        self.validation_rules = validation_rules or []
+        # Capability Layer
+        self.capabilities = capabilities or []
 
     @property
     def name(self) -> str:
@@ -85,23 +158,23 @@ class Skill:
     @property
     def description(self) -> str:
         return self.metadata.description
-    
+
     @property
     def version(self) -> str:
         return self.metadata.version
-    
+
     @property
     def requires(self) -> List[str]:
         return self.metadata.requires
-    
+
     @property
     def conflicts_with(self) -> List[str]:
         return self.metadata.conflicts_with
-    
+
     @property
     def dependencies_met(self) -> bool:
         return self._dependencies_met
-    
+
     @property
     def missing_dependencies(self) -> List[str]:
         return self._missing_dependencies
@@ -115,45 +188,68 @@ class Skill:
         return self._enabled
 
     def enable(self):
-        """Enable this skill."""
         self._enabled = True
 
     def disable(self):
-        """Disable this skill."""
         self._enabled = False
-    
+
     def check_dependencies(self, loaded_skill_names: List[str]) -> bool:
-        """
-        Check if all dependencies are satisfied.
-        
-        Args:
-            loaded_skill_names: List of currently loaded skill names
-            
-        Returns:
-            True if all dependencies are met, False otherwise
-        """
         self._missing_dependencies = [
-            req for req in self.requires 
+            req for req in self.requires
             if req not in loaded_skill_names
         ]
         self._dependencies_met = len(self._missing_dependencies) == 0
         return self._dependencies_met
-    
+
     def check_conflicts(self, loaded_skill_names: List[str]) -> List[str]:
-        """
-        Check for conflicts with other loaded skills.
-        
-        Args:
-            loaded_skill_names: List of currently loaded skill names
-            
-        Returns:
-            List of conflicting skill names that are loaded
-        """
         return [
-            conflict for conflict in self.conflicts_with 
+            conflict for conflict in self.conflicts_with
             if conflict in loaded_skill_names
         ]
-    
+
+    # ─── Capability Management ───────────────────────────────────────
+
+    def get_capabilities(self) -> List[Capability]:
+        """Get all executable capabilities this skill provides."""
+        return self.capabilities
+
+    def get_capability_by_name(self, name: str) -> Optional[Capability]:
+        """Get a specific capability by name."""
+        for cap in self.capabilities:
+            if cap.name == name:
+                return cap
+        return None
+
+    def get_registered_capabilities(self) -> List[Capability]:
+        """Get capabilities that have executors registered."""
+        return [cap for cap in self.capabilities if cap.is_registered]
+
+    def has_capabilities(self) -> bool:
+        """Check if this skill provides any executable capabilities."""
+        return len(self.capabilities) > 0
+
+    # ─── Knowledge Layer ─────────────────────────────────────────────
+
+    def get_examples(self) -> List[str]:
+        return self.examples
+
+    def get_templates(self) -> List[str]:
+        return self.templates
+
+    def get_validation_rules(self) -> List[str]:
+        return self.validation_rules
+
+    def build_validation_checklist(self) -> str:
+        """Build a markdown checklist from validation rules."""
+        if not self.validation_rules:
+            return ""
+        lines = ["## Validation Checklist"]
+        for rule in self.validation_rules:
+            lines.append(f"- [ ] {rule}")
+        return "\n".join(lines)
+
+    # ─── Directory Helpers ───────────────────────────────────────────
+
     def get_scripts_dir(self) -> Optional[Path]:
         if self.skill_dir:
             scripts = self.skill_dir / "scripts"
@@ -166,12 +262,21 @@ class Skill:
             return resources if resources.exists() else None
         return None
 
-    def get_tool_names(self) -> List[str]:
-        """Get list of tool names this skill provides."""
-        return [t.get("function", {}).get("name", "") for t in self.tools if isinstance(t, dict)]
-    
+    def get_examples_dir(self) -> Optional[Path]:
+        if self.skill_dir:
+            examples = self.skill_dir / "examples"
+            return examples if examples.exists() else None
+        return None
+
+    def get_templates_dir(self) -> Optional[Path]:
+        if self.skill_dir:
+            templates = self.skill_dir / "templates"
+            return templates if templates.exists() else None
+        return None
+
+    # ─── Metadata ────────────────────────────────────────────────────
+
     def get_version_info(self) -> Dict[str, Any]:
-        """Get detailed version information."""
         return {
             "name": self.name,
             "version": self.version,
@@ -181,7 +286,16 @@ class Skill:
             "conflicts_with": self.conflicts_with,
             "dependencies_met": self.dependencies_met,
             "missing_dependencies": self.missing_dependencies,
+            "has_capabilities": self.has_capabilities(),
+            "capability_count": len(self.capabilities),
+            "example_count": len(self.examples),
+            "template_count": len(self.templates),
+            "validation_rule_count": len(self.validation_rules),
         }
 
     def __repr__(self):
-        return f"Skill(name='{self.name}', version='{self.version}', tools={len(self.tools)}, loaded={self._loaded}, enabled={self._enabled}, dir={self.skill_dir})"
+        return (
+            f"Skill(name='{self.name}', version='{self.version}', "
+            f"capabilities={len(self.capabilities)}, "
+            f"loaded={self._loaded}, enabled={self._enabled})"
+        )

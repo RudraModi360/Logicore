@@ -284,16 +284,6 @@ class AgentrySettings:
     TELEMETRY_LOG_PROMPTS: bool = field(default_factory=lambda: _get_bool("TELEMETRY_LOG_PROMPTS", False, "runtime.telemetry", "log_prompts"))
     """Include prompts in telemetry logs (privacy sensitive)"""
     
-    # Prompt Caching
-    PROMPT_CACHE_ENABLED: bool = field(default_factory=lambda: _get_bool("PROMPT_CACHE_ENABLED", True, "runtime.prompt_cache", "enabled"))
-    """Enable prompt caching for reduced latency and cost"""
-    
-    PROMPT_CACHE_TTL_SECONDS: int = field(default_factory=lambda: _get_int("PROMPT_CACHE_TTL_SECONDS", 300, "runtime.prompt_cache", "ttl_seconds"))
-    """TTL for prompt cache entries in seconds (default 5 minutes)"""
-    
-    PROMPT_CACHE_MAX_ENTRIES: int = field(default_factory=lambda: _get_int("PROMPT_CACHE_MAX_ENTRIES", 100, "runtime.prompt_cache", "max_entries"))
-    """Maximum number of prompt cache entries"""
-    
     # ==========================================================================
     # SMTP (Email)
     # ==========================================================================

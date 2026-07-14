@@ -35,6 +35,7 @@ class SmartAgent(Agent):
         skills: list = None,
         workspace_root: str = None,
         tool_preset: str = "smart",
+        storage=None,
     ):
         super().__init__(
             provider=provider,
@@ -49,6 +50,7 @@ class SmartAgent(Agent):
             skills=skills,
             workspace_root=workspace_root,
             tool_preset=tool_preset,
+            storage=storage,
         )
 
         if not system_prompt:

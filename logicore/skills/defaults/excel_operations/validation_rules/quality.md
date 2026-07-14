@@ -1,0 +1,8 @@
+- Headers are bold with background color
+- Column widths are appropriate for content
+- Data types are correct (numbers as numbers, dates as dates)
+- File is saved to correct path
+- No broken references or formulas
+- Sheet names are descriptive
+- Frozen panes applied for header rows
+- Number formatting applied (currency, percentage)

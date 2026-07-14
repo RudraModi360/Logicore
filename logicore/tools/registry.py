@@ -17,7 +17,6 @@ from .web import WebSearchTool, UrlFetchTool, ImageSearchTool
 from .git import GitCommandTool
 from .document import ReadDocumentTool
 from .convert import ConvertDocumentTool
-from .pdf import MergePDFTool, SplitPDFTool
 from .notes import NotesTool
 from .datetime import DateTimeTool
 from .think import ThinkTool
@@ -28,6 +27,7 @@ from .plan import (
     EnterPlanModeTool, SubmitPlanTool, ExitPlanModeTool,
     UpdatePlanProgressTool, ViewPlanTool
 )
+from .skill_loader import LoadSkillTool
 
 # Tool presets for different use cases
 TOOL_PRESETS = {
@@ -62,6 +62,8 @@ TOOL_PRESETS = {
         "task_create", "task_get", "task_update", "task_list", "task_next",
         # Plan
         "enter_plan_mode", "submit_plan", "view_plan",
+        # Skill Management
+        "load_skill",
     ],
     "copilot": [
         # Copilot - coding focused with filesystem and execution
@@ -139,9 +141,6 @@ class ToolRegistry:
             "convert_document": ConvertDocumentTool,
             # Media
             "media_search": MediaSearchTool,
-            # PDF
-            "merge_pdfs": MergePDFTool,
-            "split_pdf": SplitPDFTool,
             # Cron
             "add_cron_job": AddCronJobTool,
             "list_cron_jobs": ListCronJobsTool,
@@ -158,6 +157,8 @@ class ToolRegistry:
             "exit_plan_mode": ExitPlanModeTool,
             "update_plan_progress": UpdatePlanProgressTool,
             "view_plan": ViewPlanTool,
+            # Skill Management
+            "load_skill": LoadSkillTool,
         }
         
         # Determine which tools to register
@@ -265,10 +266,25 @@ SAFE_TOOLS = [
     'read_document', 'media_search', 'list_cron_jobs', 'get_crons',
     # Task management tools (safe, internal bookkeeping - no approval needed)
     'task_create', 'task_get', 'task_update', 'task_list', 'task_next',
+    # Skill management (read-only, loads instructions into context)
+    'load_skill',
 ]
 APPROVAL_REQUIRED_TOOLS = [
     'create_file', 'edit_file', 'web_search', 'image_search', 'url_fetch', 'convert_document',
-    'merge_pdfs', 'split_pdf',
     'add_cron_job', 'remove_cron_job'
 ]
 DANGEROUS_TOOLS = ['delete_file', 'execute_command', 'git_command', 'code_execute']
+
+# Tools that must ALWAYS be available regardless of `tools=[]` or other
+# opt-out flags.  These give the agent the minimum ability to decompose
+# complex work (task management), plan multi-step flows, and discover
+# skills on demand.
+ALWAYS_ON_TOOLS = [
+    # Task management — agent needs these to track work
+    "task_create", "task_get", "task_update", "task_list", "task_next",
+    # Planning — agent needs these for complex multi-step tasks
+    "enter_plan_mode", "submit_plan", "exit_plan_mode",
+    "update_plan_progress", "view_plan",
+    # Skill loading — agent needs this to load skills on demand
+    "load_skill",
+]

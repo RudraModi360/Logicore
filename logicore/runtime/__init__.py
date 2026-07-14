@@ -36,7 +36,7 @@ from logicore.runtime.loop_detection import (
     RecoveryActionType,
 )
 from logicore.runtime.context import ContextWindowManager, ContextManagementResult
-from logicore.context_engine import EngineResult  # Public alias for ContextManagementResult
+from logicore.runtime.context import EngineResult  # Public alias for ContextManagementResult
 from logicore.runtime.scheduler import ToolScheduler, ToolCallRequest, ToolCallResult, ToolCallStatus
 from logicore.runtime.telemetry import TelemetryCollector, TelemetryEvent, TelemetryEventType
 from logicore.runtime.agent_runtime import AgentRuntime

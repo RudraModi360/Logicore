@@ -17,8 +17,6 @@ from .base import (
     _gateway_debug,
     _dispatch_stream_text,
     _dispatch_event,
-    _extract_cache_control,
-    _strip_cache_annotations,
 )
 
 
@@ -321,13 +319,21 @@ class GeminiGateway(ProviderGateway):
             else:
                 raise ValueError("Gemini returned an empty response")
 
-        return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls)
+        usage = None
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            um = response.usage_metadata
+            prompt = getattr(um, "prompt_token_count", None) or 0
+            candidates = getattr(um, "candidates_token_count", None) or 0
+            cached = getattr(um, "cached_content_token_count", None) or 0
+            total = getattr(um, "total_token_count", None) or 0
+            usage = {"prompt_tokens": prompt, "completion_tokens": candidates, "total_tokens": total}
+            if cached:
+                usage["prompt_tokens_details"] = {"cached_tokens": cached}
+
+        return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls, usage=usage)
 
     async def chat(self, messages, tools=None, max_tokens=None) -> NormalizedMessage:
         from google.genai import types
-
-        cache_control = _extract_cache_control(messages)
-        messages = _strip_cache_annotations(messages)
 
         contents, system_instruction = self._build_contents(messages)
         config = types.GenerateContentConfig(
@@ -341,18 +347,12 @@ class GeminiGateway(ProviderGateway):
         if self._cached_content_name:
             config.cached_content = self._cached_content_name
 
-        _gateway_debug(self, f"chat request: messages={len(messages)}, tools={len(tools) if tools else 0}, cache_control={cache_control}, cached_content={self._cached_content_name}")
+        _gateway_debug(self, f"chat request: messages={len(messages)}, tools={len(tools) if tools else 0}, cached_content={self._cached_content_name}")
 
         try:
             response = self.provider.client.models.generate_content(
                 model=self.model_name, contents=contents, config=config,
             )
-            
-            # Log cache usage if available
-            if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                cached_tokens = getattr(response.usage_metadata, 'cached_content_token_count', 0)
-                if cached_tokens:
-                    _gateway_debug(self, f"Cache hit: {cached_tokens} tokens served from cache")
             
             return self._parse_response(response)
         except Exception as e:
@@ -368,9 +368,6 @@ class GeminiGateway(ProviderGateway):
         from google.genai import types
         import queue
         import threading
-
-        cache_control = _extract_cache_control(messages)
-        messages = _strip_cache_annotations(messages)
 
         contents, system_instruction = self._build_contents(messages)
         config = types.GenerateContentConfig(
@@ -420,9 +417,14 @@ class GeminiGateway(ProviderGateway):
         content = ""
         tool_calls = []
         fc_index = {}
+        last_usage_metadata = None
 
         async def _process_chunk(chunk):
-            nonlocal content, tool_calls, fc_index
+            nonlocal content, tool_calls, fc_index, last_usage_metadata
+            
+            # Track usage from the last chunk (Gemini puts it on the final chunk)
+            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                last_usage_metadata = chunk.usage_metadata
             
             # Process text content
             if chunk.text:
@@ -487,4 +489,16 @@ class GeminiGateway(ProviderGateway):
                 except queue.Empty:
                     break
 
-        return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls)
+        usage = None
+        if last_usage_metadata:
+            prompt = getattr(last_usage_metadata, "prompt_token_count", None) or 0
+            candidates = getattr(last_usage_metadata, "candidates_token_count", None) or 0
+            cached = getattr(last_usage_metadata, "cached_content_token_count", None) or 0
+            total = getattr(last_usage_metadata, "total_token_count", None) or 0
+            usage = {"prompt_tokens": prompt, "completion_tokens": candidates, "total_tokens": total}
+            if cached:
+                usage["prompt_tokens_details"] = {"cached_tokens": cached}
+            if usage:
+                _gateway_debug(self, f"chat_stream usage: {usage}")
+
+        return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls, usage=usage)

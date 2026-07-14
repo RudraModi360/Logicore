@@ -62,8 +62,6 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "read_document", "convert_document",
     # Media
     "media_search",
-    # PDF
-    "merge_pdfs", "split_pdf",
     # Cron
     "add_cron_job", "list_cron_jobs", "remove_cron_job", "get_crons",
     # Plan

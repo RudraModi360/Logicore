@@ -97,6 +97,7 @@ class MCPAgent(Agent):
         skills: list = None,
         workspace_root: str = None,
         tool_preset: str = None,
+        storage=None,
     ):
         """
         Initialize MCPAgent.
@@ -138,6 +139,7 @@ class MCPAgent(Agent):
                 tool_preset=tool_preset,
                 skills=skills,
                 workspace_root=workspace_root,
+                storage=storage,
             )
         else:
             # Default: load all tools
@@ -154,6 +156,7 @@ class MCPAgent(Agent):
                 tools=tools if tools is not None else True,  # Load default tools if no custom tools
                 skills=skills,
                 workspace_root=workspace_root,
+                storage=storage,
             )
         
         # MCP-specific configuration
@@ -543,31 +546,43 @@ class MCPAgent(Agent):
     
     def create_session(
         self, 
-        session_id: str, 
+        session_id: str = None,
         system_prompt: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        tags: Optional[Dict[str, Any]] = None
     ) -> AgentSession:
         """
         Create a new client session with isolated context.
         Wrapper around Agent's get_session with callback support.
+
+        Signature mirrors Agent.create_session (accepts `tags`) so that
+        base Agent.chat(... session_tags=...) works.
         """
+        if session_id is None:
+            import uuid
+            session_id = f"session-{uuid.uuid4().hex[:8]}"
+
         session = self.get_session(session_id)
-        
+
+        # Store tags (set by base Agent.chat via session_tags)
+        if tags:
+            session.metadata["tags"] = tags
+
         # Update system prompt if provided
         if system_prompt:
             session.messages[0]["content"] = system_prompt
-        
+
         # Add metadata if provided
         if metadata:
-            session.metadata = metadata
-        
+            session.metadata.update(metadata)
+
         # Trigger callback
         if self.on_session_created:
             self.on_session_created(session_id)
-        
+
         if self.debug:
             logger.debug(f"[MCPAgent] [OK] Created session: {session_id}")
-        
+
         return session
     
     def destroy_session(self, session_id: str) -> bool:
@@ -699,8 +714,12 @@ class MCPAgent(Agent):
         
         # Create session if missing
         if session_id not in self.sessions and create_if_missing:
-            self.create_session(session_id)
-        
+            session = self.create_session(session_id)
+            # create_session returns the AgentSession; adopt its generated id
+            session_id = getattr(session, "session_id", session_id)
+            if session_id is None:
+                session_id = "default"
+
         if session_id not in self.sessions:
             raise ValueError(f"Session {session_id} does not exist")
         

@@ -24,13 +24,15 @@ class NormalizedMessage:
     """Standard message format returned by all gateways."""
 
     def __init__(self, role: str, content: str = "", tool_calls: List[Dict[str, Any]] = None,
-                 name: str = None, tool_call_id: str = None, extra: Dict[str, Any] = None):
+                 name: str = None, tool_call_id: str = None, extra: Dict[str, Any] = None,
+                 usage: Optional[Dict[str, Any]] = None):
         self.role = role
         self.content = content
         self.tool_calls = tool_calls or []
         self.name = name
         self.tool_call_id = tool_call_id
         self.extra = extra or {}
+        self.usage = usage
 
     def to_dict(self) -> Dict[str, Any]:
         result = {"role": self.role, "content": self.content}
@@ -125,37 +127,9 @@ async def _dispatch_stream_text(on_token, text: str):
     await _dispatch_token(on_token, text)
 
 
-def _extract_cache_control(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """
-    Extract cache control information from annotated messages.
-    
-    Returns cache control metadata for the last message with cache_control,
-    or None if no cache control is present.
-    """
-    for msg in reversed(messages):
-        cache_control = msg.get("_cache_control")
-        if cache_control:
-            return cache_control
-    return None
-
-
-def _strip_cache_annotations(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Remove cache control annotations from messages before sending to provider.
-    
-    Returns a new list with _cache_control keys removed.
-    """
-    cleaned = []
-    for msg in messages:
-        if "_cache_control" in msg:
-            msg = {k: v for k, v in msg.items() if k != "_cache_control"}
-        cleaned.append(msg)
-    return cleaned
-
-
 # Keys that belong to non-OpenAI providers (Anthropic, Gemini, ...).
 # OpenAI-compatible APIs (OpenAI, Groq, etc.) reject them with a 400.
-_OPENAI_UNSUPPORTED_MESSAGE_KEYS = ("tool_call_ids", "gemini_content", "_cache_control")
+_OPENAI_UNSUPPORTED_MESSAGE_KEYS = ("tool_call_ids", "gemini_content")
 
 
 def _strip_provider_specific_fields(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

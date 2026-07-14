@@ -192,7 +192,7 @@ manager.delete_attachment(path)
 
 ### Phase 0 Changes
 - Deleted: `logicore/session/manager.py`, `logicore/session/__init__.py`, `logicore/reloader.py`, `logicore/agent/attachments.py`, `logicore/ui/scratchy_users.db`
-- Cleaned: `telemetry/tracker.py` (removed ContextWindowFetcher, dead methods), `caching/prompt_cache.py` (removed clear_stats), `security/__init__.py` (removed dead exports), `runtime/config.py` (removed dead TelemetryConfig fields)
+- Cleaned: `telemetry/tracker.py` (removed ContextWindowFetcher, dead methods), `security/__init__.py` (removed dead exports), `runtime/config.py` (removed dead TelemetryConfig fields)
 - Updated: `logicore/__init__.py` (removed SessionManager export), `scripts/memory_chat.py` (removed unused import)
 
 ### Phase 1 Files Created

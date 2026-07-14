@@ -21,7 +21,7 @@ from logicore.providers.base import LLMProvider
 from logicore.providers.factory import create_provider
 from logicore.config import settings
 from logicore.gateway.gateway import ProviderGateway, get_gateway_for_provider
-from logicore.tools import ALL_TOOL_SCHEMAS, SAFE_TOOLS, TOOL_PRESETS
+from logicore.tools import ALL_TOOL_SCHEMAS, SAFE_TOOLS, TOOL_PRESETS, ALWAYS_ON_TOOLS
 from logicore.config.prompts import get_system_prompt
 from logicore.skills import Skill, SkillLoader
 from logicore.telemetry.tracker import TelemetryTracker
@@ -108,11 +108,30 @@ class Agent:
         self.telemetry_enabled = telemetry
         self.telemetry_tracker = TelemetryTracker(enabled=telemetry)
 
+        # Canonical token counters (always initialized — DB persistence needs them)
+        self.session_input_tokens = 0
+        self.session_output_tokens = 0
+        self.session_cache_read_tokens = 0
+        self.session_cache_write_tokens = 0
+        self.session_reasoning_tokens = 0
+        self.session_api_calls = 0
+        self.session_estimated_cost_usd = 0.0
+        self.session_cost_status = "unknown"
+        self.session_cost_source = "none"
+
         # Storage (optional session persistence)
-        self._storage = storage
+        # Auto-initialize from environment if not explicitly provided
+        if storage is not None:
+            self._storage = storage
+        else:
+            try:
+                from logicore.storage import create_storage
+                self._storage = create_storage()
+            except Exception:
+                self._storage = None
 
         # Context engine
-        from logicore.context_engine import ContextEngine
+        from logicore.runtime.context import ContextEngine
         from logicore.runtime.config import RuntimeConfig
         _rt_config = RuntimeConfig.from_settings()
         self.context_engine = ContextEngine(
@@ -189,6 +208,7 @@ class Agent:
         
         # Skills Management
         self.skills: List[Skill] = []
+        self._skill_tools_registered: set = set()  # Track which skills have tools registered
         
         # Session Management
         self.sessions: Dict[str, AgentSession] = {}
@@ -202,7 +222,15 @@ class Agent:
         self.tools_disabled_reason = None
         
         # Handle tools parameter
-        if tool_preset and tool_preset in TOOL_PRESETS:
+        if tools == []:
+            # `tools=[]` disables all internal tools (filesystem, web, code
+            # execution, git, cron, process mgmt, etc.) but keeps the
+            # minimum structural set that every agent needs to decompose
+            # complex work (task management, planning, load_skill) plus
+            # skill metadata so the agent can discover and load skills on
+            # demand.  Pass ``skills=[]`` to also suppress skill loading.
+            self._load_structural_tools(load_skills=(skills != []))
+        elif tool_preset and tool_preset in TOOL_PRESETS:
             self.load_tools_preset(tool_preset)
         elif isinstance(tools, list):
             for tool in tools:
@@ -215,7 +243,11 @@ class Agent:
                         self.tool_executor.register_custom_tool(tool_name, tool)
             if len(self.internal_tools) > 0:
                 self.supports_tools = True
-                self._rebuild_system_prompt_with_tools()
+            # Always load default skills (instruction-based, no external tools needed)
+            self._load_default_skills()
+            # Auto-discover workspace skills (e.g. ~/.agents/skills/)
+            self._load_workspace_skills()
+            self._rebuild_system_prompt_with_tools()
         else:
             self.load_default_tools()
         
@@ -242,14 +274,43 @@ class Agent:
 
     @property
     def telemetry(self) -> dict:
+        base = {
+            "session_id": None,
+            "model": self.model_name,
+            "provider": getattr(self.provider, "provider_name", "unknown"),
+            "input_tokens": self.session_input_tokens,
+            "output_tokens": self.session_output_tokens,
+            "cache_read_tokens": self.session_cache_read_tokens,
+            "cache_write_tokens": self.session_cache_write_tokens,
+            "reasoning_tokens": self.session_reasoning_tokens,
+            "api_calls": self.session_api_calls,
+            "total_tokens": self.session_input_tokens + self.session_output_tokens,
+        }
         if not self.telemetry_enabled:
-            return {"error": "Telemetry is not enabled."}
+            return base
         session_ids = self.telemetry_tracker.get_session_ids()
         if len(session_ids) == 1:
-            return self.telemetry_tracker.get_session_summary(session_ids[0])
-        elif len(session_ids) == 0:
-            return {"message": "No telemetry data recorded yet."}
-        return self.telemetry_tracker.get_total_summary()
+            base["session_id"] = session_ids[0]
+            base["tracker_summary"] = self.telemetry_tracker.get_session_summary(session_ids[0])
+        elif len(session_ids) > 1:
+            base["tracker_summary"] = self.telemetry_tracker.get_total_summary()
+        return base
+
+    @property
+    def usage(self) -> dict:
+        """Current canonical usage state for this agent session."""
+        return {
+            "input_tokens": self.session_input_tokens,
+            "output_tokens": self.session_output_tokens,
+            "cache_read_tokens": self.session_cache_read_tokens,
+            "cache_write_tokens": self.session_cache_write_tokens,
+            "reasoning_tokens": self.session_reasoning_tokens,
+            "total_tokens": self.session_input_tokens + self.session_output_tokens,
+            "api_calls": self.session_api_calls,
+            "estimated_cost_usd": self.session_estimated_cost_usd,
+            "cost_status": self.session_cost_status,
+            "cost_source": self.session_cost_source,
+        }
 
     # === Storage Persistence ===
 
@@ -284,10 +345,15 @@ class Agent:
                 provider=provider_name, model=getattr(self, "model_name", ""),
                 metadata=meta if meta else None,
             )
-            if self.telemetry_enabled:
-                summary = self.telemetry_tracker.get_session_summary(session_id)
-                if summary:
-                    self._storage.save_telemetry(session_id, summary)
+            self._storage.save_telemetry(
+                session_id,
+                input_tokens=self.session_input_tokens,
+                output_tokens=self.session_output_tokens,
+                cache_read_tokens=self.session_cache_read_tokens,
+                cache_write_tokens=self.session_cache_write_tokens,
+                reasoning_tokens=self.session_reasoning_tokens,
+                api_calls=self.session_api_calls,
+            )
         except Exception as e:
             if self.debug:
                 logger.warning(f"[Agent] Storage persistence failed: {e}")
@@ -428,33 +494,112 @@ class Agent:
     # === Skill Management ===
     
     def _build_skills_prompt_section(self) -> str:
+        """Build the skills section for the system prompt.
+
+        Uses the indexed architecture: injects only the SKILL_INDEX.md routing
+        metadata, not full skill instructions. The agent uses the load_skill
+        tool to load full instructions on-demand when a task requires a skill.
+        """
         if not self.skills:
             return ""
-        blocks = []
-        for skill in self.skills:
-            if not skill.is_enabled:
-                continue
-            block = f"### Skill: {skill.name}\n"
-            block += f"_{skill.description}_\n\n"
-            block += skill.instructions
-            if skill.system_prompt_addon:
-                block += f"\n\n{skill.system_prompt_addon}"
-            blocks.append(block)
-        if not blocks:
-            return ""
-        skills_str = "\n\n---\n\n".join(blocks)
-        return f"\n\n## Active Skills\n{skills_str}"
+
+        # Read the skill index file
+        defaults_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "skills", "defaults"
+        )
+        index_path = os.path.join(defaults_dir, "SKILL_INDEX.md")
+        if os.path.exists(index_path):
+            with open(index_path, "r", encoding="utf-8") as f:
+                index_content = f.read().strip()
+        else:
+            # Fallback: build a minimal index from loaded skills
+            lines = ["# Skill Index", ""]
+            for skill in self.skills:
+                if skill.is_enabled:
+                    lines.append(f"- **{skill.name}**: {skill.description}")
+            index_content = "\n".join(lines)
+
+        return f"""
+
+## Skills (REQUIRED for document tasks)
+
+**IMPORTANT**: For ANY task involving Word, Excel, PowerPoint, or PDF files, you MUST:
+1. First call `load_skill` with the skill name to get the full instructions
+2. Then follow those instructions exactly (they include code templates, library recommendations, and quality checks)
+
+**Do NOT attempt document tasks without loading the skill first.** The skill contains critical information about available tools, code templates, and validation steps.
+
+Available skills:
+{index_content}
+"""
 
     def _load_default_skills(self):
+        """Load skill metadata for the index. Tools are registered on-demand via load_skill."""
         defaults_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "defaults")
         if os.path.exists(defaults_dir):
             index_entries, direct_skills = SkillLoader.discover_with_index(defaults_dir)
             for skill in direct_skills:
-                self._register_skill(skill)
+                self._register_skill_metadata(skill)
             if not hasattr(self, '_skill_index_entries'):
                 self._skill_index_entries = {}
             for entry in index_entries:
                 self._skill_index_entries[entry.name] = (defaults_dir, entry)
+                # Load skill metadata only (skip capability discovery to save prompt space)
+                skill = SkillLoader.load_skill_by_index(defaults_dir, entry.name)
+                if skill:
+                    self._register_skill_metadata(skill)
+
+    def _load_structural_tools(self, load_skills=True):
+        """Load the minimum tool set that every agent needs: task management,
+        planning, and the load_skill tool.  When *load_skills* is True, skill
+        metadata (index entries) and workspace skills are also registered so
+        the agent can discover and load skills on demand.  This is used when
+        ``tools=[]`` to keep the agent functional while suppressing the full
+        internal tool set.
+        """
+        from logicore.tasks import get_task_tools, get_task_tools_with_context
+        from logicore.tools.registry import ALWAYS_ON_TOOLS, ToolRegistry
+
+        self._ensure_task_manager()
+        # Register task tool executors (the schemas come from ALWAYS_ON_TOOLS below)
+        tools = (get_task_tools_with_context(self._task_tool_context)
+                 if self._task_tool_context else get_task_tools())
+        for tool in tools:
+            self.tool_executor.register_custom_tool(tool.name, tool.run)
+
+        # Register only the ALWAYS_ON subset from the full registry (schemas)
+        temp_registry = ToolRegistry(enabled_tools=ALWAYS_ON_TOOLS)
+        self.internal_tools.extend(temp_registry.schemas)
+
+        self.supports_tools = True
+        if load_skills:
+            self._load_default_skills()
+            self._load_workspace_skills()
+        self._rebuild_system_prompt_with_tools()
+
+    def _load_workspace_skills(self):
+        """Auto-discover skills from workspace and home directories."""
+        import pathlib
+        search_paths = []
+        # Check workspace_root if set
+        if self.workspace_root:
+            ws = pathlib.Path(self.workspace_root)
+            for sub in (".agents/skills", "_agents/skills", ".agent/skills", "_agent/skills"):
+                search_paths.append(ws / sub)
+        # Always check user home ~/.agents/skills
+        home = pathlib.Path.home()
+        for sub in (".agents/skills", "_agents/skills"):
+            search_paths.append(home / sub)
+
+        loaded_names = {s.name for s in self.skills}
+        for skill_dir in search_paths:
+            if skill_dir.exists():
+                discovered = SkillLoader.discover(str(skill_dir))
+                for skill in discovered:
+                    if skill.name not in loaded_names:
+                        self._register_skill(skill)
+                        loaded_names.add(skill.name)
 
     def _load_default_skills_for_preset(self, preset: str):
         skip_skill_presets = {"minimal", "lightweight"}
@@ -498,7 +643,10 @@ class Agent:
                 break
         if not skill_to_remove:
             return False
-        skill_tool_names = set(skill_to_remove.get_tool_names())
+        skill_tool_names = {
+            cap.name for cap in skill_to_remove.get_registered_capabilities()
+            if cap.schema
+        }
         self.internal_tools = [
             t for t in self.internal_tools
             if t.get("function", {}).get("name") not in skill_tool_names
@@ -543,7 +691,10 @@ class Agent:
                 "name": skill.name,
                 "description": skill.description,
                 "status": "loaded",
-                "tools": len(skill.tools),
+                "capabilities": len(skill.capabilities),
+                "examples": len(skill.examples),
+                "templates": len(skill.templates),
+                "validation_rules": len(skill.validation_rules),
                 "enabled": skill.is_enabled
             })
         if hasattr(self, '_skill_index_entries'):
@@ -560,21 +711,51 @@ class Agent:
         return result
 
     def _register_skill(self, skill: Skill):
+        """Register a skill and its tool capabilities."""
         if any(s.name == skill.name for s in self.skills):
             return
         self.skills.append(skill)
-        for tool_schema in skill.tools:
-            tool_name = tool_schema.get("function", {}).get("name")
-            existing_names = {
-                t.get("function", {}).get("name") for t in self.internal_tools
-                if isinstance(t, dict)
-            }
-            if tool_name in existing_names:
-                logger.warning(f"Tool naming conflict: skill '{skill.name}' registers '{tool_name}'")
-            self.internal_tools.append(tool_schema)
-            if tool_name and tool_name in skill.tool_executors:
-                self.tool_executor.register_skill_tool(tool_name, skill.tool_executors[tool_name])
-        if skill.tools:
+        self._register_skill_tools(skill)
+
+    def _register_skill_metadata(self, skill: Skill):
+        """Register a skill for metadata only (no tool registration).
+
+        Used during startup to keep skill metadata available for the index
+        without bloating the system prompt with skill tool schemas.
+        Tools are registered on-demand when load_skill is called.
+        """
+        if any(s.name == skill.name for s in self.skills):
+            return
+        self.skills.append(skill)
+
+    def _register_skill_tools(self, skill: Skill):
+        """Register a skill's tool capabilities with the agent."""
+        if skill.name in self._skill_tools_registered:
+            return
+        self._skill_tools_registered.add(skill.name)
+        for cap in skill.get_registered_capabilities():
+            if cap.schema:
+                schema = dict(cap.schema)
+                func = schema.get("function", {})
+                func["x-origin"] = f"skill:{skill.name}"
+                func["x-capability-type"] = cap.cap_type.value
+                func["x-complexity"] = cap.complexity
+                if cap.alternatives:
+                    func["x-alternatives"] = cap.alternatives
+
+                tool_name = func.get("name")
+                existing_names = {
+                    t.get("function", {}).get("name") for t in self.internal_tools
+                    if isinstance(t, dict)
+                }
+                if tool_name in existing_names:
+                    logger.warning(f"Tool naming conflict: skill '{skill.name}' registers '{tool_name}' — skipping")
+                    continue
+                self.internal_tools.append(schema)
+                if cap.executor:
+                    self.tool_executor.register_skill_tool(tool_name, cap.executor)
+
+        if skill.has_capabilities():
             self.supports_tools = True
 
     # === Tool Management ===
@@ -735,8 +916,16 @@ class Agent:
             )
             # Reconstruct: use current system prompt, restore conversation history
             session = AgentSession(session_id, self.default_system_message)
-            # Strip any old system message(s) from stored history
-            history = [m for m in stored if m.get("role") != "system"]
+            # Strip old system message(s) but preserve compression summaries
+            history = []
+            for m in stored:
+                if m.get("role") == "system":
+                    content = m.get("content", "")
+                    # Keep compression summaries (they contain vital context)
+                    if "Previous Conversation Summary" in content:
+                        history.append(m)
+                else:
+                    history.append(m)
             # Rebuild messages list: current system prompt + old conversation
             session.messages = [{"role": "system", "content": self.default_system_message}] + history
             # Restore metadata (tags, last_tool_directory, etc.)
@@ -972,9 +1161,11 @@ class Agent:
         session_tags: Dict[str, str] = None,
         **kwargs
     ) -> str:
-        if new_session or session_id is None:
+        if new_session:
             session_id = self.create_session(tags=session_tags)
-        elif session_tags and session_id not in self.sessions:
+        elif session_id is None:
+            session_id = "default"
+        if session_tags and session_id not in self.sessions:
             session = self.get_session(session_id)
             session.metadata["tags"] = session_tags
         
@@ -1035,9 +1226,11 @@ class Agent:
                 await sse_send(ev)        # ev.to_sse() built-in
             final = await run              # final text
         """
-        if new_session or session_id is None:
+        if new_session:
             session_id = self.create_session(tags=session_tags)
-        elif session_tags and session_id not in self.sessions:
+        elif session_id is None:
+            session_id = "default"
+        if session_tags and session_id not in self.sessions:
             session = self.get_session(session_id)
             session.metadata["tags"] = session_tags
 

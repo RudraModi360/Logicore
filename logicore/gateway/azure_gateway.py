@@ -52,10 +52,32 @@ class AzureGateway(ProviderGateway):
             content = getattr(msg, "content", "") or ""
             if not content and not normalized_tool_calls:
                 raise ValueError("Azure OpenAI-compatible model returned empty response with no content or tool calls")
+
+            usage = None
+            if hasattr(response, "usage") and response.usage:
+                usage = {}
+                for attr in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    val = getattr(response.usage, attr, None)
+                    if val is not None:
+                        usage[attr] = val
+                details = getattr(response.usage, "prompt_tokens_details", None)
+                if details:
+                    pd = {}
+                    for dattr in ("cached_tokens", "cache_write_tokens", "reasoning_tokens"):
+                        dval = getattr(details, dattr, None)
+                        if dval is not None:
+                            pd[dattr] = dval
+                if pd:
+                    usage["prompt_tokens_details"] = pd
+
+            if usage:
+                _gateway_debug(self, f"chat usage: {usage}")
+
             return NormalizedMessage(
                 role=getattr(msg, "role", "assistant"),
                 content=content,
                 tool_calls=normalized_tool_calls,
+                usage=usage,
             )
         else:
             return await self._chat_inference_http(messages, tools)
@@ -66,7 +88,7 @@ class AzureGateway(ProviderGateway):
         
         messages = _convert_local_images_to_base64(messages)
         deployment = getattr(self.provider, "deployment_name", self.model_name)
-        kwargs = {"model": deployment, "messages": messages, "stream": True}
+        kwargs = {"model": deployment, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
         if tools:
             kwargs["tools"] = tools
         if max_tokens:
@@ -136,10 +158,44 @@ class AzureGateway(ProviderGateway):
         if not accumulated and not tool_calls:
             raise ValueError("Azure OpenAI-compatible stream ended with no content or tool calls")
 
+        usage = None
+        try:
+            final_usage = getattr(stream, "usage", None) if "stream" in dir() else None
+            if final_usage and hasattr(final_usage, "prompt_tokens"):
+                usage = {}
+                for attr in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    val = getattr(final_usage, attr, None)
+                    if val is not None:
+                        usage[attr] = val
+                details = getattr(final_usage, "prompt_tokens_details", None)
+                if details:
+                    pd = {}
+                    for dattr in ("cached_tokens", "cache_write_tokens", "reasoning_tokens"):
+                        dval = getattr(details, dattr, None)
+                        if dval is not None:
+                            pd[dattr] = dval
+                    if pd:
+                        usage["prompt_tokens_details"] = pd
+                out_details = getattr(final_usage, "output_tokens_details", None)
+                if not out_details:
+                    out_details = getattr(final_usage, "completion_tokens_details", None)
+                if out_details:
+                    od = {}
+                    odr = getattr(out_details, "reasoning_tokens", None)
+                    if odr is not None:
+                        od["reasoning_tokens"] = odr
+                    if od:
+                        usage["output_tokens_details"] = od
+                _gateway_debug(self, f"chat_stream usage: {usage}")
+        except Exception:
+            pass
+
+        _gateway_debug(self, f"chat_stream response: content_len={len(accumulated)}, tool_calls={len(tool_calls)}")
         return NormalizedMessage(
             role="assistant",
             content=accumulated,
             tool_calls=tool_calls,
+            usage=usage,
         )
 
     async def _chat_inference_http(self, messages, tools=None) -> NormalizedMessage:
@@ -163,7 +219,18 @@ class AzureGateway(ProviderGateway):
             msg = data["choices"][0]["message"]
 
             tool_calls = _normalize_openai_tool_calls(msg.get("tool_calls"))
-            return NormalizedMessage(role="assistant", content=msg.get("content", ""), tool_calls=tool_calls)
+
+            usage = data.get("usage")
+            if usage and isinstance(usage, dict):
+                normalized_usage = {}
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    if key in usage:
+                        normalized_usage[key] = usage[key]
+                if "prompt_tokens_details" in usage:
+                    normalized_usage["prompt_tokens_details"] = usage["prompt_tokens_details"]
+                usage = normalized_usage if normalized_usage else None
+
+            return NormalizedMessage(role="assistant", content=msg.get("content", ""), tool_calls=tool_calls, usage=usage)
 
     async def _chat_anthropic(self, messages, tools=None, max_tokens=None) -> NormalizedMessage:
         system_content, anthropic_msgs = self._format_for_anthropic(messages)
@@ -186,7 +253,22 @@ class AzureGateway(ProviderGateway):
                     "function": {"name": block.name,
                                  "arguments": json.dumps(block.input) if isinstance(block.input, dict) else str(block.input)},
                 })
-        return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls)
+
+        usage = None
+        if hasattr(response, "usage") and response.usage:
+            usage = {}
+            for attr in ("input_tokens", "output_tokens"):
+                val = getattr(response.usage, attr, None)
+                if val is not None:
+                    usage[attr] = val
+            cr = getattr(response.usage, "cache_read_input_tokens", None)
+            if cr is not None:
+                usage["cache_read_input_tokens"] = cr
+            cw = getattr(response.usage, "cache_creation_input_tokens", None)
+            if cw is not None:
+                usage["cache_creation_input_tokens"] = cw
+
+        return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls, usage=usage)
 
     async def _chat_anthropic_stream(self, messages, tools=None, on_token=None, on_event=None, max_tokens=None) -> NormalizedMessage:
         import queue, threading
@@ -198,12 +280,14 @@ class AzureGateway(ProviderGateway):
             kwargs["tools"] = self._format_tools_anthropic(tools)
 
         q = queue.Queue()
+        final_message_holder = [None]
 
         def worker():
             try:
                 with self.provider.client.messages.stream(**kwargs) as stream:
                     for event in stream:
                         q.put(("event", event))
+                    final_message_holder[0] = stream.get_final_message()
                 q.put(("done", None))
             except Exception as e:
                 q.put(("error", e))
@@ -256,7 +340,27 @@ class AzureGateway(ProviderGateway):
                 "type": "function",
                 "function": {"name": t["name"], "arguments": arguments}
             })
-        return NormalizedMessage(role="assistant", content=acc_text, tool_calls=tool_calls)
+        usage = None
+        try:
+            final_msg = final_message_holder[0]
+            if final_msg and hasattr(final_msg, "usage"):
+                fu = final_msg.usage
+                usage = {}
+                for attr in ("input_tokens", "output_tokens"):
+                    val = getattr(fu, attr, None)
+                    if val is not None:
+                        usage[attr] = val
+                cache_read = getattr(fu, "cache_read_input_tokens", None)
+                cache_write = getattr(fu, "cache_creation_input_tokens", None)
+                if cache_read is not None:
+                    usage["cache_read_input_tokens"] = cache_read
+                if cache_write is not None:
+                    usage["cache_creation_input_tokens"] = cache_write
+                _gateway_debug(self, f"chat_stream usage: {usage}")
+        except Exception:
+            pass
+
+        return NormalizedMessage(role="assistant", content=acc_text, tool_calls=tool_calls, usage=usage)
 
     def _format_for_anthropic(self, messages):
         from logicore.providers.utils import extract_content

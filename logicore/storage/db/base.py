@@ -80,6 +80,8 @@ class DatabaseBackend(ABC):
         reasoning_tokens: int = 0,
         tool_calls: int = 0,
         api_calls: int = 0,
+        estimated_cost_usd: float = 0,
+        cost_status: str = "unknown",
     ) -> None:
         """Save or update telemetry counters for a session."""
 

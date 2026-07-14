@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Native Logicore imports ──────────────────────────────────────────────────
 from logicore.agent.base import Agent
-from logicore.context_engine.token_estimator import (
+from logicore.runtime.context.token_estimator import (
     get_model_context_window, estimate_tokens, estimate_message_tokens,
 )
 from logicore.runtime.context.token_budget import TokenCategory

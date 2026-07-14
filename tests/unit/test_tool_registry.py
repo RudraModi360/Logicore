@@ -144,7 +144,8 @@ class TestToolCategories:
         for tool in SAFE_TOOLS:
             assert tool in ["read_file", "list_files", "search_files", "fast_grep", 
                            "read_document", "media_search", "list_cron_jobs", "get_crons",
-                           "task_create", "task_get", "task_update", "task_list", "task_next"]
+                           "task_create", "task_get", "task_update", "task_list", "task_next",
+                           "load_skill"]
     
     def test_dangerous_tools_are_write_operations(self):
         """Test dangerous tools are write/destructive operations."""

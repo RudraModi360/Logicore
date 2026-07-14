@@ -1,0 +1,10 @@
+- PDF has proper title and metadata
+- Text is readable (10-12pt font size)
+- Headers clearly distinguished from body
+- Tables properly formatted with borders
+- Images are high-resolution and properly sized
+- Page numbers are present
+- Margins are appropriate
+- No text overlapping or cut off
+- File size is reasonable
+- PDF opens without errors

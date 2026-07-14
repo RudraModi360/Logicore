@@ -496,7 +496,13 @@ class MemoryRetriever:
         if not memories:
             return ""
 
-        lines = ["## Relevant Memories\n"]
+        lines = [
+            "## Relevant Memories",
+            "(Recalled from persistent memory and provided inline below. This is "
+            "NOT a file on disk — do NOT use read_file/search_files/list_files to "
+            "look it up. Use only the content shown here.)",
+            "",
+        ]
 
         for header, body, score in memories:
             domain = header.domain.value if header.domain else "unknown"
@@ -524,7 +530,7 @@ class MemoryRetriever:
 
             lines.append(
                 f"Memory [{domain}/{kind}, relevance {score:.2f}] "
-                f"saved {age_text} ({header.filename}){expires_text}{tags}{related_to}:"
+                f"saved {age_text}{expires_text}{tags}{related_to}:"
             )
             lines.append(body.strip())
             lines.append("")

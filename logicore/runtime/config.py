@@ -39,7 +39,7 @@ from logicore.config.env import _raw
 
 def _get_canonical_model_windows() -> Dict[str, int]:
     """Get model context windows from the canonical source."""
-    from logicore.context_engine.token_estimator import MODEL_CONTEXT_WINDOWS
+    from logicore.runtime.context.token_estimator import MODEL_CONTEXT_WINDOWS
     return dict(MODEL_CONTEXT_WINDOWS)
 
 
@@ -143,7 +143,7 @@ class ContextConfig:
     max_distillation_size: int = 1000000
     
     # System prompt max characters (truncate if exceeded)
-    system_prompt_max_chars: int = 36000
+    system_prompt_max_chars: int = 40000
 
 
 @dataclass
@@ -252,20 +252,6 @@ def _default_plans_dir() -> str:
 
 
 @dataclass
-class PromptCacheConfig:
-    """Configuration for prompt caching subsystem."""
-    
-    # Enable prompt caching
-    enabled: bool = True
-    
-    # TTL for cache entries in seconds (default 5 minutes)
-    ttl_seconds: int = 300
-    
-    # Maximum number of cache entries
-    max_entries: int = 100
-
-
-@dataclass
 class RuntimeConfig:
     """
     Master configuration for the agentic runtime.
@@ -294,14 +280,13 @@ class RuntimeConfig:
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
-    prompt_cache: PromptCacheConfig = field(default_factory=PromptCacheConfig)
     
     # Model-specific context windows (canonical source: context_engine.token_estimator)
     model_context_windows: Dict[str, int] = field(default_factory=lambda: _get_canonical_model_windows())
     
     def get_model_context_window(self, model_name: str, provider=None) -> int:
         """Get context window size for a model, with fallback to default."""
-        from logicore.context_engine.token_estimator import get_model_context_window
+        from logicore.runtime.context.token_estimator import get_model_context_window
         return get_model_context_window(model_name, provider)
     
     def get_compression_threshold_for_model(self, model_name: str) -> int:
@@ -384,11 +369,6 @@ class RuntimeConfig:
             ),
             telemetry=TelemetryConfig(
                 enabled=get_env_bool("LOGICORE_TELEMETRY_ENABLED", getattr(settings, "TELEMETRY_ENABLED", True)),
-            ),
-            prompt_cache=PromptCacheConfig(
-                enabled=get_env_bool("LOGICORE_PROMPT_CACHE_ENABLED", getattr(settings, "PROMPT_CACHE_ENABLED", True)),
-                ttl_seconds=get_env_int("LOGICORE_PROMPT_CACHE_TTL", getattr(settings, "PROMPT_CACHE_TTL_SECONDS", 300)),
-                max_entries=get_env_int("LOGICORE_PROMPT_CACHE_MAX_ENTRIES", getattr(settings, "PROMPT_CACHE_MAX_ENTRIES", 100)),
             ),
         )
     

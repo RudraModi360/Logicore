@@ -62,7 +62,7 @@ class ChatOrchestrator:
                 ctx = provider.get_context_window()
                 if ctx and ctx > 0:
                     return int(ctx)
-            from logicore.context_engine.token_estimator import get_model_context_window
+            from logicore.runtime.context.token_estimator import get_model_context_window
             if model:
                 return get_model_context_window(model, provider)
         except Exception:
@@ -379,11 +379,10 @@ class ChatOrchestrator:
                 msg_dict["gemini_content"] = gemini_content
             session.add_message(msg_dict)
 
-            # Telemetry
-            if self.agent.telemetry_enabled:
-                self._record_telemetry(
-                    session_id, llm_start_time, content, tool_calls, _ctx_result
-                )
+            # Telemetry — always record (DB persistence), visibility gated by telemetry_enabled
+            self._record_telemetry(
+                session_id, llm_start_time, response, tool_calls, emitter
+            )
 
             # Loop detection: end-of-turn bookkeeping (stagnant detection), then
             # content repetition check. Either may trigger recovery instead of a
@@ -577,9 +576,18 @@ class ChatOrchestrator:
         if self.debug:
             logger.debug(f"[ChatOrchestrator] Empty response. Injecting continuation prompt...")
 
+        # Build context-aware continuation: include last tool result if available
+        last_tool_result = ""
+        if self.agent.execution_log:
+            last_entry = self.agent.execution_log[-1]
+            last_tool_result = f"\n\nLast tool result: {last_entry}"
+
         continuation_prompt = (
-            "You were exploring the codebase and executing tools. Please continue your analysis "
-            "or provide a summary of your findings so far. Do not leave the response empty."
+            "The previous response was empty. You MUST take exactly one action:\n"
+            "1. If the user's task is incomplete, call the next appropriate tool to continue.\n"
+            "2. If all tool work is done, provide a brief summary of what was accomplished.\n"
+            f"{last_tool_result}\n\n"
+            "Do NOT describe what you would do — actually do it with a tool call, or provide the final summary."
         )
         session.add_message({"role": "user", "content": continuation_prompt})
 
@@ -729,6 +737,19 @@ class ChatOrchestrator:
         else:
             self.agent.execution_log.append(f"Tool {name} SUCCEEDED")
 
+        # After load_skill, dynamically register the skill's tools on the agent
+        if name == "load_skill" and not is_error:
+            skill_name = args.get("skill_name")
+            if skill_name and hasattr(self.agent, '_skill_index_entries'):
+                if skill_name in self.agent._skill_index_entries:
+                    skills_dir, entry = self.agent._skill_index_entries[skill_name]
+                    from logicore.skills.loader import SkillLoader
+                    skill = SkillLoader.load_skill_by_index(skills_dir, skill_name)
+                    if skill:
+                        self.agent._register_skill_tools(skill)
+                        # Rebuild system prompt so new tools are available to the model
+                        self.agent._rebuild_system_prompt_with_tools()
+
         return result
 
     async def _fire_callback(self, callback, *args):
@@ -812,41 +833,140 @@ class ChatOrchestrator:
                 logger.error(f"[ChatOrchestrator] Synthesis failed: {e}")
             return self.agent._generate_execution_summary()
 
-    def _record_telemetry(self, session_id, llm_start_time, content, tool_calls, ctx_result):
-        """Record telemetry data."""
+    def _record_telemetry(self, session_id, llm_start_time, response, tool_calls, emitter):
+        """Record telemetry from a single LLM call.
+
+        Always accumulates in memory. DB persistence only if session row exists
+        (final _persist_session handles the definitive write).
+        """
         try:
-            from logicore.telemetry import TokenBreakdown
+            from logicore.telemetry.canonical import normalize_usage
+            from logicore.telemetry.pricing import estimate_usage_cost
 
             llm_end_time = time.time()
             duration_ms = (llm_end_time - llm_start_time) * 1000
 
-            # Token counting
-            _system_tokens = self.agent.context_engine.token_estimator.count_tokens(
-                " ".join(str(m.get("content", "")) for m in session.messages if m.get("role") == "system")
-            )
-            _tools_tokens = self.agent.context_engine.token_estimator.count_tokens(json.dumps([]))  # Placeholder
+            raw_usage = getattr(response, "usage", None)
+            provider_name = getattr(self.agent.provider, "provider_name", "unknown")
 
-            breakdown = TokenBreakdown(
-                system_instructions=_system_tokens,
-                tool_definitions=_tools_tokens,
-                messages=0,
-                tool_results=0,
-            )
+            canonical = normalize_usage(raw_usage, provider=provider_name)
 
-            input_tokens = _system_tokens + _tools_tokens
-            output_tokens = self.agent.context_engine.token_estimator.count_tokens(str(content or ""))
-            provider_name = getattr(self.agent.provider, 'provider_name', 'unknown')
+            # Auto-prefix-cache estimation for Ollama and Gemini:
+            # Both providers do transparent prefix caching.
+            #
+            # Ollama: prompt_tokens INCREASES between turns (reports total
+            # prompt including cached prefix). Estimated cache = previous turn.
+            #
+            # Gemini: prompt_tokens DECREASES between turns (reports only
+            # uncached portion). Estimated cache = previous - current.
+            if provider_name in ("ollama", "gemini") and raw_usage:
+                prompt_tokens = 0
+                if isinstance(raw_usage, dict):
+                    prompt_tokens = raw_usage.get("prompt_tokens", 0)
+                else:
+                    prompt_tokens = getattr(raw_usage, "prompt_tokens", 0) or 0
 
-            self.agent.telemetry_tracker.record_request(
-                session_id=session_id,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                model=self.agent.model_name,
-                provider=provider_name,
-                duration_ms=duration_ms,
-                token_breakdown=breakdown,
-                tool_calls=len(tool_calls) if tool_calls else 0
+                if prompt_tokens > 0:
+                    prev_key = f"_prefix_cache_prev_{session_id}"
+                    prev_prompt = getattr(self.agent, "_prefix_cache_tracker", {}).get(prev_key, 0)
+
+                    if prev_prompt > 0:
+                        from logicore.telemetry.canonical import CanonicalUsage
+                        if provider_name == "ollama" and prompt_tokens > prev_prompt:
+                            # Ollama: total grew → new = current - prev, cached = prev
+                            canonical = CanonicalUsage(
+                                input_tokens=prompt_tokens - prev_prompt,
+                                output_tokens=canonical.output_tokens,
+                                cache_read_tokens=prev_prompt,
+                                cache_write_tokens=canonical.cache_write_tokens,
+                                reasoning_tokens=canonical.reasoning_tokens,
+                            )
+                        elif provider_name == "gemini" and prompt_tokens < prev_prompt:
+                            # Gemini: total shrank → only uncached portion shown
+                            canonical = CanonicalUsage(
+                                input_tokens=prompt_tokens,
+                                output_tokens=canonical.output_tokens,
+                                cache_read_tokens=prev_prompt - prompt_tokens,
+                                cache_write_tokens=canonical.cache_write_tokens,
+                                reasoning_tokens=canonical.reasoning_tokens,
+                            )
+
+                    # Store for next turn
+                    if not hasattr(self.agent, "_prefix_cache_tracker"):
+                        self.agent._prefix_cache_tracker = {}
+                    self.agent._prefix_cache_tracker[prev_key] = prompt_tokens
+
+            self.agent.session_input_tokens += canonical.input_tokens
+            self.agent.session_output_tokens += canonical.output_tokens
+            self.agent.session_cache_read_tokens += canonical.cache_read_tokens
+            self.agent.session_cache_write_tokens += canonical.cache_write_tokens
+            self.agent.session_reasoning_tokens += canonical.reasoning_tokens
+            self.agent.session_api_calls += 1
+
+            base_url = getattr(self.agent.provider, "base_url", None)
+            api_key = getattr(self.agent.provider, "api_key", None)
+            cost = estimate_usage_cost(
+                self.agent.model_name, canonical,
+                provider=provider_name, base_url=base_url, api_key=api_key,
             )
+            self.agent.session_estimated_cost_usd += float(cost.amount_usd or 0)
+            self.agent.session_cost_status = cost.status
+            self.agent.session_cost_source = cost.source
+
+            if self.agent._storage and self.agent._storage.initialized:
+                if self.agent._storage.session_exists(session_id):
+                    self.agent._storage.save_telemetry(
+                        session_id,
+                        input_tokens=canonical.input_tokens,
+                        output_tokens=canonical.output_tokens,
+                        cache_read_tokens=canonical.cache_read_tokens,
+                        cache_write_tokens=canonical.cache_write_tokens,
+                        reasoning_tokens=canonical.reasoning_tokens,
+                        tool_calls=len(tool_calls) if tool_calls else 0,
+                        api_calls=1,
+                        estimated_cost_usd=float(cost.amount_usd or 0),
+                        cost_status=cost.status,
+                    )
+
+            if self.agent.telemetry_enabled or self.debug:
+                logger.info(
+                    f"[Telemetry] in={canonical.input_tokens} out={canonical.output_tokens} "
+                    f"cache_r={canonical.cache_read_tokens} cache_w={canonical.cache_write_tokens} "
+                    f"reasoning={canonical.reasoning_tokens} total={canonical.total_tokens} "
+                    f"cost={cost.label} session_total_in={self.agent.session_input_tokens} "
+                    f"session_total_out={self.agent.session_output_tokens} "
+                    f"session_api_calls={self.agent.session_api_calls}"
+                )
+
+            if self.agent.telemetry_enabled and hasattr(self.agent, "telemetry_tracker") and self.agent.telemetry_tracker:
+                self.agent.telemetry_tracker.record_request(
+                    session_id=session_id,
+                    input_tokens=canonical.input_tokens,
+                    output_tokens=canonical.output_tokens,
+                    model=self.agent.model_name,
+                    provider=provider_name,
+                    duration_ms=duration_ms,
+                    tool_calls=len(tool_calls) if tool_calls else 0,
+                )
+
+            if self.agent.telemetry_enabled and emitter:
+                try:
+                    from logicore.stream.events import StreamEvent, StreamEventType
+                    emitter.emit(StreamEvent.create(StreamEventType.USAGE, {
+                        "input_tokens": canonical.input_tokens,
+                        "output_tokens": canonical.output_tokens,
+                        "cache_read_tokens": canonical.cache_read_tokens,
+                        "cache_write_tokens": canonical.cache_write_tokens,
+                        "reasoning_tokens": canonical.reasoning_tokens,
+                        "total_tokens": canonical.total_tokens,
+                        "api_calls": self.agent.session_api_calls,
+                        "estimated_cost_usd": self.agent.session_estimated_cost_usd,
+                        "cost_status": cost.status,
+                        "session_id": session_id,
+                    }))
+                except Exception:
+                    pass
+
         except Exception as e:
             if self.debug:
                 logger.error(f"[ChatOrchestrator] Telemetry error: {e}")

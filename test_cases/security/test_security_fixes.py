@@ -526,7 +526,7 @@ class TestNoUnsafeEvalExec:
     """
 
     EXCLUDE_DIRS = {"__pycache__", "node_modules", ".git", "test_cases", "examples", "example"}
-    SAFE_EVAL_MODULES = {"prompt_cache"}  # Modules where ast.literal_eval is acceptable
+    SAFE_EVAL_MODULES = set()  # Modules where ast.literal_eval is acceptable
 
     def test_no_bare_eval_calls(self):
         """

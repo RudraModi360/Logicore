@@ -90,7 +90,7 @@ KNOWN_HIERARCHIES: dict[str, set[str]] = {
         "WebSearchTool", "UrlFetchTool", "ImageSearchTool",
         "SmartBashTool", "DateTimeTool", "NotesTool", "ThinkTool",
         "GitCommandTool", "ReadDocumentTool", "ConvertDocumentTool",
-        "MergePDFTool", "SplitPDFTool", "MediaSearchTool",
+        "MediaSearchTool",
         "AddCronJobTool", "ListCronJobsTool", "RemoveCronJobTool", "GetCronsTool",
         "EnterPlanModeTool", "SubmitPlanTool", "ExitPlanModeTool",
         "UpdatePlanProgressTool", "ViewPlanTool",

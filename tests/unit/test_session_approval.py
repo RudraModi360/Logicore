@@ -9,7 +9,7 @@ prompting on every call.
 import asyncio
 import pytest
 
-from logicore.agent.tool_executor import ToolExecutor
+from logicore.agent.tool_executor import ToolExecutor, ApprovalDecision
 
 
 async def _run(executor, name, session_id, args=None):
@@ -95,4 +95,48 @@ def test_clear_session_approvals_resets_cache():
         await ex.execute("web_search", {"user_input": "x"}, session_id="s1")
 
     asyncio.run(main())
+    assert calls["n"] == 2
+
+
+def test_yes_to_all_caches_tool_for_session():
+    ex = ToolExecutor()
+    calls = {"n": 0}
+
+    async def cb(session_id, name, args):
+        calls["n"] += 1
+        # First call approves for the whole session; subsequent calls in the
+        # same session must not re-prompt.
+        return ApprovalDecision.ALLOW_SESSION
+
+    ex.set_callbacks(on_tool_approval=cb)
+
+    async def main():
+        await ex.execute("create_file", {"file_path": "a", "content": "x"}, session_id="s1")
+        await ex.execute("create_file", {"file_path": "b", "content": "y"}, session_id="s1")
+        # Different tool in same session still prompts (grant is per-tool)
+        await ex.execute("edit_file", {"file_path": "a", "old_string": "x", "new_string": "z"}, session_id="s1")
+        # New session re-prompts
+        await ex.execute("create_file", {"file_path": "c", "content": "z"}, session_id="s2")
+
+    asyncio.run(main())
+    # create_file x1 (cached) + edit_file x1 + create_file new session x1
+    assert calls["n"] == 3
+
+
+def test_yes_once_does_not_cache_for_session():
+    ex = ToolExecutor()
+    calls = {"n": 0}
+
+    async def cb(session_id, name, args):
+        calls["n"] += 1
+        return ApprovalDecision.ALLOW_ONCE
+
+    ex.set_callbacks(on_tool_approval=cb)
+
+    async def main():
+        await ex.execute("create_file", {"file_path": "a"}, session_id="s1")
+        await ex.execute("create_file", {"file_path": "b"}, session_id="s1")
+
+    asyncio.run(main())
+    # ALLOW_ONCE re-prompts every time
     assert calls["n"] == 2

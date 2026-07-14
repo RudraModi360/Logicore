@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional
 
 
 # Hard limit for system prompt characters
-SYSTEM_PROMPT_MAX_CHARS = 36000
+SYSTEM_PROMPT_MAX_CHARS = 40000
 
 
 class PromptAssembler:

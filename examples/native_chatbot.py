@@ -39,7 +39,7 @@ from logicore.providers.ollama_provider import OllamaProvider
 from logicore.runtime.scheduler import ToolScheduler
 from logicore.runtime import RuntimeConfig, ToolConfig
 from logicore.runtime.loop_detection import LoopDetectionEngine, LoopDetectionResult
-from logicore.context_engine.token_estimator import estimate_tokens, estimate_message_tokens
+from logicore.runtime.context.token_estimator import estimate_tokens, estimate_message_tokens
 from logicore.runtime.context.token_budget import TokenBudget, TokenCategory
 
 # === NEW: Runtime Feature Imports ===

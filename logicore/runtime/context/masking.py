@@ -85,7 +85,7 @@ class ToolOutputMaskingService:
             temp_dir: Directory for saving masked outputs
         """
         self.config = config
-        from logicore.context_engine.token_estimator import TokenEstimator
+        from logicore.runtime.context.token_estimator import TokenEstimator
         self._estimator = token_counter if isinstance(token_counter, TokenEstimator) else TokenEstimator(token_counter)
         self._token_counter = self._estimator.count_tokens
         self.temp_dir = temp_dir or tempfile.gettempdir()

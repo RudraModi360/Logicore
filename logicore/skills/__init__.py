@@ -33,7 +33,7 @@ Usage:
     SkillLoader.build_skill_index("skills/")
 """
 
-from .base import Skill, SkillMetadata
+from .base import Skill, SkillMetadata, Capability, CapabilityType
 from .loader import SkillLoader, SkillIndexEntry
 
-__all__ = ["Skill", "SkillMetadata", "SkillLoader", "SkillIndexEntry"]
+__all__ = ["Skill", "SkillMetadata", "Capability", "CapabilityType", "SkillLoader", "SkillIndexEntry"]

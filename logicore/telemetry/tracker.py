@@ -122,13 +122,6 @@ class SessionMetrics:
     total_duration_ms: float = 0.0
     response_times_ms: List[float] = field(default_factory=list)
     
-    # Prompt caching metrics
-    cache_requests: int = 0
-    cache_hits: int = 0
-    cache_misses: int = 0
-    cache_tokens_saved: int = 0
-    cache_cost_saved: float = 0.0
-    
     # Session tracking
     started_at: Optional[datetime] = None
     last_request_at: Optional[datetime] = None
@@ -137,7 +130,7 @@ class SessionMetrics:
     def _get_context_window(self) -> Optional[int]:
         """Get context window for the model from canonical lookup."""
         try:
-            from logicore.context_engine.token_estimator import get_model_context_window
+            from logicore.runtime.context.token_estimator import get_model_context_window
             return get_model_context_window(self.model, self.provider)
         except Exception:
             return None
@@ -181,25 +174,6 @@ class SessionMetrics:
         if self.total_requests == 0:
             return 0.0
         return (self.total_errors / self.total_requests) * 100
-
-    @property
-    def cache_hit_rate(self) -> float:
-        """Cache hit rate as a percentage."""
-        if self.cache_requests == 0:
-            return 0.0
-        return (self.cache_hits / self.cache_requests) * 100
-
-    def record_cache_hit(self, tokens_saved: int = 0, cost_saved: float = 0.0) -> None:
-        """Record a cache hit."""
-        self.cache_requests += 1
-        self.cache_hits += 1
-        self.cache_tokens_saved += tokens_saved
-        self.cache_cost_saved += cost_saved
-
-    def record_cache_miss(self) -> None:
-        """Record a cache miss."""
-        self.cache_requests += 1
-        self.cache_misses += 1
 
     def to_dict(self) -> dict:
         """Export session metrics as a dictionary."""
@@ -255,16 +229,6 @@ class SessionMetrics:
                 "window_size": "unknown",
                 "used_tokens": self.total_tokens,
             }
-        
-        # Prompt caching metrics
-        res["cache"] = {
-            "requests": self.cache_requests,
-            "hits": self.cache_hits,
-            "misses": self.cache_misses,
-            "hit_rate_percent": round(self.cache_hit_rate, 2),
-            "tokens_saved": self.cache_tokens_saved,
-            "cost_saved": round(self.cache_cost_saved, 6),
-        }
             
         return res
 
@@ -320,28 +284,12 @@ class TelemetryTracker:
         tool_calls: int = 0,
         error: Optional[str] = None,
     ):
-        """
-        Record metrics for a single LLM request.
-        
-        Args:
-            session_id: Unique session identifier
-            input_tokens: Total input tokens
-            output_tokens: Total output tokens
-            model: Model name (used to determine context window)
-            provider: Provider name (openai, anthropic, etc.)
-            duration_ms: Request duration in milliseconds
-            token_breakdown: TokenBreakdown object with category breakdown
-            tool_calls: Number of tool calls made
-            error: Error message if request failed
-        """
+        """Record metrics for a single LLM request."""
         if not self.enabled:
             return
 
         now = datetime.now()
         total = input_tokens + output_tokens
-
-        if token_breakdown is None:
-            token_breakdown = TokenBreakdown(messages=total)
 
         request = RequestMetrics(
             timestamp=now,
@@ -351,7 +299,6 @@ class TelemetryTracker:
             model=model,
             provider=provider,
             duration_ms=duration_ms,
-            token_breakdown=token_breakdown,
             tool_calls=tool_calls,
             error=error,
         )
@@ -371,52 +318,7 @@ class TelemetryTracker:
         if error:
             session.total_errors += 1
 
-        # Accumulate token breakdown
-        session.cumulative_token_breakdown.system_instructions += (
-            token_breakdown.system_instructions
-        )
-        session.cumulative_token_breakdown.tool_definitions += (
-            token_breakdown.tool_definitions
-        )
-        session.cumulative_token_breakdown.file_content += token_breakdown.file_content
-        session.cumulative_token_breakdown.messages += token_breakdown.messages
-        session.cumulative_token_breakdown.tool_results += token_breakdown.tool_results
-        session.cumulative_token_breakdown.other += token_breakdown.other
-
         session.requests.append(request)
-
-    def record_cache_hit(
-        self,
-        session_id: str,
-        tokens_saved: int = 0,
-        cost_saved: float = 0.0,
-    ):
-        """
-        Record a prompt cache hit for a session.
-        
-        Args:
-            session_id: Unique session identifier
-            tokens_saved: Number of tokens saved due to caching
-            cost_saved: Estimated cost saved due to caching
-        """
-        if not self.enabled:
-            return
-        
-        session = self._get_session(session_id)
-        session.record_cache_hit(tokens_saved=tokens_saved, cost_saved=cost_saved)
-
-    def record_cache_miss(self, session_id: str):
-        """
-        Record a prompt cache miss for a session.
-        
-        Args:
-            session_id: Unique session identifier
-        """
-        if not self.enabled:
-            return
-        
-        session = self._get_session(session_id)
-        session.record_cache_miss()
 
     def get_session_summary(self, session_id: str) -> dict:
         """Get detailed telemetry summary for a specific session."""

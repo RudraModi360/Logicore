@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from examples.native_chatbot import SESSION_ID
 from logicore import Agent
 from logicore.storage import create_storage
-from logicore.memory import MemoryManager
+from logicore.memory.manager import MemoryManager
 
 # SESSION_ID = "smart-agent-demo"
 
@@ -41,17 +41,23 @@ from logicore.memory import MemoryManager
 async def main(provider: str, model: str):
     # (1) Storage-backed persistence (sessions live under ~/.logicore)
     storage = create_storage()
-    agent = Agent(provider=provider, model=model or None, storage=storage, debug=True)
+    agent = Agent(
+        provider=provider,
+        model=model or None,
+        storage=storage,
+        debug=True,
+        # telemetry=True,
+    )
 
     # (2) Resume an existing persisted session if present
-    SESSION_ID=agent.create_session()
+    SESSION_ID = agent.create_session()
     print(f"[new] started fresh session '{SESSION_ID}'")
 
     # (3) Attach persistent memory (standalone subsystem, driven per turn)
     memory = MemoryManager(
-        llm_provider=provider,
-        llm_model=model or None,
-        debug=True,
+        llm_provider="ollama",
+        llm_model="gemma3:4b-cloud",
+        # debug=True,
     )
     await memory.start()
 
@@ -92,7 +98,9 @@ async def main(provider: str, model: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SmartAgent demo with sessions + persistent memory")
+    parser = argparse.ArgumentParser(
+        description="SmartAgent demo with sessions + persistent memory"
+    )
     parser.add_argument("--provider", default=os.environ.get("PROVIDER", "ollama"))
     parser.add_argument("--model", default=os.environ.get("MODEL", "gpt-oss:20b-cloud"))
     args = parser.parse_args()

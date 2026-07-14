@@ -1,0 +1,10 @@
+- Title slide is compelling and clear
+- Each slide has ONE key message
+- Text is concise (6-8 lines max per slide)
+- Font sizes are appropriate (readable from distance)
+- Colors are consistent throughout
+- Images are high-resolution
+- Slide count appropriate for time allotted
+- No spelling or grammar errors
+- Transitions are subtle and professional
+- Speaker notes included for complex slides

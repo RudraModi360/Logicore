@@ -1,24 +1,23 @@
 """Simple interactive chatbot — using CustomProvider."""
 import asyncio
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from logicore import SmartAgent, BasicAgent, CopilotAgent, Agent ,MCPAgent
 
 
 async def main():
-    agent = MCPAgent(
+    agent = SmartAgent(
         provider="ollama",
-        model="qwen3:0.6b",
+        model="gpt-oss:20b-cloud",
         debug=True,
         telemetry=False,
         max_iterations=60,
         # mcp_config_path="mcp.json",
-        # tools=[]
+        tools=[],
+        # skills=[]
     )
-    agent.set_auto_approve_all(True)
+    # agent.set_auto_approve_all(True)
     print("Agent ready. Type 'quit' to exit.\n")
     while (msg := input("You: ").strip()) and msg != "quit":
         resp = await agent.chat(msg, stream=True, streaming_funct=lambda t: print(t, end="", flush=True))

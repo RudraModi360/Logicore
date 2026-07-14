@@ -1,0 +1,10 @@
+- Document has clear title and metadata
+- Heading hierarchy is consistent (H1 to H2 to H3)
+- Body text is 11pt Calibri or specified font
+- Paragraphs have appropriate spacing
+- Tables have headers and consistent formatting
+- Images are properly sized and captioned
+- Page margins are appropriate (1 inch default)
+- Headers and footers included if required
+- Page numbers present for multi-page docs
+- No orphaned headings at page boundaries

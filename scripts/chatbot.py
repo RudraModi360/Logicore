@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from logicore import Agent, SmartAgent, BasicAgent, CopilotAgent, MCPAgent
 from logicore.agent import AgentSession
+from logicore.agent.tool_executor import ApprovalDecision
 from logicore.tools.registry import registry
 from logicore.tools.base import BaseTool, ToolResult
 from logicore.tools import (
@@ -28,7 +29,7 @@ from logicore.tools import (
 from logicore.document import get_handler, BaseDocumentHandler
 from logicore.session import SessionManager
 from logicore.telemetry import TelemetryTracker
-from logicore.context_engine.token_estimator import estimate_tokens
+from logicore.runtime.context.token_estimator import estimate_tokens
 from logicore.runtime.context.token_budget import TokenBudget
 from logicore.gateway import ProviderGateway
 from logicore.skills import Skill, SkillLoader
@@ -51,6 +52,7 @@ Commands (type in chat or use /):
   /session             — Show session info
   /config              — Show agent config
   /telemetry           — Show telemetry stats
+  /usage               — Show session token usage and cost
   /token               — Show token budget estimation
   /new                 — Start a new session
   /mode <solo|project> — Switch agent mode (SmartAgent only)
@@ -262,7 +264,6 @@ class Chatbot:
         "read_file", "write_file", "edit_file", "create_file", "delete_file",
         "execute_command", "code_execute", "git_command",
         "read_document", "convert_document",
-        "merge_pdfs", "split_pdf",
     }
 
     def __init__(self, provider: str = "ollama", model: str = None):
@@ -569,12 +570,11 @@ class Chatbot:
         print(f"{'='*60}")
         print(f"  [y] Allow once")
         print(f"  [a] Allow + trust path (for this session)")
-        print(f"  [d] Deny")
         print(f"  [q] Deny all local access for this session")
 
         try:
             choice = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: input("\n  Your choice (y/a/d/q): ").strip().lower()
+                None, lambda: input("\n  Your choice (y/a/q): ").strip().lower()
             )
         except (EOFError, KeyboardInterrupt):
             return False
@@ -590,7 +590,9 @@ class Chatbot:
                         print(f"  [Trusted] {abs_p}")
                 except Exception:
                     pass
-            return True
+            # Trusting a path is a session-level grant: don't re-prompt this
+            # tool for the rest of the session.
+            return ApprovalDecision.ALLOW_SESSION
         elif choice == "q":
             self.sandbox_deny_all_local = True
             print("  [Session] All local access denied for this session.")
@@ -633,7 +635,7 @@ class Chatbot:
             elif name in DANGEROUS_TOOLS:
                 safety = " [DANGEROUS]"
             elif name in ['web_search', 'image_search', 'url_fetch', 'convert_document',
-                          'merge_pdfs', 'split_pdf', 'add_cron_job', 'remove_cron_job']:
+                          'add_cron_job', 'remove_cron_job']:
                 safety = " [APPROVAL]"
             lines.append(f"  • {name}{safety}")
 
@@ -686,6 +688,49 @@ class Chatbot:
             return f"\n--- Telemetry ---\n{t}\n" if isinstance(t, dict) else f"\n--- Telemetry ---\n{t}\n"
         except Exception as e:
             return f"\n--- Telemetry ---\nError: {e}\n"
+
+    def _show_usage(self) -> str:
+        u = self.agent.usage
+        if not u or u.get("api_calls", 0) == 0:
+            return "\n--- Session Usage ---\n  No API calls recorded yet.\n"
+
+        inp = u["input_tokens"]
+        out = u["output_tokens"]
+        cr = u["cache_read_tokens"]
+        cw = u["cache_write_tokens"]
+        reasoning = u["reasoning_tokens"]
+        total = u["total_tokens"]
+        api_calls = u["api_calls"]
+        cost = u.get("estimated_cost_usd", 0)
+        status = u.get("cost_status", "unknown")
+
+        lines = [
+            "",
+            "--- Session Usage ---",
+            f"  Input tokens:        {inp:,}",
+        ]
+        if cr:
+            lines.append(f"  Cache read:          {cr:,}")
+        if cw:
+            lines.append(f"  Cache write:         {cw:,}")
+        lines.append(f"  Output tokens:       {out:,}")
+        if reasoning:
+            lines.append(f"  Reasoning tokens:    {reasoning:,}")
+        lines.append(f"  {'─' * 40}")
+        lines.append(f"  Prompt total:        {inp + cr + cw:,}")
+        lines.append(f"  Total tokens:        {total:,}")
+        lines.append(f"  API calls:           {api_calls:,}")
+        lines.append(f"  {'─' * 40}")
+
+        if cost and cost > 0:
+            lines.append(f"  Est. cost:           ${cost:.4f} ({status})")
+        elif status == "included":
+            lines.append(f"  Est. cost:           included (local/self-hosted)")
+        else:
+            lines.append(f"  Est. cost:           n/a ({status})")
+
+        lines.append("")
+        return "\n".join(lines)
 
     def _show_token_estimate(self, text: str = None) -> str:
         if text:
@@ -1031,6 +1076,8 @@ class Chatbot:
             )
         elif command == "/telemetry":
             print(self._show_telemetry())
+        elif command == "/usage":
+            print(self._show_usage())
         elif command == "/token":
             print(self._show_token_estimate())
         elif command == "/new":

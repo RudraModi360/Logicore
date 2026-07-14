@@ -313,6 +313,8 @@ class StorageManager:
         reasoning_tokens: int = 0,
         tool_calls: int = 0,
         api_calls: int = 0,
+        estimated_cost_usd: float = 0,
+        cost_status: str = "unknown",
     ) -> None:
         """Save telemetry counters (additive) and enqueue snapshot sync."""
         if not self._db:
@@ -329,6 +331,8 @@ class StorageManager:
                 reasoning_tokens=reasoning_tokens,
                 tool_calls=tool_calls,
                 api_calls=api_calls,
+                estimated_cost_usd=estimated_cost_usd,
+                cost_status=cost_status,
             )
             logger.debug(f"[TX] save_telemetry success | session={session_id} | stored in SQL database")
         except Exception as e:
@@ -364,6 +368,8 @@ class StorageManager:
             "reasoning_tokens": raw["reasoning_tokens"],
             "tool_calls": raw["tool_calls"],
             "api_calls": raw["api_calls"],
+            "estimated_cost_usd": raw.get("estimated_cost_usd", 0),
+            "cost_status": raw.get("cost_status", "unknown"),
             "total_input": total_input,
             "total_output": total_output,
             "total_tokens": total_tokens,

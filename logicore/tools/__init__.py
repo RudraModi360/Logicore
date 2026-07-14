@@ -10,7 +10,8 @@ from .registry import (
     TOOL_PRESETS,
     SAFE_TOOLS, 
     DANGEROUS_TOOLS, 
-    APPROVAL_REQUIRED_TOOLS
+    APPROVAL_REQUIRED_TOOLS,
+    ALWAYS_ON_TOOLS,
 )
 from .base import ToolResult, BaseTool
 from .notes import NotesTool
@@ -52,6 +53,7 @@ __all__ = [
     'SAFE_TOOLS',
     'DANGEROUS_TOOLS',
     'APPROVAL_REQUIRED_TOOLS',
+    'ALWAYS_ON_TOOLS',
     'ALL_TOOL_SCHEMAS',
     'LIGHTWEIGHT_TOOL_SCHEMAS',
     'SMART_TOOL_SCHEMAS',
