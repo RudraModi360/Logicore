@@ -189,14 +189,33 @@ class FakeContextEngine:
     def remove_hint(self, messages, hint):
         return None
 
+    def inject_hint(self, messages, hint):
+        pass
+
 
 class FakeSession:
     def __init__(self):
         self.messages = []
         self.metadata = {}
+        self.corrections_made = []
+        self.explored_topics = []
+        self.tool_results_history = []
+        self.recovery_state = type('RecoveryState', (), {
+            'reset_for_turn': lambda self: None,
+            'record_recovery': lambda self, *args, **kwargs: None,
+        })()
 
     def add_message(self, msg):
         self.messages.append(msg)
+
+    def add_correction(self, *args, **kwargs):
+        pass
+
+    def add_explored_topic(self, *args, **kwargs):
+        pass
+
+    def add_tool_result(self, *args, **kwargs):
+        pass
 
 
 class FakeAgent:

@@ -35,6 +35,7 @@ from enum import Enum
 
 # All environment access flows through the single config gateway.
 from logicore.config.env import _raw
+from logicore.agent.tool_guardrails import ToolCallGuardrailConfig
 
 
 def _get_canonical_model_windows() -> Dict[str, int]:
@@ -142,8 +143,21 @@ class ContextConfig:
     # Max size for distillation (skip if larger)
     max_distillation_size: int = 1000000
     
-    # System prompt max characters (truncate if exceeded)
-    system_prompt_max_chars: int = 40000
+    # System prompt max tokens (truncate if exceeded). Token-based cap so the
+    # framework measures the same unit the LLM counts, eliminating the
+    # char-vs-token mismatch that caused premature 40k "token" truncation.
+    # Expressed as a fraction of the model context window (see
+    # system_prompt_max_tokens_ratio) with a sane absolute floor.
+    system_prompt_max_tokens: int = 16000
+
+    # Fraction of the model context window the system prompt may occupy.
+    system_prompt_max_tokens_ratio: float = 0.15
+
+    # Backwards-compat alias: char-based capping was removed. Retained so
+    # external readers/serializers that expect the old key do not break.
+    @property
+    def system_prompt_max_chars(self) -> int:
+        return self.system_prompt_max_tokens
 
 
 @dataclass
@@ -280,6 +294,7 @@ class RuntimeConfig:
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
+    tool_loop_guardrails: ToolCallGuardrailConfig = field(default_factory=ToolCallGuardrailConfig)
     
     # Model-specific context windows (canonical source: context_engine.token_estimator)
     model_context_windows: Dict[str, int] = field(default_factory=lambda: _get_canonical_model_windows())
@@ -395,7 +410,8 @@ class RuntimeConfig:
                 "preserve_recent_count": self.context.preserve_recent_count,
                 "protection_threshold_tokens": self.context.protection_threshold_tokens,
                 "min_prunable_tokens": self.context.min_prunable_tokens,
-                "system_prompt_max_chars": self.context.system_prompt_max_chars,
+                "system_prompt_max_tokens": self.context.system_prompt_max_tokens,
+                "system_prompt_max_tokens_ratio": self.context.system_prompt_max_tokens_ratio,
             },
             "tool": {
                 "max_output_chars": self.tool.max_output_chars,

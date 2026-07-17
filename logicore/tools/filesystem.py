@@ -611,7 +611,7 @@ class ListFilesTool(BaseTool):
     description = "Browse directory contents and file structure. Supports tree view."
     args_schema = ListFilesParams
 
-    def run(self, directory: str = '.', pattern: str = '*.*', recursive: bool = False, show_hidden: bool = False, tree: bool = False, ignore_patterns: List[str] = None) -> ToolResult:
+    def run(self, directory: str = '.', pattern: str = '*', recursive: bool = False, show_hidden: bool = False, tree: bool = False, ignore_patterns: List[str] = None) -> ToolResult:
         try:
             is_valid, err = validate_path(directory)
             if not is_valid:
@@ -658,20 +658,35 @@ class ListFilesTool(BaseTool):
             # Standard List View
             file_list = []
             if recursive:
+                dir_file_counts = {}
                 for root, dirs, files in os.walk(abs_path):
                     dirs[:] = [d for d in dirs if not (d.startswith('.') and not show_hidden) and not should_ignore(d)]
-                    # Remove hidden files if needed, but 'files' logic below handles ignore check
                     
+                    rel_root = os.path.relpath(root, abs_path)
+                    if rel_root == '.':
+                        rel_root = ''
+                    
+                    count = 0
                     for file in files:
                         if not show_hidden and file.startswith('.'):
                             continue
                         if should_ignore(file):
                             continue
-                            
-                        # Pattern check
-                        # Simple wildcard replacement for regex match is risky, assume 'pattern' is glob
                         if fnmatch.fnmatch(file, pattern):
                              file_list.append(os.path.join(root, file))
+                             count += 1
+                    if count > 0:
+                        dir_file_counts[rel_root or '.'] = count
+                
+                if len(file_list) > 200:
+                    summary_lines = [f"Recursive listing found {len(file_list)} files across {len(dir_file_counts)} directories:"]
+                    for d, c in sorted(dir_file_counts.items())[:30]:
+                        summary_lines.append(f"  {d}/ : {c} files")
+                    if len(dir_file_counts) > 30:
+                        summary_lines.append(f"  ... and {len(dir_file_counts) - 30} more directories")
+                    summary_lines.append("")
+                    summary_lines.append("TIP: Use non-recursive list_files(directory='.') to see top-level, then drill into specific directories.")
+                    return ToolResult(success=True, content="\n".join(summary_lines))
             else:
                 for item in os.listdir(abs_path):
                     if not show_hidden and item.startswith('.'):

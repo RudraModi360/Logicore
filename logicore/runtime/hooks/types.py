@@ -93,6 +93,7 @@ class HookResult:
         synthesized_response: Synthesized response (if action == SYNTHESIZE)
         modified_tool_calls: Modified tool calls (if action == MODIFY)
         modified_tool_args: Modified tool arguments (if action == MODIFY)
+        tool_result: Modified tool result (if action == MODIFY in AFTER_TOOL_EXECUTION)
         skip_reason: Reason for skipping (if action == SKIP)
         metadata: Additional result metadata
     """
@@ -102,6 +103,7 @@ class HookResult:
     synthesized_response: Optional["NormalizedMessage"] = None
     modified_tool_calls: Optional[List[Dict[str, Any]]] = None
     modified_tool_args: Optional[Dict[str, Any]] = None
+    tool_result: Optional[Dict[str, Any]] = None
     skip_reason: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 

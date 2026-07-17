@@ -23,6 +23,7 @@ class MemoryDomain(str, Enum):
     KNOWLEDGE = "knowledge"
     DOMAIN = "domain"
     ADDITIONAL_LEARNING = "additional_learning"
+    OPERATIONAL = "operational"  # Failure patterns, recovery strategies, lessons learned
 
 
 class MemoryKind(str, Enum):
@@ -32,6 +33,7 @@ class MemoryKind(str, Enum):
     GUIDELINE = "guideline"
     CONTEXT = "context"
     POINTER = "pointer"
+    LESSON = "lesson"  # Lesson learned from failure/success
 
 
 class MemoryStability(str, Enum):
@@ -58,6 +60,8 @@ LEGACY_TYPE_MAPPING = {
     MemoryType.FEEDBACK: (MemoryDomain.PREFERENCES, MemoryKind.GUIDELINE),
     MemoryType.PROJECT: (MemoryDomain.KNOWLEDGE, MemoryKind.CONTEXT),
     MemoryType.REFERENCE: (MemoryDomain.KNOWLEDGE, MemoryKind.POINTER),
+    # Operational memories use OPERATIONAL domain and LESSON kind
+    "operational": (MemoryDomain.OPERATIONAL, MemoryKind.LESSON),
 }
 
 
@@ -227,5 +231,17 @@ DOMAIN_KEYWORDS = {
         "observation",
         "trend",
         "anomaly",
+    ],
+    MemoryDomain.OPERATIONAL: [
+        "error",
+        "failure",
+        "recovery",
+        "retry",
+        "lesson",
+        "mistake",
+        "what went wrong",
+        "how to fix",
+        "avoid",
+        "don't do",
     ],
 }

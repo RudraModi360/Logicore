@@ -27,6 +27,7 @@ from logicore.runtime.context.token_estimator import (
     TokenEstimator,
     MODEL_CONTEXT_WINDOWS,
     get_model_context_window,
+    get_tiktoken_counter,
     estimate_tokens,
     estimate_message_tokens,
 )
@@ -59,6 +60,7 @@ __all__ = [
     # Token estimator utilities
     "MODEL_CONTEXT_WINDOWS",
     "get_model_context_window",
+    "get_tiktoken_counter",
     "estimate_tokens",
     "estimate_message_tokens",
 ]

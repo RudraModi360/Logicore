@@ -359,7 +359,8 @@ class TestRuntimeConfigDefaults:
         assert ctx.max_context_tokens > 0
         assert 0 < ctx.compression_threshold_ratio < 1
         assert ctx.preserve_recent_count > 0
-        assert ctx.system_prompt_max_chars > 0
+        assert ctx.system_prompt_max_tokens > 0
+        assert 0 < ctx.system_prompt_max_tokens_ratio <= 1
 
     def test_tool_config_defaults(self):
         config = RuntimeConfig()

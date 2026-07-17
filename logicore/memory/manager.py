@@ -247,7 +247,7 @@ EXISTING MEMORY INDEX:
         
         # Inject as system reminder before user message
         injection_msg = {
-            "role": "user",
+            "role": "system",
             "content": f"<system-reminder>\n{injection}\n</system-reminder>",
         }
         

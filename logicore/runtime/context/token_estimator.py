@@ -3,11 +3,24 @@ TokenEstimator: Centralized token counting for the context engine.
 
 Replaces ad-hoc `chars // 4` estimates scattered across the codebase.
 Provides a single source of truth for token measurement.
+
+Optionally uses tiktoken (BPE) for accurate counting when available.
+Falls back to character-length heuristic (~4 chars per token).
 """
 
 from __future__ import annotations
 
+import logging
 from typing import List, Dict, Any, Optional, Callable
+
+logger = logging.getLogger(__name__)
+
+# === Optional tiktoken import ===
+try:
+    import tiktoken
+    _TIKTOKEN_AVAILABLE = True
+except ImportError:
+    _TIKTOKEN_AVAILABLE = False
 
 # === Model context windows ===
 MODEL_CONTEXT_WINDOWS = {
@@ -101,6 +114,33 @@ def get_model_context_window(model_name: str, provider=None) -> int:
     return MODEL_CONTEXT_WINDOWS["default"]
 
 
+def get_tiktoken_counter(encoding_name: str = "cl100k_base") -> Optional[Callable[[str], int]]:
+    """Get a tiktoken-based token counter.
+    
+    Returns a Callable[[str], int] that counts tokens using BPE encoding.
+    Returns None if tiktoken is not installed.
+    
+    Args:
+        encoding_name: tiktoken encoding name. Default "cl100k_base" covers
+                       GPT-4, GPT-3.5-Turbo, and Claude models.
+    """
+    if not _TIKTOKEN_AVAILABLE:
+        return None
+    
+    try:
+        enc = tiktoken.get_encoding(encoding_name)
+        
+        def _count_tokens(text: str) -> int:
+            if not text:
+                return 0
+            return len(enc.encode(text))
+        
+        return _count_tokens
+    except Exception as e:
+        logger.warning(f"[TokenEstimator] Failed to load tiktoken encoding '{encoding_name}': {e}")
+        return None
+
+
 def estimate_tokens(text: str) -> int:
     """Estimate token count from text (~4 chars per token)."""
     if not text:
@@ -124,7 +164,7 @@ def estimate_message_tokens(messages: list) -> int:
                     elif part.get("type") == "image_url":
                         total += 1000
         if "tool_calls" in msg:
-            total += len(str(msg["tool_calls"])) // 10
+            total += estimate_tokens(str(msg["tool_calls"]))
     return total
 
 
@@ -132,12 +172,22 @@ class TokenEstimator:
     """
     Estimates token counts for messages and text.
 
-    Uses character-length heuristic by default (~4 chars per token).
+    Uses tiktoken BPE when available, falls back to character-length heuristic.
     Accepts a custom counter for model-specific tokenizers.
     """
 
     def __init__(self, token_counter: Optional[Callable[[str], int]] = None):
-        self._counter = token_counter or self._default_counter
+        if token_counter is not None:
+            self._counter = token_counter
+        else:
+            # Auto-detect tiktoken
+            tiktoken_counter = get_tiktoken_counter()
+            if tiktoken_counter is not None:
+                self._counter = tiktoken_counter
+                logger.debug("[TokenEstimator] Using tiktoken BPE tokenizer")
+            else:
+                self._counter = self._default_counter
+                logger.debug("[TokenEstimator] Using heuristic tokenizer (~4 chars/token)")
 
     @staticmethod
     def _default_counter(text: str) -> int:
@@ -174,7 +224,7 @@ class TokenEstimator:
 
         # Tool calls overhead
         if "tool_calls" in msg:
-            total += len(str(msg["tool_calls"])) // 10
+            total += self._counter(str(msg["tool_calls"]))
 
         return total
 

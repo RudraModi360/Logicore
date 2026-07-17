@@ -54,7 +54,7 @@ _NON_CACHABLE_TOOLS = {
     "delete_file",
     "execute_command",
     "git_command",
-    "code_execute",
+    "code_execute"
 }
 
 
@@ -351,36 +351,41 @@ class ToolExecutor:
                 # Cache when: a grouped decision was made (incl. a cached
                 # denial, so the network group keeps denying silently), or the
                 # user explicitly granted the tool for the whole session.
-                if group is not None or (approved and approve_all):
+                # Non-cacheable tools (destructive) must never be session-cached.
+                if (group is not None or (approved and approve_all)) and name not in _NON_CACHABLE_TOOLS:
                     self._approval_cache.setdefault(session_id, {})[cache_key] = approved
             else:
                 # No approval callback configured - use default terminal prompt
                 approval_result = await self._default_approval_callback(session_id, name, args, group)
                 approved, approve_all, _ = self._normalize_approval(approval_result, args)
-                if group is not None or (approved and approve_all):
+                if (group is not None or (approved and approve_all)) and name not in _NON_CACHABLE_TOOLS:
                     self._approval_cache.setdefault(session_id, {})[cache_key] = approved
         
         if not approved:
             return result or self.normalize_tool_result(name, {"success": False, "error": "Denied by user"})
         
-        # Check persistent cache
-        cached_result = result_cache.get(signature)
-        reused_cached_result = bool(cached_result and cached_result.get("success"))
-        
-        # Semantic fallback
-        if not reused_cached_result and local_result_cache is not None:
-            semantic_key = semantic_analyzer.get_semantic_key(name, args)
-            if semantic_key:
-                for cached_sig, cached_val in local_result_cache.items():
-                    if (
-                        cached_val.get("success")
-                        and semantic_analyzer.get_semantic_key(name, cached_val.get("_args", {})) == semantic_key
-                    ):
-                        cached_result = cached_val
-                        reused_cached_result = True
-                        if self.debug:
-                            logger.debug(f"[ToolExecutor] Semantic dedup: '{name}' matches earlier call")
-                        break
+        # Skip cache for stateful/dynamic tools
+        if name in _NON_CACHABLE_TOOLS:
+            reused_cached_result = False
+        else:
+            # Check persistent cache
+            cached_result = result_cache.get(signature)
+            reused_cached_result = bool(cached_result and cached_result.get("success"))
+            
+            # Semantic fallback
+            if not reused_cached_result and local_result_cache is not None:
+                semantic_key = semantic_analyzer.get_semantic_key(name, args)
+                if semantic_key:
+                    for cached_sig, cached_val in local_result_cache.items():
+                        if (
+                            cached_val.get("success")
+                            and semantic_analyzer.get_semantic_key(name, cached_val.get("_args", {})) == semantic_key
+                        ):
+                            cached_result = cached_val
+                            reused_cached_result = True
+                            if self.debug:
+                                logger.debug(f"[ToolExecutor] Semantic dedup: '{name}' matches earlier call")
+                            break
         
         if reused_cached_result:
             return cached_result
@@ -392,18 +397,53 @@ class ToolExecutor:
             duration_ms = (time.time() - start_time) * 1000
 
             # Structured tool-error recovery (mirrors the hermes-agent parent's
-            # error_classifier failover path). If the result carries a
-            # credential failure and this is an MCP/OAuth-backed tool, attempt
-            # a single credential rotation + retry before surfacing the error.
-            if (
-                isinstance(result, dict)
-                and not result.get("success", True)
-                and result.get("should_rotate_credential")
-                and self._rotate_credentials(name)
-            ):
-                logger.info(f"[ToolExecutor] Rotated credentials, retrying '{name}'")
-                result = self.normalize_tool_result(name, await self._dispatch(name, args, session_id))
-                duration_ms = (time.time() - start_time) * 1000
+            # error_classifier failover path). Uses the RecoveryAction enum to
+            # determine the right recovery strategy for each error type.
+            if isinstance(result, dict) and not result.get("success", True):
+                from logicore.tools.error_classifier import classify_tool_error, RecoveryAction
+                classified = classify_tool_error(
+                    Exception(result.get("error", "Unknown error")),
+                    tool_name=name,
+                    is_credentialed=self._has_credential_backend(name),
+                )
+                
+                # Apply recovery based on the classified action
+                if classified.recovery_action == RecoveryAction.ROTATE_CREDENTIAL:
+                    if self._rotate_credentials(name):
+                        logger.info(f"[ToolExecutor] Rotated credentials, retrying '{name}'")
+                        result = self.normalize_tool_result(name, await self._dispatch(name, args, session_id))
+                        duration_ms = (time.time() - start_time) * 1000
+                
+                elif classified.recovery_action == RecoveryAction.RETRY_SAME:
+                    # Transient error — single retry with backoff
+                    if classified.should_backoff:
+                        logger.info(f"[ToolExecutor] Retrying '{name}' (transient error)")
+                        import asyncio
+                        await asyncio.sleep(0.5)  # Brief backoff
+                        result = self.normalize_tool_result(name, await self._dispatch(name, args, session_id))
+                        duration_ms = (time.time() - start_time) * 1000
+                
+                elif classified.recovery_action == RecoveryAction.BACKOFF_AND_RETRY:
+                    # Transient server error / rate limit — backoff then retry once
+                    # Use retry_after_seconds from classifier, with status-code-aware defaults
+                    backoff_time = classified.error_context.get("retry_after_seconds")
+                    if backoff_time is None:
+                        # Status-code-aware defaults: 429 gets longer backoff
+                        if classified.status_code == 429:
+                            backoff_time = 5.0
+                        elif classified.status_code and classified.status_code >= 500:
+                            backoff_time = 1.0
+                        else:
+                            backoff_time = 1.0
+                    backoff_time = float(backoff_time)
+                    logger.info(f"[ToolExecutor] Backing off {backoff_time}s then retrying '{name}' (transient error)")
+                    import asyncio
+                    await asyncio.sleep(backoff_time)
+                    result = self.normalize_tool_result(name, await self._dispatch(name, args, session_id))
+                    duration_ms = (time.time() - start_time) * 1000
+                
+                # Store classification metadata in result for downstream consumers
+                result["_classification"] = classified.to_dict()
 
             
             # Auto-heal for edit_file read-before-edit error
@@ -421,10 +461,14 @@ class ToolExecutor:
                     "read_file",
                     await self._dispatch("read_file", {"file_path": file_path}, session_id),
                 )
+                _prior_classification = result.get("_classification")
                 result = self.normalize_tool_result(name, await self._dispatch(name, args, session_id))
+                if _prior_classification is not None:
+                    result["_classification"] = _prior_classification
             
             # Store in caches
-            result_cache.set(signature, result)
+            if name not in _NON_CACHABLE_TOOLS:
+                result_cache.set(signature, result)
             if local_result_cache is not None:
                 local_result_cache[signature] = {**result, "_args": args}
 
@@ -467,6 +511,18 @@ class ToolExecutor:
         
         # 4. Internal tools (fallback)
         return execute_tool(name, args)
+
+    def _has_credential_backend(self, name: str) -> bool:
+        """Check if a tool is backed by external credentials (MCP/OAuth).
+
+        Returns True if the tool is managed by an MCP server or OAuth provider
+        that could rotate credentials. Used by the error classifier to determine
+        whether auth errors should trigger credential rotation.
+        """
+        for manager in self.mcp_managers:
+            if hasattr(manager, "server_tools_map") and name in manager.server_tools_map:
+                return True
+        return False
 
     def _rotate_credentials(self, name: str) -> bool:
         """Attempt to rotate credentials for an MCP/OAuth-backed tool.

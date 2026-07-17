@@ -12,6 +12,7 @@ create and work through tasks, exactly like production agent systems.
 
 import time
 import json
+import re
 import inspect
 import asyncio
 from typing import Dict, Any, Callable, List, Optional, Union
@@ -22,6 +23,19 @@ from logicore.security.input_sanitizer import InputSanitizer, InjectionAction
 from logicore.stream.events import StreamEvent, StreamEventType
 from logicore.stream.emitter import StreamEmitter
 from logicore.runtime.loop_detection.engine import AgentEventType
+from logicore.agent.tool_guardrails import (
+    ToolCallGuardrailController,
+    ToolCallGuardrailConfig,
+    toolguard_synthetic_result,
+    append_toolguard_guidance,
+)
+from logicore.agent.turn_retry_state import TurnRetryState, TransitionReason
+from logicore.agent.feedback_handler import FeedbackHandler
+from logicore.runtime.hooks.system import HookSystem
+from logicore.runtime.hooks.types import HookPoint, HookAction, HookContext, HookResult
+from logicore.agent.builtin_hooks import register_builtin_hooks
+from logicore.agent.operational_memory import OperationalMemoryManager
+from logicore.agent.progressive_compressor import ProgressiveCompressor, CompressionTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +62,35 @@ class ChatOrchestrator:
         self.agent = agent
         self.debug = debug
         self.input_sanitizer = input_sanitizer or InputSanitizer(action=InjectionAction.WARN)
+        
+        # Initialize tool guardrails controller
+        guardrail_config = ToolCallGuardrailConfig()
+        if hasattr(agent, "config") and hasattr(agent.config, "tool_loop_guardrails"):
+            guardrail_config = agent.config.tool_loop_guardrails
+        self.tool_guardrails = ToolCallGuardrailController(config=guardrail_config)
+        self._tool_guardrail_halt_decision = None
+        
+        # Initialize turn retry state (one-shot recovery guards)
+        self._turn_retry_state = TurnRetryState()
+        
+        # Initialize feedback handler for user corrections
+        self._feedback_handler = FeedbackHandler()
+        
+        # Initialize hook system (use agent's hook system if available, otherwise create new one)
+        self._hook_system = getattr(agent, "_hook_system", None)
+        if self._hook_system is None:
+            self._hook_system = HookSystem()
+            # Register built-in hooks only if we created a new hook system
+            register_builtin_hooks(self._hook_system)
+        
+        # Initialize operational memory manager for failure pattern tracking
+        self._operational_memory = OperationalMemoryManager(debug=debug)
+        
+        # Initialize progressive compressor for context management
+        self._progressive_compressor = ProgressiveCompressor(debug=debug)
+        
+        # Track turn number for hooks
+        self._turn_number = 0
 
     def _tool_context_window(self) -> Optional[int]:
         """Resolve the active model's context window for budget gating.
@@ -155,17 +198,22 @@ class ChatOrchestrator:
             return 0
 
     def _get_orphaned_tasks(self, session_id: str) -> List[str]:
-        """Return IDs of tasks still in_progress at end of turn (potential orphans)."""
+        """Return IDs of tasks still in_progress OR pending at end of turn (potential orphans)."""
         if not hasattr(self.agent, '_task_manager') or not self.agent._task_manager:
             return []
         try:
-            tasks = self.agent._task_manager.store.list_by_status("in_progress")
-            return [t.id for t in tasks]
+            in_progress = self.agent._task_manager.store.list_by_status("in_progress")
+            pending = self.agent._task_manager.store.list_by_status("pending")
+            return [t.id for t in in_progress] + [t.id for t in pending]
         except Exception:
             return []
 
     def _agent_summary_implies_completion(self, content: str) -> bool:
-        """Heuristic: does the final answer imply the tracked work was finished?"""
+        """Heuristic: does the final answer imply the tracked work was finished?
+
+        Guards against negated claims (e.g. "I have NOT completed") which the
+        previous naive substring match treated as completion.
+        """
         if not content:
             return False
         text = content.lower()
@@ -173,7 +221,19 @@ class ChatOrchestrator:
             "completed", "done", "finished", "all tasks", "successfully",
             "fixed", "implemented", "created", "verified", "all done",
         )
-        return any(s in text for s in done_signals)
+        negation_markers = (
+            "not ", "n't ", "never ", "no ", "haven't", "hasn't", "didn't",
+            "won't", "isn't", "aren't", "without",
+        )
+        for signal in done_signals:
+            idx = text.find(signal)
+            if idx == -1:
+                continue
+            preceding = text[max(0, idx - 15):idx]
+            if any(neg in preceding for neg in negation_markers):
+                continue
+            return True
+        return False
 
     async def run(
         self,
@@ -230,6 +290,25 @@ class ChatOrchestrator:
         tools_used_this_chat: List[str] = []
         last_tool_name: Optional[str] = None
 
+        # Feedback detection: check for user corrections before processing
+        feedback_result = None
+        if isinstance(user_input, str) and user_input.strip():
+            # M8: Pass LLM callable for semantic correction detection fallback
+            llm_call = None
+            if hasattr(self.agent, 'gateway') and self.agent.gateway:
+                async def _feedback_llm_call(prompt: str) -> str:
+                    msgs = [{"role": "user", "content": prompt}]
+                    resp = await self.agent.gateway.send_chat(msgs)
+                    return resp.get("content", "") if isinstance(resp, dict) else str(resp)
+                llm_call = _feedback_llm_call
+            feedback_result = await self._feedback_handler.handle_user_message(user_input, session, llm_call=llm_call)
+            if feedback_result.has_injections:
+                for injection in feedback_result.injected_hints:
+                    self.agent.context_engine.inject_hint(session.messages, injection.message)
+                    injected_hints.append(injection.message)
+                if self.debug:
+                    logger.debug(f"[FeedbackHandler] Detected {feedback_result.corrections_tracked} correction(s)")
+
         # Streaming event bus. ``emitter`` is None for the legacy
         # (callback-based) path; when set, we publish semantic events. Token /
         # reasoning / tool-call-chunk events are forwarded from the gateway via
@@ -257,6 +336,18 @@ class ChatOrchestrator:
             except Exception as e:
                 if self.debug:
                     logger.warning(f"[ChatOrchestrator] ReasoningController adjustment failed: {e}")
+
+        # Inject operational memory context (failure patterns, lessons learned)
+        operational_context = self._operational_memory.format_for_system_prompt()
+        if operational_context:
+            self.agent.context_engine.inject_hint(session.messages, operational_context)
+            injected_hints.append(operational_context)
+
+        # Inject cumulative correction awareness so LLM adjusts behavior
+        correction_prompt = self._feedback_handler.format_corrections_for_prompt(session)
+        if correction_prompt:
+            self.agent.context_engine.inject_hint(session.messages, correction_prompt)
+            injected_hints.append(correction_prompt)
 
         start_time = time.time()
         # Add messages to session — handle both single string and message list
@@ -306,6 +397,11 @@ class ChatOrchestrator:
             except Exception as e:
                 logger.debug(f"[ChatOrchestrator] Debug message save failed: {e}")
         
+        # Reset tool guardrails and retry state once per run() call (one user turn)
+        self.tool_guardrails.reset_for_turn()
+        self._tool_guardrail_halt_decision = None
+        self._turn_retry_state = TurnRetryState()
+
         for i in range(self.agent.max_iterations):
             if self.debug:
                 logger.debug(f"\n[ChatOrchestrator] ITERATION {i+1}/{self.agent.max_iterations}")
@@ -322,6 +418,15 @@ class ChatOrchestrator:
             if loop_engine:
                 await self._check_loop(AgentEventType.TURN_START, session_id)
 
+            # Increment turn number for hooks
+            self._turn_number += 1
+
+            # Reset session recovery state for this turn
+            session.recovery_state.reset_for_turn()
+            
+            # Reset progressive compressor for this turn
+            self._progressive_compressor.reset_for_new_turn(session_id)
+
             # Drop tools currently in loop cooldown so the model can't repeat them.
             if all_tools is not None:
                 all_tools = self._filter_cooled_down_tools(all_tools, session_id)
@@ -334,6 +439,62 @@ class ChatOrchestrator:
                     llm_messages, session_id=session_id
                 )
 
+                # Progressive compression: check if proactive compression needed
+                if self._progressive_compressor.can_compress(session_id):
+                    # Estimate token count using centralized estimator (tiktoken when available)
+                    estimated_tokens = self.agent.context_engine.token_estimator.count_messages_tokens(llm_messages)
+                    
+                    # Get context window threshold
+                    context_window = self._tool_context_window()
+                    if context_window and estimated_tokens > context_window * 0.7:
+                        # Compress if over 70% of context window
+                        compressed_messages, boundary_msg = self._progressive_compressor.compress_messages(
+                            llm_messages, session_id=session_id,
+                            preserve_recent=10,
+                            trigger=CompressionTrigger.PROACTIVE,
+                        )
+                        
+                        if boundary_msg:
+                            llm_messages = compressed_messages
+                            # Inject boundary message into llm_messages (which the LLM will receive),
+                            # not session.messages. Insert at position 0 so it appears as a system-level instruction.
+                            llm_messages.insert(0, {"role": "system", "content": boundary_msg})
+                            injected_hints.append(boundary_msg)
+                            
+                            if self.debug:
+                                logger.debug(
+                                    f"[ProgressiveCompressor] Proactive compression applied "
+                                    f"(estimated {estimated_tokens} tokens -> ~{estimated_tokens // 2} tokens)"
+                                )
+
+                # Execute BEFORE_MODEL hooks
+                before_model_ctx = HookContext(
+                    hook_point=HookPoint.BEFORE_MODEL,
+                    messages=llm_messages,
+                    tools=all_tools or [],
+                    session_id=session_id,
+                    turn_number=self._turn_number,
+                    metadata={"iteration": i + 1}
+                )
+                before_model_result = await self._hook_system.execute(
+                    HookPoint.BEFORE_MODEL, before_model_ctx
+                )
+                
+                # Handle hook results
+                if before_model_result.action == HookAction.ABORT:
+                    abort_msg = before_model_result.metadata.get("reason", "Hook aborted execution")
+                    self._clear_injected_hints(session, injected_hints)
+                    if emitter:
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": abort_msg}))
+                    return abort_msg
+                elif before_model_result.action == HookAction.SYNTHESIZE:
+                    response = before_model_result.synthesized_response
+                elif before_model_result.action == HookAction.MODIFY:
+                    if before_model_result.modified_messages is not None:
+                        llm_messages = before_model_result.modified_messages
+                    if before_model_result.modified_tools is not None:
+                        all_tools = before_model_result.modified_tools
+
                 on_token = active_callbacks.get("on_token")
                 has_stream = hasattr(self.agent.gateway, 'chat_stream')
                 use_stream = bool(has_stream and (stream or on_token is not None or emitter is not None))
@@ -341,28 +502,62 @@ class ChatOrchestrator:
                 if emitter:
                     emitter.emit(StreamEvent.create(StreamEventType.MESSAGE_START, {"iteration": i + 1}))
 
-                if use_stream:
-                    response = await self.agent.gateway.chat_stream(
-                        llm_messages, tools=all_tools, on_token=on_token, on_event=on_event
-                    )
-                else:
-                    response = await self.agent.gateway.chat(llm_messages, tools=all_tools)
+                if response is None:
+                    if use_stream:
+                        response = await self.agent.gateway.chat_stream(
+                            llm_messages, tools=all_tools, on_token=on_token, on_event=on_event
+                        )
+                    else:
+                        response = await self.agent.gateway.chat(llm_messages, tools=all_tools)
 
             except Exception as e:
                 response = await self._handle_llm_error(e, session, all_tools, session_id, generate_walkthrough, active_callbacks)
                 if response is not None:
-                    if emitter:
-                        emitter.emit(StreamEvent.create(StreamEventType.ERROR, {"message": str(e), "recoverable": False}))
-                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": response}))
-                    self._clear_injected_hints(session, injected_hints)
-                    return response
-                continue
+                    # If _handle_llm_error returned a string, it's a final error message — return it
+                    # If it returned a NormalizedMessage (successful retry), continue to parse/execute
+                    if isinstance(response, str):
+                        if emitter:
+                            emitter.emit(StreamEvent.create(StreamEventType.ERROR, {"message": str(e), "recoverable": False}))
+                            emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": response}))
+                        self._clear_injected_hints(session, injected_hints)
+                        return response
+                    # else: NormalizedMessage from successful retry — fall through to parsing below
+                else:
+                    continue
 
             if response is None:
                 continue
 
             # 2. Parse response
             content, tool_calls, gemini_content = self._parse_response(response)
+
+            # Execute AFTER_MODEL hooks
+            after_model_ctx = HookContext(
+                hook_point=HookPoint.AFTER_MODEL,
+                messages=session.messages,
+                tools=all_tools or [],
+                model_response=response,
+                tool_calls=tool_calls or [],
+                session_id=session_id,
+                turn_number=self._turn_number,
+                metadata={"iteration": i + 1, "content": content}
+            )
+            after_model_result = await self._hook_system.execute(
+                HookPoint.AFTER_MODEL, after_model_ctx
+            )
+            
+            # Handle hook results
+            if after_model_result.action == HookAction.ABORT:
+                abort_msg = after_model_result.metadata.get("reason", "Hook aborted execution")
+                self._clear_injected_hints(session, injected_hints)
+                if emitter:
+                    emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": abort_msg}))
+                return abort_msg
+            elif after_model_result.action == HookAction.MODIFY:
+                if after_model_result.modified_tool_calls is not None:
+                    tool_calls = after_model_result.modified_tool_calls
+                if after_model_result.modified_messages is not None:
+                    session.messages = after_model_result.modified_messages
 
             # Empty response recovery
             if (not content or content.strip() == "") and not tool_calls and i > 0 and self.agent.execution_log:
@@ -403,6 +598,16 @@ class ChatOrchestrator:
             # 3. No tool calls = final response
             if not tool_calls:
                 self._clear_injected_hints(session, injected_hints)
+                
+                # M9: Hallucination check — compare claims vs execution reality
+                hallucination_warning = self._check_response_hallucination(
+                    content, self.agent.execution_log, successful_tools_this_chat
+                )
+                if hallucination_warning:
+                    session.messages.append({"role": "system", "content": hallucination_warning})
+                    # Re-run one more iteration so the LLM can correct itself
+                    continue
+                
                 final = await self._finalize_response(
                     content, session, session_id, active_callbacks,
                     generate_walkthrough, text_for_reminder, successful_tools_this_chat
@@ -469,9 +674,183 @@ class ChatOrchestrator:
                         },
                     ))
 
+                # Tool guardrails: pre-execution check
+                guardrail_decision = self.tool_guardrails.before_call(name, args)
+                if not guardrail_decision.allows_execution:
+                    # Tool should be blocked — inject synthetic result
+                    result = self.agent.tool_executor.normalize_tool_result(
+                        name,
+                        {"success": False, "error": guardrail_decision.message}
+                    )
+                    # Add classification metadata for downstream consumers
+                    result["_guardrail_blocked"] = True
+                    result["_guardrail_decision"] = guardrail_decision.to_metadata()
+                    
+                    tool_msg = {
+                        "role": "tool",
+                        "name": name,
+                        "content": self.agent._serialize_tool_result_for_model(name, result),
+                    }
+                    if tc_id:
+                        tool_msg["tool_call_id"] = tc_id
+                    session.add_message(tool_msg)
+                    
+                    if self.debug:
+                        logger.debug(f"[ToolGuardrails] BLOCKED '{name}': {guardrail_decision.code}")
+                    
+                    # Record halt decision
+                    if guardrail_decision.should_halt:
+                        self._tool_guardrail_halt_decision = guardrail_decision
+                    
+                    continue
+
+                # Execute BEFORE_TOOL_EXECUTION hooks
+                before_tool_ctx = HookContext(
+                    hook_point=HookPoint.BEFORE_TOOL_EXECUTION,
+                    messages=session.messages,
+                    tools=all_tools or [],
+                    tool_name=name,
+                    tool_args=args,
+                    session_id=session_id,
+                    turn_number=self._turn_number,
+                    metadata={"iteration": i + 1, "call_id": tc_id}
+                )
+                before_tool_result = await self._hook_system.execute(
+                    HookPoint.BEFORE_TOOL_EXECUTION, before_tool_ctx
+                )
+                
+                # Handle hook results
+                if before_tool_result.action == HookAction.SKIP:
+                    skip_reason = before_tool_result.skip_reason or "Tool execution skipped by hook"
+                    result = self.agent.tool_executor.normalize_tool_result(
+                        name, {"success": False, "error": skip_reason}
+                    )
+                    tool_msg = {
+                        "role": "tool",
+                        "name": name,
+                        "content": self.agent._serialize_tool_result_for_model(name, result),
+                    }
+                    if tc_id:
+                        tool_msg["tool_call_id"] = tc_id
+                    session.add_message(tool_msg)
+                    continue
+                elif before_tool_result.action == HookAction.ABORT:
+                    abort_msg = before_tool_result.metadata.get("reason", "Hook aborted tool execution")
+                    self._clear_injected_hints(session, injected_hints)
+                    if emitter:
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": abort_msg}))
+                    return abort_msg
+                elif before_tool_result.action == HookAction.MODIFY:
+                    if before_tool_result.modified_tool_args is not None:
+                        args = before_tool_result.modified_tool_args
+
                 result = await self._execute_single_tool(
                     name, args, tc_id, session, session_id,
                     active_callbacks, local_result_cache
+                )
+
+                # Execute AFTER_TOOL_EXECUTION hooks
+                after_tool_ctx = HookContext(
+                    hook_point=HookPoint.AFTER_TOOL_EXECUTION,
+                    messages=session.messages,
+                    tools=all_tools or [],
+                    tool_name=name,
+                    tool_args=args,
+                    tool_result=result,
+                    session_id=session_id,
+                    turn_number=self._turn_number,
+                    metadata={"iteration": i + 1, "call_id": tc_id}
+                )
+                after_tool_result = await self._hook_system.execute(
+                    HookPoint.AFTER_TOOL_EXECUTION, after_tool_ctx
+                )
+                
+                # Handle hook results
+                if after_tool_result.action == HookAction.MODIFY:
+                    if after_tool_result.tool_result is not None:
+                        result = after_tool_result.tool_result
+
+                # Tool guardrails: post-execution observation
+                is_error = not bool(result.get("success", True))
+                guardrail_decision = self.tool_guardrails.after_call(
+                    name, args, str(result.get("content") or result.get("error") or ""),
+                    failed=is_error,
+                )
+                
+                # Apply guardrail guidance to result
+                if guardrail_decision.action in {"warn", "halt"}:
+                    result_str = self.agent._serialize_tool_result_for_model(name, result)
+                    result_str = append_toolguard_guidance(result_str, guardrail_decision)
+                    # Update the result content with guidance
+                    if isinstance(result, dict):
+                        result["_guardrail_guidance"] = guardrail_decision.message
+                
+                # Record halt decision
+                if guardrail_decision.should_halt:
+                    self._tool_guardrail_halt_decision = guardrail_decision
+
+                # Operational memory: record failure patterns and check escalation
+                if is_error:
+                    error_msg = str(result.get('error', ''))
+                    _cls = result.get("_classification", {})
+                    error_type = _cls.get("error_category", "unknown") if _cls else "unknown"
+                    _recovery = _cls.get("recovery_action") if _cls else None
+                    
+                    # Record failure in operational memory
+                    pattern = self._operational_memory.record_tool_failure(
+                        tool_name=name,
+                        error_type=error_type,
+                        error_message=error_msg,
+                        recovery_action=_recovery,
+                    )
+                    
+                    # Record recovery attempt for escalation tracking
+                    self._operational_memory._session_state.record_recovery_attempt(
+                        error_type=error_type,
+                        tool_name=name,
+                    )
+                    
+                    # Check if recovery should be escalated
+                    if self._operational_memory.should_escalate_recovery(
+                        error_type=error_type,
+                        tool_name=name,
+                        max_attempts=3,
+                    ):
+                        # Inject escalation message
+                        escalation_msg = (
+                            f"Recovery for {error_type} on '{name}' has failed multiple times. "
+                            f"Consider a fundamentally different approach instead of retrying."
+                        )
+                        self.agent.context_engine.inject_hint(session.messages, escalation_msg)
+                        injected_hints.append(escalation_msg)
+                        
+                        if self.debug:
+                            logger.debug(f"[OperationalMemory] Escalating recovery for {pattern.pattern_id}")
+                else:
+                    # Record success after failure
+                    if name in [p.tool_name for p in self._operational_memory._session_state.failure_patterns.values()]:
+                        self._operational_memory.record_tool_success(
+                            tool_name=name,
+                            error_type="previous_failure",
+                        )
+
+                # Feedback handling: inject hints for tool failures
+                if is_error:
+                    error_msg = str(result.get('error', ''))
+                    feedback = self._feedback_handler.handle_tool_failed(
+                        tool_name=name,
+                        error=error_msg,
+                        session=session,
+                    )
+                    for injection in feedback.injected_hints:
+                        self.agent.context_engine.inject_hint(session.messages, injection.message)
+                        injected_hints.append(injection.message)
+                    if self.debug and feedback.has_injections:
+                        logger.debug(f"[FeedbackHandler] Injected tool failure hint for '{name}'")
+
+                # Track previous agent action for context
+                self._feedback_handler.set_previous_action(
+                    f"Called tool '{name}' with args: {str(args)[:100]}"
                 )
 
                 if self.debug:
@@ -498,6 +877,22 @@ class ChatOrchestrator:
                     tools_used_this_chat.append(name)
                     last_tool_name = name
 
+                # Track tool result in session for pattern detection
+                args_hash = str(hash(json.dumps(args, sort_keys=True, default=str)))[:16] if args else None
+                session.add_tool_result(
+                    tool_name=name,
+                    success=bool(result.get("success", True)),
+                    result_summary=str(result.get("content") or result.get("error") or "")[:200],
+                    args_hash=args_hash
+                )
+
+                # Record transition for auditable recovery tracking
+                if is_error:
+                    self._turn_retry_state.record_transition(
+                        TransitionReason.TOOL_USE,
+                        detail=f"Tool '{name}' failed: {str(result.get('error', ''))[:100]}"
+                    )
+
                 # Loop detection: feed the tool result (failed repeats escalate
                 # to stagnant-state detection and recovery).
                 res_detected = await self._check_loop(
@@ -516,10 +911,148 @@ class ChatOrchestrator:
                         emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": rec[1]}))
                     return rec[1]
 
+            # Tool guardrails: check for halt after tool execution
+            if self._tool_guardrail_halt_decision is not None:
+                decision = self._tool_guardrail_halt_decision
+                halt_response = (
+                    f"I stopped retrying {decision.tool_name} because it hit the "
+                    f"tool-call guardrail ({decision.code}) after {decision.count} "
+                    f"repeated non-progressing attempts. The last tool result "
+                    f"explains the blocker; the next step is to change strategy "
+                    f"instead of repeating the same call."
+                )
+                self._clear_injected_hints(session, injected_hints)
+                if emitter:
+                    emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": halt_response}))
+                return halt_response
+
+            # Execute AFTER_TURN hooks (end of iteration)
+            # Build task summary for verification hooks
+            task_summary = {}
+            if hasattr(self.agent, '_task_manager') and self.agent._task_manager:
+                try:
+                    task_summary = self.agent._task_manager.get_task_summary()
+                except Exception:
+                    pass
+            
+            after_turn_ctx = HookContext(
+                hook_point=HookPoint.AFTER_TURN,
+                messages=session.messages,
+                tools=all_tools or [],
+                session_id=session_id,
+                turn_number=self._turn_number,
+                metadata={
+                    "iteration": i + 1,
+                    "successful_tools": successful_tools_this_chat,
+                    "tools_used": tools_used_this_chat,
+                    "task_summary": task_summary,
+                }
+            )
+            after_turn_result = await self._hook_system.execute(
+                HookPoint.AFTER_TURN, after_turn_ctx
+            )
+            
+            # Handle hook results
+            if after_turn_result.action == HookAction.ABORT:
+                abort_msg = after_turn_result.metadata.get("reason", "Hook aborted turn")
+                self._clear_injected_hints(session, injected_hints)
+                if emitter:
+                    emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": abort_msg}))
+                return abort_msg
+            elif after_turn_result.action == HookAction.MODIFY:
+                if after_turn_result.modified_messages is not None:
+                    session.messages = after_turn_result.modified_messages
+
+            # Wire memory extraction hook — extract cross-session learnings
+            if after_turn_result.metadata.get("should_extract_memories"):
+                self._extract_session_memories(session, user_input)
+
+            # Operational memory: extract lessons from failure patterns
+            extracted_lessons = self._extract_operational_lessons()
+            if extracted_lessons:
+                lessons_text = "## Lessons from This Session\n" + "\n".join(f"- {l}" for l in extracted_lessons)
+                self.agent.context_engine.inject_hint(session.messages, lessons_text)
+                injected_hints.append(lessons_text)
+
         self._clear_injected_hints(session, injected_hints)
         if emitter:
             emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": "Max iterations reached."}))
         return "Max iterations reached."
+
+    def _extract_operational_lessons(self) -> List[str]:
+        """Extract lessons from failure patterns for future reference.
+        
+        This method analyzes failure patterns and extracts actionable lessons
+        that can be applied in future sessions. Returns list of lesson texts
+        for injection into current session.
+        """
+        patterns = self._operational_memory._session_state.failure_patterns
+        extracted = []
+        
+        for pattern_id, pattern in patterns.items():
+            # Extract lesson if failure rate is high
+            if pattern.failure_count >= 3 and pattern.failure_rate > 0.7:
+                lesson_text = (
+                    f"Tool '{pattern.tool_name}' consistently fails with "
+                    f"{pattern.error_type} errors. Consider alternative approaches."
+                )
+                
+                self._operational_memory.extract_lesson(
+                    trigger=pattern.error_type,
+                    lesson=lesson_text,
+                    confidence=pattern.failure_rate,
+                    examples=[pattern.error_message[:100]],
+                )
+                extracted.append(lesson_text)
+            
+            # Extract lesson for specific error patterns
+            if "not found" in pattern.error_message.lower():
+                lesson_text = (
+                    f"File/directory not found when using '{pattern.tool_name}'. "
+                    f"Always verify paths exist before operations."
+                )
+                
+                self._operational_memory.extract_lesson(
+                    trigger="not_found_error",
+                    lesson=lesson_text,
+                    confidence=0.8,
+                )
+                extracted.append(lesson_text)
+            
+            elif "permission denied" in pattern.error_message.lower():
+                lesson_text = (
+                    f"Permission denied when using '{pattern.tool_name}'. "
+                    f"Check file permissions or use elevated privileges."
+                )
+                
+                self._operational_memory.extract_lesson(
+                    trigger="permission_denied",
+                    lesson=lesson_text,
+                    confidence=0.8,
+                )
+                extracted.append(lesson_text)
+
+        return extracted
+
+    def _extract_session_memories(self, session, user_input):
+        """Extract cross-session learnings from the current session.
+        
+        Captures user corrections, preferences, and successful approaches
+        for persistence across sessions.
+        """
+        corrections = getattr(session, 'corrections_made', [])
+        if not corrections:
+            return
+        
+        for correction in corrections[-5:]:  # Last 5 corrections
+            ctype = correction.get('type', 'other')
+            corrected = correction.get('corrected', '')
+            if corrected:
+                self._operational_memory.extract_lesson(
+                    trigger=f"user_correction_{ctype}",
+                    lesson=f"User corrected {ctype}: {corrected[:200]}",
+                    confidence=correction.get('confidence', 0.7),
+                )
 
     def _parse_response(self, response) -> tuple[str, list, list]:
         """Parse NormalizedMessage into content, tool_calls, and provider-specific parts."""
@@ -531,42 +1064,122 @@ class ChatOrchestrator:
         return content, tool_calls, None
 
     async def _handle_llm_error(self, error, session, all_tools, session_id, generate_walkthrough, active_callbacks):
-        """Handle LLM errors with retry logic."""
-        error_str = str(error).lower()
-
-        _TRANSIENT_PATTERNS = (
-            "500", "502", "503", "504",
-            "internal server error", "bad gateway",
-            "service unavailable", "gateway timeout",
-            "connection", "timeout", "timed out",
-            "reset", "reset by peer", "broken pipe",
-        )
-
-        is_transient = any(p in error_str for p in _TRANSIENT_PATTERNS)
-
-        if not is_transient:
-            if self.debug:
-                logger.error(f"[ChatOrchestrator] Terminal error: {error}")
+        """Handle LLM errors with structured classification and retry logic.
+        
+        Uses the error classifier to determine the right recovery strategy
+        for each error type, mirroring the hermes-agent's structured approach.
+        """
+        from logicore.tools.error_classifier import classify_tool_error, RecoveryAction
+        
+        classified = classify_tool_error(error, tool_name="llm_gateway")
+        
+        if self.debug:
+            logger.warning(
+                f"[ChatOrchestrator] LLM error classified: {classified.reason.value} "
+                f"(recovery={classified.recovery_action.value}, retryable={classified.retryable})"
+            )
+        
+        # Non-retryable errors: surface immediately
+        if not classified.retryable or classified.recovery_action == RecoveryAction.ABORT_WITH_MESSAGE:
             error_msg = f"Error during execution: {str(error)}"
             return error_msg
-
-        # Retry with backoff
-        _max_retries = 3
+        
+        # Compress context errors: try to compress and retry (once per turn)
+        if classified.recovery_action == RecoveryAction.COMPRESS_CONTEXT:
+            if self._turn_retry_state.context_compression_attempted:
+                if self.debug:
+                    logger.warning("[ChatOrchestrator] Context compression already attempted this turn, aborting.")
+                return None
+            
+            # Check if progressive compressor can compress
+            if not self._progressive_compressor.can_compress(session_id):
+                if self.debug:
+                    logger.warning("[ChatOrchestrator] Progressive compressor blocked (circuit breaker).")
+                return None
+            
+            self._turn_retry_state.mark_context_compression()
+            self._turn_retry_state.record_transition(
+                TransitionReason.CONTEXT_COMPRESSED,
+                detail="Context too large, attempting reactive compression"
+            )
+            
+            if self.debug:
+                logger.warning("[ChatOrchestrator] Context too large, attempting reactive compression...")
+            
+            try:
+                # Apply reactive compression
+                compressed_messages, boundary_msg = self._progressive_compressor.compress_messages(
+                    session.messages, session_id=session_id,
+                    preserve_recent=10,
+                    trigger=CompressionTrigger.REACTIVE,
+                )
+                
+                if boundary_msg:
+                    session.messages = compressed_messages
+                    # Inject boundary message
+                    self.agent.context_engine.inject_hint(session.messages, boundary_msg)
+                    
+                    if self.debug:
+                        logger.debug("[ProgressiveCompressor] Reactive compression applied")
+                
+                # Retry with compressed messages
+                _ctx, _msgs = await self.agent.context_engine.prepare_messages(
+                    session.messages, session_id=session_id
+                )
+                return await self.agent.gateway.chat(_msgs, tools=all_tools)
+            except Exception as compress_err:
+                if self.debug:
+                    logger.warning(f"[ChatOrchestrator] Reactive compression retry failed: {compress_err}")
+                return None
+        
+        # Rate limit errors: check if we've already retried (once per turn)
+        if classified.recovery_action == RecoveryAction.RETRY_SAME:
+            if self._turn_retry_state.rate_limit_retry_attempted:
+                if self.debug:
+                    logger.warning("[ChatOrchestrator] Rate limit retry already attempted this turn, aborting.")
+                return None
+            
+            self._turn_retry_state.mark_rate_limit_retry()
+            self._turn_retry_state.record_transition(
+                TransitionReason.RATE_LIMITED,
+                detail=f"Rate limited, retrying with backoff"
+            )
+        
+        # Transient errors: retry with exponential backoff (respecting retry budget)
         _base_delay = 1.0
 
-        for attempt in range(_max_retries):
+        while self._turn_retry_state.can_retry():
+            attempt = self._turn_retry_state.retry_count
             delay = _base_delay * (2 ** attempt)
+            
             if self.debug:
-                logger.warning(f"[ChatOrchestrator] Transient error (attempt {attempt + 1}/{_max_retries}). Retrying in {delay:.1f}s...")
+                logger.warning(
+                    f"[ChatOrchestrator] Transient error (attempt {attempt + 1}/{self._turn_retry_state.max_retries}). "
+                    f"Retrying in {delay:.1f}s..."
+                )
+            
             await asyncio.sleep(delay)
-
+            self._turn_retry_state.increment_retry()
+            
             try:
                 _ctx, _msgs = await self.agent.context_engine.prepare_messages(
                     session.messages, session_id=session_id
                 )
                 return await self.agent.gateway.chat(_msgs, tools=all_tools)
             except Exception as retry_err:
+                # Check if the retry error is different (e.g., escalation to terminal)
+                retry_classified = classify_tool_error(retry_err, tool_name="llm_gateway")
+                if not retry_classified.retryable:
+                    self._turn_retry_state.record_transition(
+                        TransitionReason.INITIAL,
+                        detail=f"Retry failed with non-retryable error: {retry_err}"
+                    )
+                    break
                 if "does not support tools" in str(retry_err).lower():
+                    self._turn_retry_state.record_transition(
+                        TransitionReason.INITIAL,
+                        detail=f"Retry failed: model does not support tools"
+                    )
                     break
 
         return None
@@ -589,7 +1202,7 @@ class ChatOrchestrator:
             f"{last_tool_result}\n\n"
             "Do NOT describe what you would do — actually do it with a tool call, or provide the final summary."
         )
-        session.add_message({"role": "user", "content": continuation_prompt})
+        session.add_message({"role": "system", "content": continuation_prompt})
 
         try:
             _ctx, _msgs = await self.agent.context_engine.prepare_messages(
@@ -665,7 +1278,7 @@ class ChatOrchestrator:
         if action.action_type == RecoveryActionType.COOL_DOWN_TOOL and action.tool_name:
             engine.apply_tool_cooldown(session_id, action.tool_name)
         if action.guidance_message:
-            session.add_message({"role": "user", "content": action.guidance_message})
+            session.add_message({"role": "system", "content": action.guidance_message})
         return ("continue", None)
 
     def _extract_tool_call_details(self, tc) -> tuple[str, dict, str]:
@@ -698,7 +1311,7 @@ class ChatOrchestrator:
             if callbacks.get("on_tool_end"):
                 await self._fire_callback(callbacks["on_tool_end"], session_id, name, result)
 
-            tool_msg = {"role": "tool", "name": name, "content": result}
+            tool_msg = {"role": "tool", "name": name, "content": self.agent._serialize_tool_result_for_model(name, result)}
             if tc_id:
                 tool_msg["tool_call_id"] = tc_id
             session.add_message(tool_msg)
@@ -730,8 +1343,35 @@ class ChatOrchestrator:
             tool_msg["tool_call_id"] = tc_id
         session.add_message(tool_msg)
 
-        # Log
         is_error = not bool(result.get("success", True))
+
+        # Inject recovery signals based on error classification.
+        # When a tool fails with a specific recovery action, inject a message
+        # that helps the LLM understand what went wrong and how to self-correct.
+        if is_error and "_classification" in result:
+            classification = result["_classification"]
+            recovery_action = classification.get("recovery_action", "")
+            
+            if recovery_action == "inject_signal":
+                # Tool/validation errors: inject a signal telling the LLM to change approach
+                error_msg = classification.get("error", "")
+                signal = (
+                    f"The tool '{name}' failed with a deterministic error. "
+                    f"Error: {error_msg}. "
+                    f"Try a different approach — do NOT retry the same call."
+                )
+                session.add_message({"role": "system", "content": signal})
+            
+            elif recovery_action == "compress_context":
+                # Context/payload too large: signal that context needs compression
+                signal = (
+                    f"The tool '{name}' failed because the request was too large. "
+                    f"Consider breaking the request into smaller pieces or "
+                    f"reducing the amount of data being processed."
+                )
+                session.add_message({"role": "system", "content": signal})
+
+        # Log
         if is_error:
             self.agent.execution_log.append(f"Tool {name} FAILED: {result.get('error', 'Unknown error')}")
         else:
@@ -758,6 +1398,77 @@ class ChatOrchestrator:
             await callback(*args)
         else:
             callback(*args)
+
+    # =========================================================================
+    # M9: HALLUCINATION CHECK — dynamic, not rule-based
+    # =========================================================================
+    _COMPLETION_CLAIMS = re.compile(
+        r"\b(completed?|fixed?|resolved?|created?|updated?|deleted?|installed?|configured?|set up|deployed?|migrated?|done|success|finished|saved|written|applied)\b",
+        re.IGNORECASE,
+    )
+    # Matches actual execution log format: "Tool X SUCCEEDED" / "Tool X FAILED: ..."
+    _TOOL_SUCCEEDED_RE = re.compile(r"^Tool (\S+) SUCCEEDED$")
+    _TOOL_FAILED_RE = re.compile(r"^Tool (\S+) FAILED:")
+
+    def _check_response_hallucination(
+        self, response: str, execution_log: list, successful_tools_this_chat: int
+    ) -> Optional[str]:
+        """Compare response claims against actual tool execution results.
+
+        Returns a warning string if the response claims success but tools
+        actually failed, or claims work was done but no tools were called.
+        This is *dynamic* — it checks real execution history, not static rules.
+        """
+        if not response or not response.strip():
+            return None
+
+        claims = self._COMPLETION_CLAIMS.findall(response)
+        if not claims:
+            return None
+
+        # Collect tool execution outcomes from the log
+        tool_outcomes: Dict[str, str] = {}
+        for entry in execution_log:
+            if not isinstance(entry, str):
+                continue
+            # Match actual log format: "Tool X SUCCEEDED" / "Tool X FAILED: ..."
+            m_suc = self._TOOL_SUCCEEDED_RE.match(entry)
+            m_fail = self._TOOL_FAILED_RE.match(entry)
+            if m_suc:
+                tool_outcomes[m_suc.group(1)] = "succeeded"
+            elif m_fail:
+                tool_outcomes[m_fail.group(1)] = "failed"
+
+        failed_tools = [t for t, s in tool_outcomes.items() if s.upper() in ("ERROR", "FAILED")]
+        succeeded_tools = [t for t, s in tool_outcomes.items() if s.upper() in ("COMPLETED", "SUCCEEDED")]
+
+        # Case 1: Response claims success but ALL tools failed
+        if failed_tools and not succeeded_tools and successful_tools_this_chat == 0:
+            return (
+                f"Your response claims work was done, but every tool call "
+                f"failed ({', '.join(failed_tools[:3])}). "
+                f"Either retry with a different approach or explain what went wrong."
+            )
+
+        # Case 2: Response claims specific tool success but that tool actually failed
+        mentioned_tool_claims = re.findall(
+            r"(?:used|called|executed|ran)\s+(\w+)", response, re.IGNORECASE
+        )
+        for tool_name in mentioned_tool_claims:
+            if tool_name.lower() in {t.lower() for t in failed_tools}:
+                return (
+                    f"Your response mentions successfully using '{tool_name}', "
+                    f"but that tool actually failed. Correct your response or retry."
+                )
+
+        # Case 3: No tools called but response claims completion
+        if successful_tools_this_chat == 0 and len(claims) >= 2:
+            return (
+                "You are claiming multiple things were completed, but no tools "
+                "were executed this turn. Either run the tools or remove the claims."
+            )
+
+        return None
 
     async def _finalize_response(self, content, session, session_id, active_callbacks, generate_walkthrough, text_for_reminder, successful_tools_this_chat):
         """Handle final response (no tool calls)."""

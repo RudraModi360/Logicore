@@ -27,9 +27,10 @@ class TestMemoryDomain:
         assert MemoryDomain.KNOWLEDGE.value == "knowledge"
         assert MemoryDomain.DOMAIN.value == "domain"
         assert MemoryDomain.ADDITIONAL_LEARNING.value == "additional_learning"
+        assert MemoryDomain.OPERATIONAL.value == "operational"
     
     def test_domain_count(self):
-        assert len(MemoryDomain) == 6
+        assert len(MemoryDomain) == 7
 
 
 class TestMemoryKind:
@@ -38,9 +39,10 @@ class TestMemoryKind:
         assert MemoryKind.GUIDELINE.value == "guideline"
         assert MemoryKind.CONTEXT.value == "context"
         assert MemoryKind.POINTER.value == "pointer"
+        assert MemoryKind.LESSON.value == "lesson"
     
     def test_kind_count(self):
-        assert len(MemoryKind) == 4
+        assert len(MemoryKind) == 5
 
 
 class TestMemoryStability:

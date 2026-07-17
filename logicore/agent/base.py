@@ -766,9 +766,18 @@ Available skills:
         self._ensure_task_manager()
         # Use context-based tools if available (multi-agent safe)
         tools = get_task_tools_with_context(self._task_tool_context) if self._task_tool_context else get_task_tools()
-        self.internal_tools.extend(get_task_tool_schemas())
+        # Register task-tool executors unconditionally so the agent can always
+        # plan and track multi-step work.
         for tool in tools:
             self.tool_executor.register_custom_tool(tool.name, tool.run)
+        # The full internal tool set (ALL_TOOL_SCHEMAS) already includes the
+        # task tools. Only add their schemas separately when the loaded set
+        # does not already contain them, otherwise they are rendered twice in
+        # the system prompt (duplicate tool definitions + token bloat).
+        loaded_names = {t.get("function", {}).get("name") for t in ALL_TOOL_SCHEMAS}
+        task_schemas = get_task_tool_schemas()
+        if not any(s.get("function", {}).get("name") in loaded_names for s in task_schemas):
+            self.internal_tools.extend(task_schemas)
         self.internal_tools.extend(ALL_TOOL_SCHEMAS)
         self.supports_tools = True
         self._load_default_skills()
@@ -786,11 +795,19 @@ Available skills:
         self._ensure_task_manager()
         # Use context-based tools if available (multi-agent safe)
         tools = get_task_tools_with_context(self._task_tool_context) if self._task_tool_context else get_task_tools()
-        self.internal_tools.extend(get_task_tool_schemas())
+        # Register task-tool executors unconditionally so the agent can always
+        # plan and track multi-step work.
         for tool in tools:
             self.tool_executor.register_custom_tool(tool.name, tool.run)
         from logicore.tools.registry import ToolRegistry
         temp_registry = ToolRegistry(enabled_tools=preset_tools)
+        # Avoid duplicating task-tool schemas: only add them if the preset does
+        # not already include them (the smart/copilot presets do, minimal/
+        # lightweight/webdev do not).
+        loaded_names = {t.get("function", {}).get("name") for t in temp_registry.schemas}
+        task_schemas = get_task_tool_schemas()
+        if not any(s.get("function", {}).get("name") in loaded_names for s in task_schemas):
+            self.internal_tools.extend(task_schemas)
         self.internal_tools.extend(temp_registry.schemas)
         self.supports_tools = True
         self._load_default_skills_for_preset(preset)

@@ -197,10 +197,11 @@ class ToolRegistry:
         if tool is None:
             # Unknown-tool failures are deterministic — never retryable.
             from logicore.tools.error_classifier import (
-                ClassifiedToolError, ToolFailoverReason,
+                ClassifiedToolError, RecoveryAction, ToolFailoverReason,
             )
             classified = ClassifiedToolError(
                 reason=ToolFailoverReason.not_found,
+                recovery_action=RecoveryAction.INJECT_SIGNAL,
                 message=f"Unknown tool: {tool_name}",
                 tool_name=tool_name,
                 retryable=False,
@@ -208,6 +209,7 @@ class ToolRegistry:
             return ToolResult(
                 success=False, error=classified.message,
                 **{"error_category": classified.reason.value,
+                   "recovery_action": classified.recovery_action.value,
                    "retryable": classified.retryable,
                    "should_rotate_credential": classified.should_rotate_credential},
             )
@@ -222,12 +224,14 @@ class ToolRegistry:
             from logicore.tools.error_classifier import classify_tool_error
             classified = classify_tool_error(e, tool_name=tool_name, is_credentialed=False)
             logger.warning(
-                "Tool %s execution failed [%s, retryable=%s]: %s",
-                tool_name, classified.reason.value, classified.retryable, e,
+                "Tool %s execution failed [%s, recovery=%s, retryable=%s]: %s",
+                tool_name, classified.reason.value, classified.recovery_action.value,
+                classified.retryable, e,
             )
             return ToolResult(
                 success=False, error=classified.message,
                 **{"error_category": classified.reason.value,
+                   "recovery_action": classified.recovery_action.value,
                    "retryable": classified.retryable,
                    "should_rotate_credential": classified.should_rotate_credential},
             )

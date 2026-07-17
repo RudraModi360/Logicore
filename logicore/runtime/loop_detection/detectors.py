@@ -60,6 +60,7 @@ class ConsecutiveToolCallState:
     repetition_count: int = 0
     last_tool_name: Optional[str] = None
     last_tool_args: Optional[Dict[str, Any]] = None
+    recent_calls: List[str] = field(default_factory=list)
 
 
 class ConsecutiveToolCallDetector(LoopDetector):
@@ -91,8 +92,6 @@ class ConsecutiveToolCallDetector(LoopDetector):
         event: AgentEvent,
         session_id: str,
     ) -> LoopDetectionResult:
-        """Check for consecutive identical tool calls."""
-        # Only process tool call events
         if event.type != AgentEventType.TOOL_CALL:
             return LoopDetectionResult()
         
@@ -103,26 +102,40 @@ class ConsecutiveToolCallDetector(LoopDetector):
             return LoopDetectionResult()
         
         if state.last_hash == call_hash:
-            # Same call as last time
             state.repetition_count += 1
         else:
-            # Different call, reset
             state.last_hash = call_hash
             state.repetition_count = 1
             state.last_tool_name = event.tool_name
             state.last_tool_args = event.tool_args
         
-        # Check threshold
+        state.recent_calls.append(call_hash)
+        state.recent_calls = state.recent_calls[-10:]
+        
+        from collections import Counter
+        counts = Counter(state.recent_calls)
+        most_common_tool, most_common_count = counts.most_common(1)[0]
+        
         if state.repetition_count >= self.threshold:
             import json
             args_preview = json.dumps(state.last_tool_args or {})[:100]
-            
             return LoopDetectionResult(
                 detected=True,
                 loop_type=LoopType.CONSECUTIVE_TOOL_CALLS,
                 confidence=min(1.0, 0.5 + (state.repetition_count - self.threshold) * 0.1),
-                detail=f"Tool '{state.last_tool_name}' called {state.repetition_count} times with args: {args_preview}...",
+                detail=f"Tool '{state.last_tool_name}' called {state.repetition_count} times consecutively with args: {args_preview}...",
                 repetition_count=state.repetition_count,
+            )
+        
+        if most_common_count >= self.threshold and len(state.recent_calls) >= self.threshold:
+            import json
+            args_preview = json.dumps(state.last_tool_args or {})[:100]
+            return LoopDetectionResult(
+                detected=True,
+                loop_type=LoopType.CONSECUTIVE_TOOL_CALLS,
+                confidence=min(1.0, 0.5 + (most_common_count - self.threshold) * 0.05),
+                detail=f"Tool '{event.tool_name}' called {most_common_count} times in last {len(state.recent_calls)} calls (alternating pattern)",
+                repetition_count=most_common_count,
             )
         
         return LoopDetectionResult()
@@ -315,6 +328,7 @@ class StagnantStateTracker:
     last_tool_results: List[str] = field(default_factory=list)
     last_content_hashes: List[str] = field(default_factory=list)
     last_successful_action: Optional[str] = None
+    last_read_only_result_hash: Optional[str] = None
 
 
 class StagnantStateDetector(LoopDetector):
@@ -365,18 +379,24 @@ class StagnantStateDetector(LoopDetector):
         # Tool results can indicate progress
         elif event.type == AgentEventType.TOOL_RESULT:
             if event.tool_success:
-                # Successful tool = progress, reset counter
-                state.turns_without_progress = 0
-                state.last_successful_action = event.tool_name
+                result_hash = hashlib.md5((event.tool_result or "").encode()).hexdigest()
+                READ_ONLY_TOOLS = {"read_file", "list_files", "search_files", "grep"}
+                is_read_only = event.tool_name in READ_ONLY_TOOLS
+                same_as_last = is_read_only and result_hash == state.last_read_only_result_hash
+                if is_read_only:
+                    state.last_read_only_result_hash = result_hash
+                if same_as_last:
+                    state.turns_without_progress += 1
+                else:
+                    state.turns_without_progress = 0
+                    state.last_successful_action = event.tool_name
             else:
-                # Failed tool - track if same failure repeated
                 result_hash = hashlib.md5((event.tool_result or "").encode()).hexdigest()
                 if result_hash in state.last_tool_results[-3:]:
-                    # Same failure repeated
                     state.turns_without_progress += 1
                 else:
                     state.last_tool_results.append(result_hash)
-                    state.last_tool_results = state.last_tool_results[-10:]  # Keep recent
+                    state.last_tool_results = state.last_tool_results[-10:]
         
         # Content that includes new information resets counter
         elif event.type == AgentEventType.CONTENT:

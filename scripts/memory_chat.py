@@ -10,14 +10,14 @@ async def main():
     memory = MemoryManager(
         # memory_dir="./agent_memory",
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",  # model used for extraction/retrieval
+        llm_model="smollm2:135m",  # model used for extraction/retrieval
         throttle_interval=1.0,
         debug=True,
     )
     await memory.start()
 
     # Create agent with memory integration
-    agent = BasicAgent(provider="ollama", model="gemma3:4b-cloud", debug=True)
+    agent = BasicAgent(provider="ollama", model="gpt-oss:20b-cloud", debug=True)
 
     print("SmartAgent with memory ready. Type 'quit' to exit.\n")
 

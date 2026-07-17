@@ -46,17 +46,23 @@ async def main(provider: str, model: str):
         model=model or None,
         storage=storage,
         debug=True,
-        # telemetry=True,
+        max_iterations=100,
+        # tools=[],
+        # skills=[]
+        telemetry=True,
     )
-
-    # (2) Resume an existing persisted session if present
-    SESSION_ID = agent.create_session()
+    
+    # with open(file="system_prompt.txt",mode='w',encoding='utf-8') as f:
+    #     f.write(str(agent.system_prompt))
+    # # (2) Resume an existing persisted session if present
+    # SESSION_ID = agent.create_session()
+    SESSION_ID='session-50412bff'
     print(f"[new] started fresh session '{SESSION_ID}'")
 
     # (3) Attach persistent memory (standalone subsystem, driven per turn)
     memory = MemoryManager(
         llm_provider="ollama",
-        llm_model="gemma3:4b-cloud",
+        llm_model="gpt-oss:20b-cloud",  # model used for extraction/retrieval
         # debug=True,
     )
     await memory.start()
@@ -102,6 +108,6 @@ if __name__ == "__main__":
         description="SmartAgent demo with sessions + persistent memory"
     )
     parser.add_argument("--provider", default=os.environ.get("PROVIDER", "ollama"))
-    parser.add_argument("--model", default=os.environ.get("MODEL", "gpt-oss:20b-cloud"))
+    parser.add_argument("--model", default=os.environ.get("MODEL", "gemma4:cloud"))
     args = parser.parse_args()
     asyncio.run(main(args.provider, args.model))

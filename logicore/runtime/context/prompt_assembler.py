@@ -1,9 +1,12 @@
 """
-PromptAssembler: System prompt construction and truncation.
+PromptAssembler: System prompt construction and token-based truncation.
 
 Extracted from Agent._rebuild_system_prompt_with_tools().
-Handles system prompt building, truncation at the character limit,
-and propagation to existing sessions.
+Handles system prompt building and truncation at the token limit,
+not the character limit, so the framework measures the same unit the
+LLM counts. This removes the char-vs-token mismatch that previously
+caused premature truncation (e.g. a 40k-char prompt reported as 40k
+"tokens" when it was really ~10-11k tokens).
 """
 
 from __future__ import annotations
@@ -11,9 +14,11 @@ from __future__ import annotations
 import re
 from typing import List, Dict, Any, Optional
 
+from logicore.runtime.context.token_estimator import TokenEstimator
 
-# Hard limit for system prompt characters
-SYSTEM_PROMPT_MAX_CHARS = 40000
+
+# Default token budget for the system prompt (overridable via config).
+SYSTEM_PROMPT_MAX_TOKENS = 16000
 
 
 class PromptAssembler:
@@ -22,12 +27,18 @@ class PromptAssembler:
 
     Responsibilities:
     - Assemble system prompt from base prompt + tools + skills
-    - Truncate at max_prompt_chars to stay within context budget
+    - Truncate at max_tokens to stay within context budget (token-accurate)
     - Update system message in existing sessions
     """
 
-    def __init__(self, max_chars: int = SYSTEM_PROMPT_MAX_CHARS, debug: bool = False):
-        self.max_chars = max_chars
+    def __init__(
+        self,
+        max_tokens: int = SYSTEM_PROMPT_MAX_TOKENS,
+        token_estimator: Optional[TokenEstimator] = None,
+        debug: bool = False,
+    ):
+        self.max_tokens = max_tokens
+        self.token_estimator = token_estimator or TokenEstimator()
         self.debug = debug
 
     def assemble(
@@ -47,7 +58,7 @@ class PromptAssembler:
             hidden_tool_count: Number of tools omitted for context efficiency
 
         Returns:
-            Assembled and truncated system prompt
+            Assembled and token-truncated system prompt
         """
         prompt = base_prompt
 
@@ -64,32 +75,48 @@ class PromptAssembler:
         if skills_section:
             prompt += skills_section
 
-        # Truncate if too long — use semantic-aware boundary detection
-        if len(prompt) > self.max_chars:
-            prompt = self._truncate_semantic(prompt, self.max_chars)
+        # Truncate if too long — use token-accurate measurement + semantic boundary
+        if self.token_estimator.count_tokens(prompt) > self.max_tokens:
+            prompt = self._truncate_semantic(prompt, self.max_tokens)
             if self.debug:
                 print(
-                    f"[ContextEngine] System prompt exceeded {self.max_chars} chars and was truncated"
+                    f"[ContextEngine] System prompt exceeded {self.max_tokens} tokens "
+                    f"and was truncated"
                 )
 
         return prompt
 
-    @staticmethod
-    def _truncate_semantic(prompt: str, max_chars: int) -> str:
+    def _truncate_semantic(self, prompt: str, max_tokens: int) -> str:
         """
-        Truncate prompt at a semantic boundary (section header or newline)
-        rather than mid-word or mid-tag. Falls back to max_chars if no good
-        boundary is found within the last 500 characters.
+        Truncate prompt to a token budget at a semantic boundary
+        (section header or newline) rather than mid-word or mid-tag.
+
+        Works by walking the prompt and cutting at the largest character
+        offset whose token count stays within budget, then snapping back to
+        the nearest clean boundary.
         """
-        truncated = prompt[:max_chars]
-        # Search backwards for a clean section boundary (## header)
+        total_tokens = self.token_estimator.count_tokens(prompt)
+        if total_tokens <= max_tokens:
+            return prompt
+
+        # Binary search for the char length that lands at/under the budget.
+        lo, hi = 0, len(prompt)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.token_estimator.count_tokens(prompt[:mid]) <= max_tokens:
+                lo = mid
+            else:
+                hi = mid - 1
+
+        truncated = prompt[:lo]
+
+        # Snap back to a clean semantic boundary (## header, else newline).
         last_header = truncated.rfind("\n## ")
-        if last_header > max_chars - 500:
+        if last_header > 0:
             truncated = truncated[:last_header]
         else:
-            # Fall back to last newline
             last_newline = truncated.rfind("\n")
-            if last_newline > max_chars - 500:
+            if last_newline > 0:
                 truncated = truncated[:last_newline]
 
         return truncated + "\n\n[System prompt truncated for context efficiency.]"
@@ -124,6 +151,15 @@ class PromptAssembler:
 
         if skills_section:
             prompt += skills_section
+
+        # Apply the same token-based cap to custom prompts.
+        if self.token_estimator.count_tokens(prompt) > self.max_tokens:
+            prompt = self._truncate_semantic(prompt, self.max_tokens)
+            if self.debug:
+                print(
+                    f"[ContextEngine] Custom system prompt exceeded {self.max_tokens} "
+                    f"tokens and was truncated"
+                )
 
         return prompt
 

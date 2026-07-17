@@ -136,18 +136,21 @@ class ToolBudgetConfig:
 
 
 def estimate_tokens_from_schemas(tool_defs: Iterable[Dict[str, Any]]) -> int:
-    """Estimate token cost of a tool-defs list via the chars/4 rule.
+    """Estimate token cost of a tool-defs list using centralized token estimator.
 
     Order-of-magnitude precision is fine — this gates an activate/skip decision
     where the cliff is typically tens of thousands of tokens.
     """
-    total_chars = 0
+    from logicore.runtime.context.token_estimator import TokenEstimator
+    _estimator = TokenEstimator()
+    total_tokens = 0
     for td in tool_defs:
         try:
-            total_chars += len(json.dumps(td, ensure_ascii=False, separators=(",", ":")))
+            text = json.dumps(td, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
-            total_chars += len(str(td))
-    return int(math.ceil(total_chars / CHARS_PER_TOKEN))
+            text = str(td)
+        total_tokens += _estimator.count_tokens(text)
+    return total_tokens
 
 
 def classify_tools(tool_defs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:

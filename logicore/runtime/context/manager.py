@@ -403,8 +403,18 @@ class ContextEngine:
         from logicore.runtime.context.tool_output_distiller import ToolOutputDistiller
 
         self.token_estimator = TokenEstimator(token_counter)
+        # Resolve the system-prompt token cap. Prefer a ratio of the actual
+        # model context window; fall back to the absolute configured default.
+        from logicore.runtime.context.token_estimator import get_model_context_window
+        model_window = get_model_context_window(model_name)
+        resolved_max_tokens = min(
+            config.context.system_prompt_max_tokens,
+            max(1, int(model_window * config.context.system_prompt_max_tokens_ratio)),
+        )
+
         self.prompt_assembler = PromptAssembler(
-            max_chars=config.context.system_prompt_max_chars,
+            max_tokens=resolved_max_tokens,
+            token_estimator=self.token_estimator,
             debug=debug,
         )
         self.message_pipeline = MessagePipeline()
