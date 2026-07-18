@@ -92,7 +92,7 @@ class SnapshotWorker:
         self._thread = threading.Thread(
             target=self._run,
             name="snapshot-worker",
-            daemon=False,  # Non-daemon: survives process exit
+            daemon=True,  # Daemon: allows process to exit; atexit handles drain
         )
         self._thread.start()
         logger.debug("[WORKER] started background snapshot worker | thread=%s", self._thread.name)

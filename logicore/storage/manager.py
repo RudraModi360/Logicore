@@ -55,14 +55,16 @@ class StorageManager:
         db: Optional[DatabaseBackend] = None,
         snapshot: Optional[SnapshotBackend] = None,
         media: Optional[MediaBackend] = None,
+        enable_snapshot_sync: bool = True,
     ):
         self.config = config
         self._db = db
         self._snapshot = snapshot
         self._media = media
-        self._snapshot_enabled = config.snapshot.enabled
+        self._snapshot_enabled = config.snapshot.enabled and enable_snapshot_sync
         self._commit_callbacks: List[Callable[[str], None]] = []
         self._worker: Optional[SnapshotWorker] = None
+        self._worker_started = False
         self._is_initialized = False
 
     @property
@@ -129,13 +131,23 @@ class StorageManager:
         if self._media:
             self._media.initialize()
 
-        # Start snapshot worker if snapshot is enabled
-        if self._snapshot and self._snapshot_enabled:
-            self._worker = SnapshotWorker(self._db, self._snapshot)
-            self._worker.start()
-            logger.debug("Snapshot worker started")
+        # Snapshot worker is lazy — only starts when first needed.
+        # This avoids spinning up a background thread for agents that
+        # don't use memory/snapshot features.
+        self._worker_started = False
 
         self._is_initialized = True
+
+    def _ensure_worker(self) -> None:
+        """Start the snapshot worker on first use (lazy init)."""
+        if self._worker_started:
+            return
+        if not self._snapshot or not self._snapshot_enabled:
+            return
+        self._worker = SnapshotWorker(self._db, self._snapshot)
+        self._worker.start()
+        self._worker_started = True
+        logger.debug("Snapshot worker started (lazy)")
 
     def close(self, drain_timeout: float = 2.0) -> None:
         """
@@ -213,7 +225,8 @@ class StorageManager:
             logger.error(f"[TX] save_session FAILED | session={session_id} | error={e}")
             raise
 
-        # Enqueue async snapshot sync (non-blocking)
+        # Enqueue async snapshot sync (non-blocking, lazy worker start)
+        self._ensure_worker()
         if self._worker:
             logger.debug(f"[WORKER] queued async snapshot sync | session={session_id}")
             self._worker.enqueue(session_id)
@@ -266,6 +279,7 @@ class StorageManager:
             context=context,
         )
 
+        self._ensure_worker()
         if self._worker:
             self._worker.enqueue(session_id)
 
@@ -339,6 +353,7 @@ class StorageManager:
             logger.error(f"[TX] save_telemetry FAILED | session={session_id} | error={e}")
             raise
 
+        self._ensure_worker()
         if self._worker:
             self._worker.enqueue(session_id)
 
@@ -419,6 +434,7 @@ class StorageManager:
 
     def enqueue_snapshot(self, session_id: str) -> None:
         """Enqueue a session for async snapshot sync (non-blocking)."""
+        self._ensure_worker()
         if self._worker:
             self._worker.enqueue(session_id)
 

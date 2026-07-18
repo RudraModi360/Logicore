@@ -37,6 +37,7 @@ def create_storage(
     db: "DatabaseBackend" = None,
     snapshot: "SnapshotBackend" = None,
     media: "MediaBackend" = None,
+    enable_snapshot_sync: bool = True,
     **kwargs,
 ) -> StorageManager:
     """Create and initialize a StorageManager with sane defaults.
@@ -47,6 +48,9 @@ def create_storage(
             connector). When provided, URL-based auto-detection is skipped.
         snapshot: Inject a custom SnapshotBackend.
         media: Inject a custom MediaBackend.
+        enable_snapshot_sync: Start the background snapshot worker. Set to
+            ``False`` for simple agents that don't need snapshot/memory sync
+            — avoids spinning up a background thread that could block exit.
         **kwargs: Override for DatabaseConfig, SnapshotConfig, or MediaConfig fields.
     """
     config = StorageConfig()
@@ -63,7 +67,10 @@ def create_storage(
             setattr(config.snapshot, k, v)
         elif hasattr(config.media, k):
             setattr(config.media, k, v)
-    manager = StorageManager(config, db=db, snapshot=snapshot, media=media)
+    manager = StorageManager(
+        config, db=db, snapshot=snapshot, media=media,
+        enable_snapshot_sync=enable_snapshot_sync,
+    )
     manager.initialize()
     return manager
 

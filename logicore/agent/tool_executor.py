@@ -5,8 +5,11 @@ Consolidates tool dispatch (custom, skill, MCP, internal) into a single
 execution path, replacing the dual execution pattern.
 """
 
+import sys
+import os
 import time
 import json
+import asyncio
 import inspect
 from enum import Enum
 from typing import Dict, Any, Callable, List, Optional
@@ -74,7 +77,8 @@ class ToolExecutor:
     - Auto-heal for common tool errors
     """
     
-    def __init__(self, debug: bool = False):
+    def __init__(self, debug: bool = False, approval_timeout: Optional[float] = None,
+                 allow_tools: Optional[set] = None):
         self.debug = debug
         
         # Tool registries
@@ -84,6 +88,34 @@ class ToolExecutor:
         
         # Approval settings
         self.auto_approve_all = False
+        # Set of tool names that are pre-approved and skip the approval check
+        # entirely.  Useful for delegating authority to child processes: the
+        # parent pre-authorises specific tools, the child picks them up and
+        # can execute them without prompting.
+        if allow_tools is not None:
+            self.allow_tools: set = set(allow_tools)
+        else:
+            # Fall back to env var so child subprocesses inherit the parent's
+            # allow-list without explicit wiring.
+            _env_allow = os.environ.get("LOGICORE_ALLOW_TOOLS")
+            if _env_allow:
+                try:
+                    self.allow_tools = set(json.loads(_env_allow))
+                except (json.JSONDecodeError, TypeError):
+                    self.allow_tools = set()
+            else:
+                self.allow_tools = set()
+        # Maximum seconds to wait for an approval decision before returning a
+        # structured "needs_approval" result.  ``None`` means wait forever
+        # (backward-compatible default for interactive sessions).
+        self.approval_timeout: Optional[float] = approval_timeout
+
+        # Propagate to child processes: when a bash/execute_command tool spawns
+        # a subprocess that creates its own Agent, the child picks this up via
+        # os.environ so its ToolExecutor also gets a timeout instead of hanging
+        # on input() forever.
+        if approval_timeout is not None:
+            os.environ["LOGICORE_APPROVAL_TIMEOUT"] = str(approval_timeout)
 
         # Session-scoped approval cache: session_id -> {group_key: decision(bool)}.
         # Lets a single per-session grant (e.g. "allow internet access") cover
@@ -119,6 +151,19 @@ class ToolExecutor:
     def set_auto_approve(self, enabled: bool):
         """Enable/disable auto-approval for all tools."""
         self.auto_approve_all = enabled
+
+    def set_allow_tools(self, tools: set):
+        """Set tools that are pre-approved and skip the approval check.
+
+        Also propagates to ``LOGICORE_ALLOW_TOOLS`` env var so child
+        subprocesses (e.g. bash running a script that creates its own Agent)
+        inherit the same allow-list.
+        """
+        self.allow_tools = set(tools) if tools else set()
+        if self.allow_tools:
+            os.environ["LOGICORE_ALLOW_TOOLS"] = json.dumps(sorted(self.allow_tools))
+        else:
+            os.environ.pop("LOGICORE_ALLOW_TOOLS", None)
     
     def set_callbacks(self, **kwargs):
         """Set execution callbacks."""
@@ -147,6 +192,36 @@ class ToolExecutor:
             return True, False, result
         return bool(result), False, args
 
+    @staticmethod
+    def _needs_approval_result(
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        reason: str,
+        timed_out: bool = False,
+    ) -> Dict[str, Any]:
+        """Return a structured result when approval cannot be obtained.
+
+        The result is shaped so that the supervising agent (LLM) can reason
+        about *why* the tool call did not execute and report back to the user.
+        Key fields:
+
+        - ``needs_approval``: always ``True`` — signals that the tool requires
+          a human approval that was not granted.
+        - ``timed_out``: ``True`` when the approval window expired (vs. an
+          immediate deny from a headless guard).
+        - ``approval_timeout_seconds``: the configured timeout value (``None``
+          means "no timeout was configured, but approval still wasn't received",
+          which can happen in headless contexts).
+        """
+        return {
+            "success": False,
+            "error": reason,
+            "needs_approval": True,
+            "timed_out": timed_out,
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+        }
+
     async def _default_approval_callback(
         self,
         session_id: str,
@@ -168,6 +243,17 @@ class ToolExecutor:
         session-scoped, so ``y`` maps to a session grant (it will not ask
         again this session) and only yes/no is offered.
         """
+        # Headless guard: in autonomous / non-interactive contexts there is no
+        # human to answer the prompt.  Calling input() here would block forever
+        # (or raise EOFError on a closed pipe).  Fail-fast with DENY so the
+        # supervising agent gets a clear "Denied by user" result instead of
+        # hanging indefinitely.
+        if not sys.stdin.isatty():
+            logger.info(
+                f"[ToolExecutor] Headless mode detected — auto-denying approval for '{tool_name}'"
+            )
+            return ApprovalDecision.DENY
+
         args_preview = json.dumps(args, default=str)[:200] if args else "{}"
 
         if group == "network_egress":
@@ -241,6 +327,8 @@ class ToolExecutor:
     def requires_approval(self, name: str) -> bool:
         """Check if a tool requires user approval."""
         if self.auto_approve_all:
+            return False
+        if name in self.allow_tools:
             return False
         if name in SAFE_TOOLS:
             return False
@@ -346,7 +434,26 @@ class ToolExecutor:
                         f"[ToolExecutor] Reusing session approval={approved} for '{cache_key}'"
                     )
             elif self.callbacks.get("on_tool_approval"):
-                approval_result = await self.callbacks["on_tool_approval"](session_id, name, args)
+                try:
+                    if self.approval_timeout is not None:
+                        approval_result = await asyncio.wait_for(
+                            self.callbacks["on_tool_approval"](session_id, name, args),
+                            timeout=self.approval_timeout,
+                        )
+                    else:
+                        approval_result = await self.callbacks["on_tool_approval"](session_id, name, args)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[ToolExecutor] Approval timed out ({self.approval_timeout}s) for '{name}'"
+                    )
+                    return self._needs_approval_result(
+                        name, args,
+                        reason=(
+                            f"Approval timed out for tool '{name}' after {self.approval_timeout}s. "
+                            f"The tool call requires user approval but no decision was received in time."
+                        ),
+                        timed_out=True,
+                    )
                 approved, approve_all, args = self._normalize_approval(approval_result, args)
                 # Cache when: a grouped decision was made (incl. a cached
                 # denial, so the network group keeps denying silently), or the
@@ -356,7 +463,26 @@ class ToolExecutor:
                     self._approval_cache.setdefault(session_id, {})[cache_key] = approved
             else:
                 # No approval callback configured - use default terminal prompt
-                approval_result = await self._default_approval_callback(session_id, name, args, group)
+                try:
+                    if self.approval_timeout is not None:
+                        approval_result = await asyncio.wait_for(
+                            self._default_approval_callback(session_id, name, args, group),
+                            timeout=self.approval_timeout,
+                        )
+                    else:
+                        approval_result = await self._default_approval_callback(session_id, name, args, group)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[ToolExecutor] Approval timed out ({self.approval_timeout}s) for '{name}'"
+                    )
+                    return self._needs_approval_result(
+                        name, args,
+                        reason=(
+                            f"Approval timed out for tool '{name}' after {self.approval_timeout}s. "
+                            f"The tool call requires user approval but no decision was received in time."
+                        ),
+                        timed_out=True,
+                    )
                 approved, approve_all, _ = self._normalize_approval(approval_result, args)
                 if (group is not None or (approved and approve_all)) and name not in _NON_CACHABLE_TOOLS:
                     self._approval_cache.setdefault(session_id, {})[cache_key] = approved
@@ -418,7 +544,6 @@ class ToolExecutor:
                     # Transient error — single retry with backoff
                     if classified.should_backoff:
                         logger.info(f"[ToolExecutor] Retrying '{name}' (transient error)")
-                        import asyncio
                         await asyncio.sleep(0.5)  # Brief backoff
                         result = self.normalize_tool_result(name, await self._dispatch(name, args, session_id))
                         duration_ms = (time.time() - start_time) * 1000
@@ -437,7 +562,6 @@ class ToolExecutor:
                             backoff_time = 1.0
                     backoff_time = float(backoff_time)
                     logger.info(f"[ToolExecutor] Backing off {backoff_time}s then retrying '{name}' (transient error)")
-                    import asyncio
                     await asyncio.sleep(backoff_time)
                     result = self.normalize_tool_result(name, await self._dispatch(name, args, session_id))
                     duration_ms = (time.time() - start_time) * 1000

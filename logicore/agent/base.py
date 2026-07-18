@@ -65,6 +65,8 @@ class Agent:
         reasoning_level: str = "medium",
         plan_mode: bool = False,
         agent_id: str = None,
+        approval_timeout: float = 120.0,
+        allow_tools: set = None,
         # Storage (optional — enables session persistence)
         storage=None,
         # Composable components (optional overrides)
@@ -120,15 +122,9 @@ class Agent:
         self.session_cost_source = "none"
 
         # Storage (optional session persistence)
-        # Auto-initialize from environment if not explicitly provided
-        if storage is not None:
-            self._storage = storage
-        else:
-            try:
-                from logicore.storage import create_storage
-                self._storage = create_storage()
-            except Exception:
-                self._storage = None
+        # Only created when explicitly provided. Pass storage=create_storage()
+        # to enable session persistence. Without it, the agent runs stateless.
+        self._storage = storage
 
         # Context engine
         from logicore.runtime.context import ContextEngine
@@ -202,7 +198,18 @@ class Agent:
         self.workspace_root = workspace_root
         
         # Composable components
-        self.tool_executor = tool_executor or ToolExecutor(debug=debug)
+        # Fall back to env var so child subprocesses (e.g. bash tool running a
+        # script that creates its own Agent) inherit the parent's timeout.
+        if approval_timeout is None:
+            _env_timeout = os.environ.get("LOGICORE_APPROVAL_TIMEOUT")
+            if _env_timeout is not None:
+                try:
+                    approval_timeout = float(_env_timeout)
+                except (ValueError, TypeError):
+                    pass
+        self.tool_executor = tool_executor or ToolExecutor(
+            debug=debug, approval_timeout=approval_timeout, allow_tools=allow_tools,
+        )
         self.input_enricher = input_enricher or InputEnricher(workspace_root=workspace_root, debug=debug)
         self._chat_orchestrator = chat_orchestrator or ChatOrchestrator(agent=self, debug=debug)
         
@@ -1397,6 +1404,31 @@ Available skills:
         self.auto_approve_all = enabled
         self.tool_executor.set_auto_approve(enabled)
 
+    def set_approval_timeout(self, timeout: Optional[float]) -> None:
+        """Set the maximum seconds to wait for a tool approval decision.
+
+        Args:
+            timeout: Seconds to wait before returning a structured
+                ``needs_approval`` result.  ``None`` disables the timeout
+                (wait forever — the original interactive behaviour).
+        """
+        self.tool_executor.approval_timeout = timeout
+
+    def set_allow_tools(self, tools: set) -> None:
+        """Pre-authorise specific tools so they skip the approval check.
+
+        When the agent runs a child process (e.g. via ``bash``), the
+        child's Agent picks up the same allow-list via
+        ``LOGICORE_ALLOW_TOOLS`` env var, so those tools execute without
+        prompting — solving the deadlock where a child script's tool
+        calls hang waiting for approval that never comes.
+
+        Args:
+            tools: Set of tool names to pre-authorise (e.g.
+                ``{"get_order_status", "create_support_ticket"}``).
+        """
+        self.tool_executor.set_allow_tools(tools)
+
     # === Tool Approval ===
     
     def _requires_approval(self, name: str) -> bool:
@@ -1440,3 +1472,9 @@ Available skills:
     async def cleanup(self):
         for manager in self.tool_executor.mcp_managers:
             await manager.cleanup()
+        # Stop the snapshot worker so its thread doesn't block process exit
+        if self._storage and hasattr(self._storage, 'close'):
+            try:
+                self._storage.close(drain_timeout=2.0)
+            except Exception:
+                pass

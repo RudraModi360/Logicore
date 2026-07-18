@@ -72,6 +72,12 @@ class ChatOrchestrator:
         
         # Initialize turn retry state (one-shot recovery guards)
         self._turn_retry_state = TurnRetryState()
+
+        # Consecutive same-response detection: if the LLM returns the same
+        # text response N times in a row without calling tools, break the loop.
+        self._last_response_hash: Optional[str] = None
+        self._consecutive_same_response: int = 0
+        self._max_consecutive_same_response: int = 3
         
         # Initialize feedback handler for user corrections
         self._feedback_handler = FeedbackHandler()
@@ -594,6 +600,35 @@ class ChatOrchestrator:
                     if emitter:
                         emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": rec[1]}))
                     return rec[1]
+
+            # Simple same-response detection: if the LLM returns identical
+            # content N times in a row (without tool calls), break the loop.
+            # This catches cases the chunk-based detector misses (e.g.
+            # structured responses with lists/headings that get skipped).
+            if content and not tool_calls:
+                import hashlib
+                resp_hash = hashlib.md5(content.strip().encode()).hexdigest()
+                if resp_hash == self._last_response_hash:
+                    self._consecutive_same_response += 1
+                else:
+                    self._consecutive_same_response = 0
+                self._last_response_hash = resp_hash
+
+                if self._consecutive_same_response >= self._max_consecutive_same_response:
+                    logger.warning(
+                        f"[ChatOrchestrator] Same response repeated "
+                        f"{self._consecutive_same_response} times — breaking loop"
+                    )
+                    stop_msg = (
+                        "I notice I keep repeating the same response. "
+                        "Let me stop here. Please let me know if you have a "
+                        "specific question or task I can help with."
+                    )
+                    self._clear_injected_hints(session, injected_hints)
+                    session.messages.append({"role": "assistant", "content": stop_msg})
+                    if emitter:
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": stop_msg}))
+                    return stop_msg
 
             # 3. No tool calls = final response
             if not tool_calls:
