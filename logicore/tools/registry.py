@@ -62,7 +62,7 @@ TOOL_PRESETS = {
         # V2 Task Management
         ToolName.TASK_CREATE, ToolName.TASK_GET, ToolName.TASK_UPDATE, ToolName.TASK_LIST, ToolName.TASK_NEXT,
         # Plan
-        ToolName.ENTER_PLAN_MODE, ToolName.SUBMIT_PLAN, ToolName.VIEW_PLAN,
+        ToolName.ENTER_PLAN_MODE, ToolName.SUBMIT_PLAN, ToolName.VIEW_PLAN, ToolName.UPDATE_PLAN_PROGRESS,
         # Skill Management
         ToolName.LOAD_SKILL,
     ],
