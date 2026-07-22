@@ -44,7 +44,7 @@ Concept and usage docs (agents, tools, skills, memory, providers, MCP), plus ins
 Test suites grouped by use case:
 - `release_validation/`: broad quality/perf/security/packaging checks.
 - `real_providers/`: provider integration tests.
-- `prefix_prompt_caching/`, `test_agent_fixes/`, `unused_test/`: targeted and experimental suites.
+- `test_agent_fixes/`, `unused_test/`: targeted and experimental suites.
 
 ### `sandbox/`
 Experimental Copilot model pack and auth/provider sandbox.

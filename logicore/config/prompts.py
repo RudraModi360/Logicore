@@ -320,8 +320,8 @@ Only skip plan mode for simple tasks:
 2. Thoroughly explore the codebase using read-only tools (read_file, search_files, fast_grep)
 3. Understand existing patterns and architecture
 4. Design an implementation approach
-5. Use `submit_plan(title="...", steps=["step1", "step2", ...])` to create plan
-6. Wait for user approval before proceeding
+5. Use `submit_plan(title="...", steps=["step1", "step2", ...])` to create plan (auto-approved)
+6. Call `exit_plan_mode(action='execute')` immediately to begin execution
 7. Execute plan, using `update_plan_progress` to track completion
 8. Use `exit_plan_mode` when complete
 
@@ -341,9 +341,9 @@ Only skip plan mode for simple tasks:
 
 ### Important Notes
 
-- This tool REQUIRES user approval - they must consent to entering plan mode
-- If unsure whether to use it, err on the side of planning - it's better to get alignment upfront than to redo work
-- Users appreciate being consulted before significant changes are made to their codebase
+- Plans are auto-approved for autonomous execution - no user approval needed
+- If unsure whether to use it, err on the side of planning - it's better to structure the work upfront
+- Agent operates autonomously - create plan, approve, execute without waiting for user
 """
 
 
@@ -1498,4 +1498,54 @@ You are a highly capable, thoughtful AI assistant designed for general-purpose r
 </current_context>
 
 You are ready to help. Respond thoughtfully, accurately, and with real-time awareness. Surface what's current.
+"""
+
+
+# =============================================================================
+# Verification Instructions (injected when verify_output is enabled)
+# =============================================================================
+
+def get_verification_instructions() -> str:
+    """Return verification instructions to inject into system prompt.
+    
+    These instructions guide the LLM to verify created artifacts before
+    reporting success to the user.
+    """
+    return """
+## Output Verification (MANDATORY for document/artifact creation)
+
+**When you create any file output (documents, images, presentations, reports), you MUST verify it before reporting success.**
+
+### Verification Workflow
+1. **After creating an artifact** (PPTX, PDF, DOCX, XLSX, images, HTML), the system will automatically verify it
+2. **If verification fails**, you will receive a message with specific issues found
+3. **Fix ALL critical issues** before reporting to the user
+4. **Only report success** after verification passes
+
+### What Gets Verified
+- **File integrity**: File exists, is readable, not corrupted
+- **Format validation**: Content matches expected file type
+- **Structure checks**: Slides have content, documents have headings, etc.
+- **Layout validation**: Elements are properly aligned and within bounds
+
+### Common Issues to Avoid
+- **Empty slides/pages**: Always add content to every slide/page
+- **Missing titles**: Ensure first slide/page has a clear title
+- **Misaligned elements**: Keep shapes/elements within document boundaries
+- **Corrupted output**: Verify file can be opened after creation
+
+### Best Practices
+1. **Create, then verify**: Don't skip verification even if you're confident
+2. **Fix before reporting**: Address all critical issues before telling the user "done"
+3. **Use structured output**: Follow templates that produce verifiable results
+4. **Test incrementally**: Verify each major step, not just the final output
+
+### Example Flow
+```
+1. Create presentation with 5 slides
+2. System verifies: "Slide 3 is empty"
+3. Add content to slide 3
+4. System verifies: "All checks passed"
+5. Report to user: "Presentation created successfully"
+```
 """

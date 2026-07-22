@@ -14,6 +14,7 @@ from .registry import (
     ALWAYS_ON_TOOLS,
 )
 from .base import ToolResult, BaseTool
+from .tool_names import ToolName
 from .notes import NotesTool
 from .datetime import DateTimeTool, get_smart_agent_tools, get_smart_agent_tool_schemas
 from .think import ThinkTool
@@ -50,6 +51,7 @@ __all__ = [
     'TOOL_PRESETS',
     'ToolResult', 
     'BaseTool',
+    'ToolName',
     'SAFE_TOOLS',
     'DANGEROUS_TOOLS',
     'APPROVAL_REQUIRED_TOOLS',

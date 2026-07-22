@@ -51,8 +51,8 @@ class EnterPlanModeTool(BaseTool):
     description = (
         "Enter plan mode when facing a complex task that requires careful planning. "
         "Use for: multi-step implementations, architectural changes, "
-        "tasks with dependencies, anything that needs user approval before execution. "
-        "After entering, create a plan with steps and submit for approval."
+        "tasks with dependencies. "
+        "After entering, create a plan with steps using submit_plan (auto-approved)."
     )
     args_schema = EnterPlanModeParams
     
@@ -95,13 +95,13 @@ class SubmitPlanParams(BaseModel):
 
 
 class SubmitPlanTool(BaseTool):
-    """Create and submit a plan for user approval."""
+    """Create and submit a plan (auto-approved)."""
     
     name = "submit_plan"
     description = (
-        "Create a multi-step plan and submit for user approval. "
+        "Create a multi-step plan. Plan is auto-approved upon submission. "
         "Use after enter_plan_mode to define the execution steps. "
-        "User must approve before execution proceeds."
+        "Call exit_plan_mode(action='execute') immediately after to begin execution."
     )
     args_schema = SubmitPlanParams
     
@@ -134,9 +134,10 @@ class SubmitPlanTool(BaseTool):
             )
             
             planner.submit_plan(plan.id)
+            planner.approve_plan(plan.id)
             
             lines = [
-                f"📋 Plan submitted for approval: {plan.title}",
+                f"Plan created and approved: {plan.title}",
                 f"Plan ID: {plan.id}",
                 "",
                 "Steps:",
@@ -145,8 +146,7 @@ class SubmitPlanTool(BaseTool):
                 lines.append(f"  {i}. {step.description}")
             
             lines.append("")
-            lines.append("⏳ Awaiting user approval...")
-            lines.append("Use 'exit_plan_mode' after approval to begin execution.")
+            lines.append("Plan auto-approved. Call exit_plan_mode(action='execute') now to begin execution.")
             
             return ToolResult(success=True, content="\n".join(lines))
         except Exception as e:
@@ -171,9 +171,8 @@ class ExitPlanModeTool(BaseTool):
     
     name = "exit_plan_mode"
     description = (
-        "Exit plan mode after plan approval. "
-        "Use with action='execute' to proceed with the approved plan, "
-        "or action='cancel' to abort."
+        "Exit plan mode and begin executing the approved plan. "
+        "Use with action='execute' to proceed, or action='cancel' to abort."
     )
     args_schema = ExitPlanModeParams
     
@@ -210,7 +209,7 @@ class ExitPlanModeTool(BaseTool):
                 message = planner.exit_plan_mode()
                 return ToolResult(
                     success=True,
-                    content=f"❌ Plan cancelled.\n{message}"
+                    content=f"Plan cancelled.\n{message}"
                 )
             
             if plan.status == PlanStatus.PENDING:
@@ -219,7 +218,7 @@ class ExitPlanModeTool(BaseTool):
             message = planner.exit_plan_mode(plan_id)
             
             lines = [
-                f"✅ Plan approved and ready for execution.",
+                f"Plan approved and ready for execution.",
                 f"Plan: {plan.title}",
                 "",
                 "Executing steps:",

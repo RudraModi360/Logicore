@@ -13,8 +13,8 @@ create and work through tasks, exactly like production agent systems.
 import time
 import json
 import re
-import inspect
 import asyncio
+import traceback
 from typing import Dict, Any, Callable, List, Optional, Union
 import logging
 
@@ -26,16 +26,19 @@ from logicore.runtime.loop_detection.engine import AgentEventType
 from logicore.agent.tool_guardrails import (
     ToolCallGuardrailController,
     ToolCallGuardrailConfig,
-    toolguard_synthetic_result,
-    append_toolguard_guidance,
 )
 from logicore.agent.turn_retry_state import TurnRetryState, TransitionReason
 from logicore.agent.feedback_handler import FeedbackHandler
 from logicore.runtime.hooks.system import HookSystem
-from logicore.runtime.hooks.types import HookPoint, HookAction, HookContext, HookResult
+from logicore.runtime.hooks.types import HookPoint, HookAction, HookContext
 from logicore.agent.builtin_hooks import register_builtin_hooks
 from logicore.agent.operational_memory import OperationalMemoryManager
 from logicore.agent.progressive_compressor import ProgressiveCompressor, CompressionTrigger
+from logicore.tools.tool_names import ToolName
+from logicore.agent.agent_protocol import AgentProtocol
+from logicore.agent.telemetry_recorder import TelemetryRecorder
+from logicore.agent.hallucination_checker import check_response_hallucination
+from logicore.agent.tool_pipeline import ToolPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +52,13 @@ class ChatOrchestrator:
 
     def __init__(
         self,
-        agent: Any,
+        agent: AgentProtocol,
         debug: bool = False,
         input_sanitizer: Optional[InputSanitizer] = None,
     ):
         """
         Args:
-            agent: Parent Agent instance (for accessing provider, gateway, context, etc.)
+            agent: Parent Agent instance conforming to AgentProtocol
             debug: Enable debug logging
             input_sanitizer: Optional sanitizer for prompt injection protection
         """
@@ -68,7 +71,6 @@ class ChatOrchestrator:
         if hasattr(agent, "config") and hasattr(agent.config, "tool_loop_guardrails"):
             guardrail_config = agent.config.tool_loop_guardrails
         self.tool_guardrails = ToolCallGuardrailController(config=guardrail_config)
-        self._tool_guardrail_halt_decision = None
         
         # Initialize turn retry state (one-shot recovery guards)
         self._turn_retry_state = TurnRetryState()
@@ -95,8 +97,22 @@ class ChatOrchestrator:
         # Initialize progressive compressor for context management
         self._progressive_compressor = ProgressiveCompressor(debug=debug)
         
+        # Initialize telemetry recorder
+        self._telemetry_recorder = TelemetryRecorder(debug=debug)
+        
         # Track turn number for hooks
         self._turn_number = 0
+        
+        # Initialize tool pipeline (extracted per-tool-call orchestration)
+        self._tool_pipeline = ToolPipeline(
+            agent=agent,
+            tool_guardrails=self.tool_guardrails,
+            hook_system=self._hook_system,
+            operational_memory=self._operational_memory,
+            feedback_handler=self._feedback_handler,
+            turn_retry_state=self._turn_retry_state,
+            debug=debug,
+        )
 
     def _tool_context_window(self) -> Optional[int]:
         """Resolve the active model's context window for budget gating.
@@ -268,6 +284,24 @@ class ChatOrchestrator:
         """
         from logicore.providers.utils import extract_content
 
+        # --- Guard: unwrap pre-formatted message lists ---
+        # Some callers pass [{"role": "user", "content": "..."}] instead of a
+        # raw string or multimodal content parts.  Detect this and extract the
+        # raw user content so InputEnricher can process it properly (e.g.,
+        # detect image paths and build multimodal content).
+        if isinstance(user_input, list) and user_input and isinstance(user_input[0], dict):
+            first = user_input[0]
+            # Role-keyed messages have "role"; multimodal parts have "type".
+            if "role" in first and "type" not in first:
+                # Extract the last user message's content for enrichment.
+                raw_content = ""
+                for msg in reversed(user_input):
+                    if msg.get("role") == "user":
+                        raw_content = msg.get("content", "")
+                        break
+                if raw_content:
+                    user_input = raw_content
+
         # Sanitize user input for prompt injection protection.
         # Handles both plain strings and multimodal (list) content so that
         # injection fences smuggled inside image/part payloads are not skipped.
@@ -356,12 +390,10 @@ class ChatOrchestrator:
             injected_hints.append(correction_prompt)
 
         start_time = time.time()
-        # Add messages to session — handle both single string and message list
-        if isinstance(user_input, list):
-            for msg in user_input:
-                session.add_message(msg)
-        else:
-            session.add_message({"role": "user", "content": user_input})
+        # Add user message to session. When InputEnricher returns a multimodal
+        # list (text + image_url parts), it must be stored as the *content* of
+        # a single user message — NOT split into separate roleless messages.
+        session.add_message({"role": "user", "content": user_input})
 
         # Get tools
         all_tools = None
@@ -405,7 +437,7 @@ class ChatOrchestrator:
         
         # Reset tool guardrails and retry state once per run() call (one user turn)
         self.tool_guardrails.reset_for_turn()
-        self._tool_guardrail_halt_decision = None
+        self._tool_pipeline.halt_decision = None
         self._turn_retry_state = TurnRetryState()
 
         for i in range(self.agent.max_iterations):
@@ -427,9 +459,6 @@ class ChatOrchestrator:
             # Increment turn number for hooks
             self._turn_number += 1
 
-            # Reset session recovery state for this turn
-            session.recovery_state.reset_for_turn()
-            
             # Reset progressive compressor for this turn
             self._progressive_compressor.reset_for_new_turn(session_id)
 
@@ -581,8 +610,8 @@ class ChatOrchestrator:
             session.add_message(msg_dict)
 
             # Telemetry — always record (DB persistence), visibility gated by telemetry_enabled
-            self._record_telemetry(
-                session_id, llm_start_time, response, tool_calls, emitter
+            self._telemetry_recorder.record(
+                self.agent, session_id, llm_start_time, response, tool_calls, emitter
             )
 
             # Loop detection: end-of-turn bookkeeping (stagnant detection), then
@@ -635,7 +664,7 @@ class ChatOrchestrator:
                 self._clear_injected_hints(session, injected_hints)
                 
                 # M9: Hallucination check — compare claims vs execution reality
-                hallucination_warning = self._check_response_hallucination(
+                hallucination_warning = check_response_hallucination(
                     content, self.agent.execution_log, successful_tools_this_chat
                 )
                 if hallucination_warning:
@@ -651,304 +680,113 @@ class ChatOrchestrator:
                     emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": final}))
                 return final
 
-            # 4. Execute tools (with per-call loop detection)
-            for tc in tool_calls:
-                name, args, tc_id = self._extract_tool_call_details(tc)
-                if not name:
-                    continue
-
-                # Loop detection: feed the tool call. Detects consecutive repeats
-                # (e.g. hammering a wrong/non-existent tool like `open_file`).
-                call_detected = await self._check_loop(
-                    AgentEventType.TOOL_CALL, session_id,
-                    tool_name=name, tool_args=args,
-                )
-                rec = await self._maybe_recover_loop(
-                    call_detected, session, session_id,
-                    tools_used_this_chat, last_tool_name,
-                )
-                if rec and rec[0] == "terminate":
-                    self._clear_injected_hints(session, injected_hints)
-                    if emitter:
-                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": rec[1]}))
-                    return rec[1]
-
-                # If recovery put this tool into cooldown, skip executing it now
-                # and tell the model to use a different approach.
-                engine = getattr(self.agent, "_loop_engine", None)
-                if engine and engine.is_tool_cooled_down(session_id, name):
-                    blocked = {
-                        "success": False,
-                        "error": (
-                            f"Tool '{name}' is temporarily disabled (loop cooldown). "
-                            f"Use a different tool or approach."
-                        ),
-                    }
-                    tool_msg = {
-                        "role": "tool",
-                        "name": name,
-                        "content": self.agent.tool_executor.normalize_tool_result(name, blocked),
-                    }
-                    if tc_id:
-                        tool_msg["tool_call_id"] = tc_id
-                    session.add_message(tool_msg)
-                    continue
-
-                if self.debug:
-                    args_preview = str(args)[:200] if args else "{}"
-                    logger.debug(f"[Tool] Calling: {name}({args_preview})")
-
-                if emitter:
-                    emitter.emit(StreamEvent.create(
-                        StreamEventType.TOOL_CALL_START,
-                        {
-                            "name": name,
-                            "call_id": tc_id,
-                            "args": args if isinstance(args, dict) else {},
-                            "iteration": i + 1,
-                        },
-                    ))
-
-                # Tool guardrails: pre-execution check
-                guardrail_decision = self.tool_guardrails.before_call(name, args)
-                if not guardrail_decision.allows_execution:
-                    # Tool should be blocked — inject synthetic result
-                    result = self.agent.tool_executor.normalize_tool_result(
-                        name,
-                        {"success": False, "error": guardrail_decision.message}
-                    )
-                    # Add classification metadata for downstream consumers
-                    result["_guardrail_blocked"] = True
-                    result["_guardrail_decision"] = guardrail_decision.to_metadata()
-                    
-                    tool_msg = {
-                        "role": "tool",
-                        "name": name,
-                        "content": self.agent._serialize_tool_result_for_model(name, result),
-                    }
-                    if tc_id:
-                        tool_msg["tool_call_id"] = tc_id
-                    session.add_message(tool_msg)
-                    
-                    if self.debug:
-                        logger.debug(f"[ToolGuardrails] BLOCKED '{name}': {guardrail_decision.code}")
-                    
-                    # Record halt decision
-                    if guardrail_decision.should_halt:
-                        self._tool_guardrail_halt_decision = guardrail_decision
-                    
-                    continue
-
-                # Execute BEFORE_TOOL_EXECUTION hooks
-                before_tool_ctx = HookContext(
-                    hook_point=HookPoint.BEFORE_TOOL_EXECUTION,
-                    messages=session.messages,
-                    tools=all_tools or [],
-                    tool_name=name,
-                    tool_args=args,
+            # 4. Execute tools (via ToolPipeline — encapsulates guardrails,
+            #    hooks, loop detection, operational memory, feedback per call)
+            # Wrapped in specific exception handling so pipeline bugs degrade
+            # gracefully instead of crashing the entire chat loop.
+            try:
+                pipeline_result = await self._tool_pipeline.execute_tool_calls(
+                    tool_calls=tool_calls,
+                    session=session,
                     session_id=session_id,
+                    all_tools=all_tools,
+                    iteration=i + 1,
                     turn_number=self._turn_number,
-                    metadata={"iteration": i + 1, "call_id": tc_id}
+                    emitter=emitter,
+                    callbacks=active_callbacks,
+                    local_result_cache=local_result_cache,
+                    injected_hints=injected_hints,
+                    tools_used_this_chat=tools_used_this_chat,
+                    last_tool_name=last_tool_name,
                 )
-                before_tool_result = await self._hook_system.execute(
-                    HookPoint.BEFORE_TOOL_EXECUTION, before_tool_ctx
-                )
-                
-                # Handle hook results
-                if before_tool_result.action == HookAction.SKIP:
-                    skip_reason = before_tool_result.skip_reason or "Tool execution skipped by hook"
-                    result = self.agent.tool_executor.normalize_tool_result(
-                        name, {"success": False, "error": skip_reason}
-                    )
-                    tool_msg = {
-                        "role": "tool",
-                        "name": name,
-                        "content": self.agent._serialize_tool_result_for_model(name, result),
-                    }
-                    if tc_id:
-                        tool_msg["tool_call_id"] = tc_id
-                    session.add_message(tool_msg)
-                    continue
-                elif before_tool_result.action == HookAction.ABORT:
-                    abort_msg = before_tool_result.metadata.get("reason", "Hook aborted tool execution")
+                if pipeline_result is not None and pipeline_result[0] == "terminate":
                     self._clear_injected_hints(session, injected_hints)
                     if emitter:
-                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": abort_msg}))
-                    return abort_msg
-                elif before_tool_result.action == HookAction.MODIFY:
-                    if before_tool_result.modified_tool_args is not None:
-                        args = before_tool_result.modified_tool_args
-
-                result = await self._execute_single_tool(
-                    name, args, tc_id, session, session_id,
-                    active_callbacks, local_result_cache
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": pipeline_result[1]}))
+                    return pipeline_result[1]
+            except (NameError, ImportError) as e:
+                logger.error(
+                    f"[ChatOrchestrator] Import error during tool execution: {e}\n"
+                    f"{traceback.format_exc()}"
                 )
-
-                # Execute AFTER_TOOL_EXECUTION hooks
-                after_tool_ctx = HookContext(
-                    hook_point=HookPoint.AFTER_TOOL_EXECUTION,
-                    messages=session.messages,
-                    tools=all_tools or [],
-                    tool_name=name,
-                    tool_args=args,
-                    tool_result=result,
-                    session_id=session_id,
-                    turn_number=self._turn_number,
-                    metadata={"iteration": i + 1, "call_id": tc_id}
+                recovery_msg = (
+                    "An internal module loading issue occurred during tool execution. "
+                    "Injecting recovery context and continuing."
                 )
-                after_tool_result = await self._hook_system.execute(
-                    HookPoint.AFTER_TOOL_EXECUTION, after_tool_ctx
+                session.add_message({"role": "system", "content": recovery_msg})
+                injected_hints.append(recovery_msg)
+                continue
+            except (TypeError, ValueError, KeyError) as e:
+                logger.error(
+                    f"[ChatOrchestrator] Data error during tool execution: {e}\n"
+                    f"{traceback.format_exc()}"
                 )
-                
-                # Handle hook results
-                if after_tool_result.action == HookAction.MODIFY:
-                    if after_tool_result.tool_result is not None:
-                        result = after_tool_result.tool_result
-
-                # Tool guardrails: post-execution observation
-                is_error = not bool(result.get("success", True))
-                guardrail_decision = self.tool_guardrails.after_call(
-                    name, args, str(result.get("content") or result.get("error") or ""),
-                    failed=is_error,
+                recovery_msg = (
+                    f"A data processing error occurred ({type(e).__name__}) during tool "
+                    f"execution. Please try a different approach."
                 )
-                
-                # Apply guardrail guidance to result
-                if guardrail_decision.action in {"warn", "halt"}:
-                    result_str = self.agent._serialize_tool_result_for_model(name, result)
-                    result_str = append_toolguard_guidance(result_str, guardrail_decision)
-                    # Update the result content with guidance
-                    if isinstance(result, dict):
-                        result["_guardrail_guidance"] = guardrail_decision.message
-                
-                # Record halt decision
-                if guardrail_decision.should_halt:
-                    self._tool_guardrail_halt_decision = guardrail_decision
+                session.add_message({"role": "system", "content": recovery_msg})
+                injected_hints.append(recovery_msg)
+                continue
+            except AttributeError as e:
+                logger.error(
+                    f"[ChatOrchestrator] Attribute error during tool execution: {e}\n"
+                    f"{traceback.format_exc()}"
+                )
+                recovery_msg = (
+                    "An internal configuration error occurred during tool execution. "
+                    "Try using a different tool."
+                )
+                session.add_message({"role": "system", "content": recovery_msg})
+                injected_hints.append(recovery_msg)
+                continue
+            except RuntimeError as e:
+                logger.error(
+                    f"[ChatOrchestrator] Runtime error during tool execution: {e}\n"
+                    f"{traceback.format_exc()}"
+                )
+                recovery_msg = (
+                    f"A runtime error occurred ({type(e).__name__}). "
+                    f"Retrying with a different approach."
+                )
+                session.add_message({"role": "system", "content": recovery_msg})
+                injected_hints.append(recovery_msg)
+                continue
+            except Exception as e:
+                logger.error(
+                    f"[ChatOrchestrator] Unexpected error during tool execution: "
+                    f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                )
+                recovery_msg = (
+                    f"An unexpected error occurred ({type(e).__name__}) during tool "
+                    f"execution. Please try rephrasing your request."
+                )
+                session.add_message({"role": "system", "content": recovery_msg})
+                injected_hints.append(recovery_msg)
+                continue
 
-                # Operational memory: record failure patterns and check escalation
-                if is_error:
-                    error_msg = str(result.get('error', ''))
-                    _cls = result.get("_classification", {})
-                    error_type = _cls.get("error_category", "unknown") if _cls else "unknown"
-                    _recovery = _cls.get("recovery_action") if _cls else None
-                    
-                    # Record failure in operational memory
-                    pattern = self._operational_memory.record_tool_failure(
-                        tool_name=name,
-                        error_type=error_type,
-                        error_message=error_msg,
-                        recovery_action=_recovery,
+            # Track successful tools for stats (pipeline appends to tools_used_this_chat)
+            successful_tools_this_chat = len(tools_used_this_chat)
+
+            # POST-TOOL VERIFICATION: Check created artifacts before returning
+            if self.agent.verify_output and self.agent._verification_orchestrator:
+                try:
+                    verification_results = await self._verify_created_artifacts(
+                        session, text_for_reminder, session_id
                     )
-                    
-                    # Record recovery attempt for escalation tracking
-                    self._operational_memory._session_state.record_recovery_attempt(
-                        error_type=error_type,
-                        tool_name=name,
-                    )
-                    
-                    # Check if recovery should be escalated
-                    if self._operational_memory.should_escalate_recovery(
-                        error_type=error_type,
-                        tool_name=name,
-                        max_attempts=3,
-                    ):
-                        # Inject escalation message
-                        escalation_msg = (
-                            f"Recovery for {error_type} on '{name}' has failed multiple times. "
-                            f"Consider a fundamentally different approach instead of retrying."
-                        )
-                        self.agent.context_engine.inject_hint(session.messages, escalation_msg)
-                        injected_hints.append(escalation_msg)
-                        
-                        if self.debug:
-                            logger.debug(f"[OperationalMemory] Escalating recovery for {pattern.pattern_id}")
-                else:
-                    # Record success after failure
-                    if name in [p.tool_name for p in self._operational_memory._session_state.failure_patterns.values()]:
-                        self._operational_memory.record_tool_success(
-                            tool_name=name,
-                            error_type="previous_failure",
-                        )
-
-                # Feedback handling: inject hints for tool failures
-                if is_error:
-                    error_msg = str(result.get('error', ''))
-                    feedback = self._feedback_handler.handle_tool_failed(
-                        tool_name=name,
-                        error=error_msg,
-                        session=session,
-                    )
-                    for injection in feedback.injected_hints:
-                        self.agent.context_engine.inject_hint(session.messages, injection.message)
-                        injected_hints.append(injection.message)
-                    if self.debug and feedback.has_injections:
-                        logger.debug(f"[FeedbackHandler] Injected tool failure hint for '{name}'")
-
-                # Track previous agent action for context
-                self._feedback_handler.set_previous_action(
-                    f"Called tool '{name}' with args: {str(args)[:100]}"
-                )
-
-                if self.debug:
-                    success = result.get("success", True)
-                    content_preview = str(result.get("content", ""))[:150]
-                    status = "OK" if success else "FAILED"
-                    logger.debug(f"[Tool] Result: {name} -> {status} | {content_preview}")
-
-                if emitter:
-                    preview = str(result.get("content", ""))[:280]
-                    emitter.emit(StreamEvent.create(
-                        StreamEventType.TOOL_CALL_END,
-                        {
-                            "name": name,
-                            "call_id": tc_id,
-                            "success": bool(result.get("success", True)),
-                            "preview": preview,
-                            "iteration": i + 1,
-                        },
-                    ))
-
-                if result.get("success", True):
-                    successful_tools_this_chat += 1
-                    tools_used_this_chat.append(name)
-                    last_tool_name = name
-
-                # Track tool result in session for pattern detection
-                args_hash = str(hash(json.dumps(args, sort_keys=True, default=str)))[:16] if args else None
-                session.add_tool_result(
-                    tool_name=name,
-                    success=bool(result.get("success", True)),
-                    result_summary=str(result.get("content") or result.get("error") or "")[:200],
-                    args_hash=args_hash
-                )
-
-                # Record transition for auditable recovery tracking
-                if is_error:
-                    self._turn_retry_state.record_transition(
-                        TransitionReason.TOOL_USE,
-                        detail=f"Tool '{name}' failed: {str(result.get('error', ''))[:100]}"
-                    )
-
-                # Loop detection: feed the tool result (failed repeats escalate
-                # to stagnant-state detection and recovery).
-                res_detected = await self._check_loop(
-                    AgentEventType.TOOL_RESULT, session_id,
-                    tool_name=name,
-                    tool_result=str(result.get("content") or result.get("error") or ""),
-                    tool_success=bool(result.get("success", True)),
-                )
-                rec = await self._maybe_recover_loop(
-                    res_detected, session, session_id,
-                    tools_used_this_chat, last_tool_name,
-                )
-                if rec and rec[0] == "terminate":
-                    self._clear_injected_hints(session, injected_hints)
-                    if emitter:
-                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": rec[1]}))
-                    return rec[1]
+                    if verification_results is not None:
+                        # verification_results is a message to inject — force another iteration
+                        session.add_message({"role": "system", "content": verification_results})
+                        injected_hints.append(verification_results)
+                        continue
+                except (TypeError, ValueError, KeyError) as e:
+                    logger.warning(f"[ChatOrchestrator] Verification data error: {e}")
+                except Exception as e:
+                    logger.warning(f"[ChatOrchestrator] Verification failed: {type(e).__name__}: {e}")
 
             # Tool guardrails: check for halt after tool execution
-            if self._tool_guardrail_halt_decision is not None:
-                decision = self._tool_guardrail_halt_decision
+            if self._tool_pipeline.halt_decision is not None:
+                decision = self._tool_pipeline.halt_decision
                 halt_response = (
                     f"I stopped retrying {decision.tool_name} because it hit the "
                     f"tool-call guardrail ({decision.code}) after {decision.count} "
@@ -970,44 +808,56 @@ class ChatOrchestrator:
                 except Exception:
                     pass
             
-            after_turn_ctx = HookContext(
-                hook_point=HookPoint.AFTER_TURN,
-                messages=session.messages,
-                tools=all_tools or [],
-                session_id=session_id,
-                turn_number=self._turn_number,
-                metadata={
-                    "iteration": i + 1,
-                    "successful_tools": successful_tools_this_chat,
-                    "tools_used": tools_used_this_chat,
-                    "task_summary": task_summary,
-                }
-            )
-            after_turn_result = await self._hook_system.execute(
-                HookPoint.AFTER_TURN, after_turn_ctx
-            )
-            
-            # Handle hook results
-            if after_turn_result.action == HookAction.ABORT:
-                abort_msg = after_turn_result.metadata.get("reason", "Hook aborted turn")
-                self._clear_injected_hints(session, injected_hints)
-                if emitter:
-                    emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": abort_msg}))
-                return abort_msg
-            elif after_turn_result.action == HookAction.MODIFY:
-                if after_turn_result.modified_messages is not None:
-                    session.messages = after_turn_result.modified_messages
+            try:
+                after_turn_ctx = HookContext(
+                    hook_point=HookPoint.AFTER_TURN,
+                    messages=session.messages,
+                    tools=all_tools or [],
+                    session_id=session_id,
+                    turn_number=self._turn_number,
+                    metadata={
+                        "iteration": i + 1,
+                        "successful_tools": successful_tools_this_chat,
+                        "tools_used": tools_used_this_chat,
+                        "task_summary": task_summary,
+                    }
+                )
+                after_turn_result = await self._hook_system.execute(
+                    HookPoint.AFTER_TURN, after_turn_ctx
+                )
+                
+                # Handle hook results
+                if after_turn_result.action == HookAction.ABORT:
+                    abort_msg = after_turn_result.metadata.get("reason", "Hook aborted turn")
+                    self._clear_injected_hints(session, injected_hints)
+                    if emitter:
+                        emitter.emit(StreamEvent.create(StreamEventType.DONE, {"content": abort_msg}))
+                    return abort_msg
+                elif after_turn_result.action == HookAction.MODIFY:
+                    if after_turn_result.modified_messages is not None:
+                        session.messages = after_turn_result.modified_messages
 
-            # Wire memory extraction hook — extract cross-session learnings
-            if after_turn_result.metadata.get("should_extract_memories"):
-                self._extract_session_memories(session, user_input)
+                # Wire memory extraction hook — extract cross-session learnings
+                if after_turn_result.metadata.get("should_extract_memories"):
+                    self._extract_session_memories(session, user_input)
+            except (NameError, ImportError, AttributeError) as e:
+                logger.warning(f"[ChatOrchestrator] Hook/attribute error in AFTER_TURN: {e}")
+            except (TypeError, ValueError, KeyError) as e:
+                logger.warning(f"[ChatOrchestrator] Data error in AFTER_TURN hooks: {e}")
+            except Exception as e:
+                logger.warning(f"[ChatOrchestrator] AFTER_TURN hook failed: {type(e).__name__}: {e}")
 
             # Operational memory: extract lessons from failure patterns
-            extracted_lessons = self._extract_operational_lessons()
-            if extracted_lessons:
-                lessons_text = "## Lessons from This Session\n" + "\n".join(f"- {l}" for l in extracted_lessons)
-                self.agent.context_engine.inject_hint(session.messages, lessons_text)
-                injected_hints.append(lessons_text)
+            try:
+                extracted_lessons = self._extract_operational_lessons()
+                if extracted_lessons:
+                    lessons_text = "## Lessons from This Session\n" + "\n".join(f"- {l}" for l in extracted_lessons)
+                    self.agent.context_engine.inject_hint(session.messages, lessons_text)
+                    injected_hints.append(lessons_text)
+            except (TypeError, ValueError, AttributeError) as e:
+                logger.warning(f"[ChatOrchestrator] Lesson extraction data error: {e}")
+            except Exception as e:
+                logger.warning(f"[ChatOrchestrator] Lesson extraction failed: {type(e).__name__}: {e}")
 
         self._clear_injected_hints(session, injected_hints)
         if emitter:
@@ -1316,195 +1166,6 @@ class ChatOrchestrator:
             session.add_message({"role": "system", "content": action.guidance_message})
         return ("continue", None)
 
-    def _extract_tool_call_details(self, tc) -> tuple[str, dict, str]:
-        """Extract name, args, id from a tool call."""
-        try:
-            if isinstance(tc, dict):
-                func = tc.get('function')
-                if not isinstance(func, dict):
-                    return None, None, None
-                return func.get('name'), func.get('arguments', {}), tc.get('id')
-            else:
-                func = getattr(tc, 'function', None)
-                return (
-                    getattr(func, 'name', None) if func else None,
-                    getattr(func, 'arguments', {}) if func else {},
-                    getattr(tc, 'id', None)
-                )
-        except Exception as e:
-            logger.error(f"Failed to parse tool call: {e}")
-            return None, None, None
-
-    async def _execute_single_tool(self, name, args, tc_id, session, session_id, callbacks, local_result_cache):
-        """Execute a single tool call and return result."""
-        # Parse arguments
-        args, parse_error = self.agent.tool_executor.parse_tool_arguments(name, args)
-        args = self.agent._normalize_tool_paths(session, name, args)
-
-        if parse_error:
-            result = self.agent.tool_executor.normalize_tool_result(name, {"success": False, "error": parse_error})
-            if callbacks.get("on_tool_end"):
-                await self._fire_callback(callbacks["on_tool_end"], session_id, name, result)
-
-            tool_msg = {"role": "tool", "name": name, "content": self.agent._serialize_tool_result_for_model(name, result)}
-            if tc_id:
-                tool_msg["tool_call_id"] = tc_id
-            session.add_message(tool_msg)
-            return result
-
-        # Fire on_tool_start
-        if callbacks.get("on_tool_start"):
-            await self._fire_callback(callbacks["on_tool_start"], session_id, name, args)
-
-        # Execute
-        result = await self.agent.tool_executor.execute(
-            name, args, session_id, local_result_cache
-        )
-
-        # Fire on_tool_end
-        if callbacks.get("on_tool_end"):
-            await self._fire_callback(callbacks["on_tool_end"], session_id, name, result)
-
-        # Update directory context
-        self.agent._update_tool_directory_context(session, name, args, result)
-
-        # Add to session
-        tool_msg = {
-            "role": "tool",
-            "name": name,
-            "content": self.agent._serialize_tool_result_for_model(name, result)
-        }
-        if tc_id:
-            tool_msg["tool_call_id"] = tc_id
-        session.add_message(tool_msg)
-
-        is_error = not bool(result.get("success", True))
-
-        # Inject recovery signals based on error classification.
-        # When a tool fails with a specific recovery action, inject a message
-        # that helps the LLM understand what went wrong and how to self-correct.
-        if is_error and "_classification" in result:
-            classification = result["_classification"]
-            recovery_action = classification.get("recovery_action", "")
-            
-            if recovery_action == "inject_signal":
-                # Tool/validation errors: inject a signal telling the LLM to change approach
-                error_msg = classification.get("error", "")
-                signal = (
-                    f"The tool '{name}' failed with a deterministic error. "
-                    f"Error: {error_msg}. "
-                    f"Try a different approach — do NOT retry the same call."
-                )
-                session.add_message({"role": "system", "content": signal})
-            
-            elif recovery_action == "compress_context":
-                # Context/payload too large: signal that context needs compression
-                signal = (
-                    f"The tool '{name}' failed because the request was too large. "
-                    f"Consider breaking the request into smaller pieces or "
-                    f"reducing the amount of data being processed."
-                )
-                session.add_message({"role": "system", "content": signal})
-
-        # Log
-        if is_error:
-            self.agent.execution_log.append(f"Tool {name} FAILED: {result.get('error', 'Unknown error')}")
-        else:
-            self.agent.execution_log.append(f"Tool {name} SUCCEEDED")
-
-        # After load_skill, dynamically register the skill's tools on the agent
-        if name == "load_skill" and not is_error:
-            skill_name = args.get("skill_name")
-            if skill_name and hasattr(self.agent, '_skill_index_entries'):
-                if skill_name in self.agent._skill_index_entries:
-                    skills_dir, entry = self.agent._skill_index_entries[skill_name]
-                    from logicore.skills.loader import SkillLoader
-                    skill = SkillLoader.load_skill_by_index(skills_dir, skill_name)
-                    if skill:
-                        self.agent._register_skill_tools(skill)
-                        # Rebuild system prompt so new tools are available to the model
-                        self.agent._rebuild_system_prompt_with_tools()
-
-        return result
-
-    async def _fire_callback(self, callback, *args):
-        """Fire a callback (sync or async)."""
-        if inspect.iscoroutinefunction(callback):
-            await callback(*args)
-        else:
-            callback(*args)
-
-    # =========================================================================
-    # M9: HALLUCINATION CHECK — dynamic, not rule-based
-    # =========================================================================
-    _COMPLETION_CLAIMS = re.compile(
-        r"\b(completed?|fixed?|resolved?|created?|updated?|deleted?|installed?|configured?|set up|deployed?|migrated?|done|success|finished|saved|written|applied)\b",
-        re.IGNORECASE,
-    )
-    # Matches actual execution log format: "Tool X SUCCEEDED" / "Tool X FAILED: ..."
-    _TOOL_SUCCEEDED_RE = re.compile(r"^Tool (\S+) SUCCEEDED$")
-    _TOOL_FAILED_RE = re.compile(r"^Tool (\S+) FAILED:")
-
-    def _check_response_hallucination(
-        self, response: str, execution_log: list, successful_tools_this_chat: int
-    ) -> Optional[str]:
-        """Compare response claims against actual tool execution results.
-
-        Returns a warning string if the response claims success but tools
-        actually failed, or claims work was done but no tools were called.
-        This is *dynamic* — it checks real execution history, not static rules.
-        """
-        if not response or not response.strip():
-            return None
-
-        claims = self._COMPLETION_CLAIMS.findall(response)
-        if not claims:
-            return None
-
-        # Collect tool execution outcomes from the log
-        tool_outcomes: Dict[str, str] = {}
-        for entry in execution_log:
-            if not isinstance(entry, str):
-                continue
-            # Match actual log format: "Tool X SUCCEEDED" / "Tool X FAILED: ..."
-            m_suc = self._TOOL_SUCCEEDED_RE.match(entry)
-            m_fail = self._TOOL_FAILED_RE.match(entry)
-            if m_suc:
-                tool_outcomes[m_suc.group(1)] = "succeeded"
-            elif m_fail:
-                tool_outcomes[m_fail.group(1)] = "failed"
-
-        failed_tools = [t for t, s in tool_outcomes.items() if s.upper() in ("ERROR", "FAILED")]
-        succeeded_tools = [t for t, s in tool_outcomes.items() if s.upper() in ("COMPLETED", "SUCCEEDED")]
-
-        # Case 1: Response claims success but ALL tools failed
-        if failed_tools and not succeeded_tools and successful_tools_this_chat == 0:
-            return (
-                f"Your response claims work was done, but every tool call "
-                f"failed ({', '.join(failed_tools[:3])}). "
-                f"Either retry with a different approach or explain what went wrong."
-            )
-
-        # Case 2: Response claims specific tool success but that tool actually failed
-        mentioned_tool_claims = re.findall(
-            r"(?:used|called|executed|ran)\s+(\w+)", response, re.IGNORECASE
-        )
-        for tool_name in mentioned_tool_claims:
-            if tool_name.lower() in {t.lower() for t in failed_tools}:
-                return (
-                    f"Your response mentions successfully using '{tool_name}', "
-                    f"but that tool actually failed. Correct your response or retry."
-                )
-
-        # Case 3: No tools called but response claims completion
-        if successful_tools_this_chat == 0 and len(claims) >= 2:
-            return (
-                "You are claiming multiple things were completed, but no tools "
-                "were executed this turn. Either run the tools or remove the claims."
-            )
-
-        return None
-
     async def _finalize_response(self, content, session, session_id, active_callbacks, generate_walkthrough, text_for_reminder, successful_tools_this_chat):
         """Handle final response (no tool calls)."""
         # === AUTO-COMPLETION SAFETY NET ===
@@ -1579,140 +1240,75 @@ class ChatOrchestrator:
                 logger.error(f"[ChatOrchestrator] Synthesis failed: {e}")
             return self.agent._generate_execution_summary()
 
-    def _record_telemetry(self, session_id, llm_start_time, response, tool_calls, emitter):
-        """Record telemetry from a single LLM call.
+    async def _verify_created_artifacts(
+        self,
+        session,
+        user_requirements: Optional[str],
+        session_id: str,
+    ) -> Optional[str]:
+        """Verify artifacts created by tools this turn.
 
-        Always accumulates in memory. DB persistence only if session row exists
-        (final _persist_session handles the definitive write).
+        Returns None if verification passed or was skipped.
+        Returns a message string if critical issues were found (to inject
+        into the session so the LLM can fix them).
         """
         try:
-            from logicore.telemetry.canonical import normalize_usage
-            from logicore.telemetry.pricing import estimate_usage_cost
+            from logicore.verification import VerificationResult
 
-            llm_end_time = time.time()
-            duration_ms = (llm_end_time - llm_start_time) * 1000
-
-            raw_usage = getattr(response, "usage", None)
-            provider_name = getattr(self.agent.provider, "provider_name", "unknown")
-
-            canonical = normalize_usage(raw_usage, provider=provider_name)
-
-            # Auto-prefix-cache estimation for Ollama and Gemini:
-            # Both providers do transparent prefix caching.
-            #
-            # Ollama: prompt_tokens INCREASES between turns (reports total
-            # prompt including cached prefix). Estimated cache = previous turn.
-            #
-            # Gemini: prompt_tokens DECREASES between turns (reports only
-            # uncached portion). Estimated cache = previous - current.
-            if provider_name in ("ollama", "gemini") and raw_usage:
-                prompt_tokens = 0
-                if isinstance(raw_usage, dict):
-                    prompt_tokens = raw_usage.get("prompt_tokens", 0)
-                else:
-                    prompt_tokens = getattr(raw_usage, "prompt_tokens", 0) or 0
-
-                if prompt_tokens > 0:
-                    prev_key = f"_prefix_cache_prev_{session_id}"
-                    prev_prompt = getattr(self.agent, "_prefix_cache_tracker", {}).get(prev_key, 0)
-
-                    if prev_prompt > 0:
-                        from logicore.telemetry.canonical import CanonicalUsage
-                        if provider_name == "ollama" and prompt_tokens > prev_prompt:
-                            # Ollama: total grew → new = current - prev, cached = prev
-                            canonical = CanonicalUsage(
-                                input_tokens=prompt_tokens - prev_prompt,
-                                output_tokens=canonical.output_tokens,
-                                cache_read_tokens=prev_prompt,
-                                cache_write_tokens=canonical.cache_write_tokens,
-                                reasoning_tokens=canonical.reasoning_tokens,
-                            )
-                        elif provider_name == "gemini" and prompt_tokens < prev_prompt:
-                            # Gemini: total shrank → only uncached portion shown
-                            canonical = CanonicalUsage(
-                                input_tokens=prompt_tokens,
-                                output_tokens=canonical.output_tokens,
-                                cache_read_tokens=prev_prompt - prompt_tokens,
-                                cache_write_tokens=canonical.cache_write_tokens,
-                                reasoning_tokens=canonical.reasoning_tokens,
-                            )
-
-                    # Store for next turn
-                    if not hasattr(self.agent, "_prefix_cache_tracker"):
-                        self.agent._prefix_cache_tracker = {}
-                    self.agent._prefix_cache_tracker[prev_key] = prompt_tokens
-
-            self.agent.session_input_tokens += canonical.input_tokens
-            self.agent.session_output_tokens += canonical.output_tokens
-            self.agent.session_cache_read_tokens += canonical.cache_read_tokens
-            self.agent.session_cache_write_tokens += canonical.cache_write_tokens
-            self.agent.session_reasoning_tokens += canonical.reasoning_tokens
-            self.agent.session_api_calls += 1
-
-            base_url = getattr(self.agent.provider, "base_url", None)
-            api_key = getattr(self.agent.provider, "api_key", None)
-            cost = estimate_usage_cost(
-                self.agent.model_name, canonical,
-                provider=provider_name, base_url=base_url, api_key=api_key,
+            # Detect artifacts from execution log
+            artifacts = self.agent._verification_orchestrator.detector.detect_from_execution_log(
+                self.agent.execution_log
             )
-            self.agent.session_estimated_cost_usd += float(cost.amount_usd or 0)
-            self.agent.session_cost_status = cost.status
-            self.agent.session_cost_source = cost.source
 
-            if self.agent._storage and self.agent._storage.initialized:
-                if self.agent._storage.session_exists(session_id):
-                    self.agent._storage.save_telemetry(
-                        session_id,
-                        input_tokens=canonical.input_tokens,
-                        output_tokens=canonical.output_tokens,
-                        cache_read_tokens=canonical.cache_read_tokens,
-                        cache_write_tokens=canonical.cache_write_tokens,
-                        reasoning_tokens=canonical.reasoning_tokens,
-                        tool_calls=len(tool_calls) if tool_calls else 0,
-                        api_calls=1,
-                        estimated_cost_usd=float(cost.amount_usd or 0),
-                        cost_status=cost.status,
-                    )
+            if not artifacts:
+                return None
 
-            if self.agent.telemetry_enabled or self.debug:
-                logger.info(
-                    f"[Telemetry] in={canonical.input_tokens} out={canonical.output_tokens} "
-                    f"cache_r={canonical.cache_read_tokens} cache_w={canonical.cache_write_tokens} "
-                    f"reasoning={canonical.reasoning_tokens} total={canonical.total_tokens} "
-                    f"cost={cost.label} session_total_in={self.agent.session_input_tokens} "
-                    f"session_total_out={self.agent.session_output_tokens} "
-                    f"session_api_calls={self.agent.session_api_calls}"
-                )
+            # Also check the last assistant message for artifact references
+            for msg in reversed(session.messages):
+                if msg.get("role") == "assistant" and msg.get("content"):
+                    content = msg["content"]
+                    if isinstance(content, str):
+                        detected = self.agent._verification_orchestrator.detector.detect_from_message_content(
+                            content
+                        )
+                        for d in detected:
+                            if d.path not in [a.path for a in artifacts]:
+                                artifacts.append(d)
+                    break
 
-            if self.agent.telemetry_enabled and hasattr(self.agent, "telemetry_tracker") and self.agent.telemetry_tracker:
-                self.agent.telemetry_tracker.record_request(
-                    session_id=session_id,
-                    input_tokens=canonical.input_tokens,
-                    output_tokens=canonical.output_tokens,
-                    model=self.agent.model_name,
-                    provider=provider_name,
-                    duration_ms=duration_ms,
-                    tool_calls=len(tool_calls) if tool_calls else 0,
-                )
+            if not artifacts:
+                return None
 
-            if self.agent.telemetry_enabled and emitter:
-                try:
-                    from logicore.stream.events import StreamEvent, StreamEventType
-                    emitter.emit(StreamEvent.create(StreamEventType.USAGE, {
-                        "input_tokens": canonical.input_tokens,
-                        "output_tokens": canonical.output_tokens,
-                        "cache_read_tokens": canonical.cache_read_tokens,
-                        "cache_write_tokens": canonical.cache_write_tokens,
-                        "reasoning_tokens": canonical.reasoning_tokens,
-                        "total_tokens": canonical.total_tokens,
-                        "api_calls": self.agent.session_api_calls,
-                        "estimated_cost_usd": self.agent.session_estimated_cost_usd,
-                        "cost_status": cost.status,
-                        "session_id": session_id,
-                    }))
-                except Exception:
-                    pass
+            # Run verification
+            results = await self.agent._verification_orchestrator.verify_artifacts(
+                artifacts,
+                user_requirements=user_requirements,
+            )
+
+            # Check for critical issues
+            critical_results = [
+                r for r in results
+                if not r.passed and not r.skipped
+            ]
+
+            if not critical_results:
+                return None
+
+            # Build message for LLM to fix
+            lines = [
+                "## Output Verification Failed",
+                "",
+                "The following issues were found with created artifacts. "
+                "You MUST fix these before reporting to the user:",
+                "",
+            ]
+            for result in critical_results:
+                lines.append(result.format_for_llm())
+                lines.append("")
+
+            return "\n".join(lines)
 
         except Exception as e:
             if self.debug:
-                logger.error(f"[ChatOrchestrator] Telemetry error: {e}")
+                logger.warning(f"[ChatOrchestrator] Artifact verification failed: {e}")
+            return None

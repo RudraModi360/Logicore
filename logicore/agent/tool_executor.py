@@ -17,6 +17,7 @@ import logging
 
 from logicore.tools import execute_tool, SAFE_TOOLS
 from logicore.tools.dedup import result_cache, semantic_analyzer, hash_tool_call
+from logicore.tools.tool_names import ToolName
 
 logger = logging.getLogger(__name__)
 
@@ -40,24 +41,45 @@ class ApprovalDecision(Enum):
     ALLOW_SESSION = "allow_session"
 
 
+class PermissionMode(Enum):
+    """
+    Permission modes controlling tool approval behavior.
+
+    Consolidates the permission concepts from the former permissions.py
+    module into the ToolExecutor, which already owns the approval pipeline.
+
+    - DEFAULT: Defer to tool-specific permissions (SAFE_TOOLS auto-allow,
+      everything else prompts for approval).
+    - AUTO: Auto-approve all tool calls (no prompts).
+    - PLAN: Read-only mode — only tools that pass ``is_read_only()`` are
+      allowed; everything else is denied.
+    - BYPASS: Bypass all permission checks (dangerous, for trusted contexts).
+    """
+
+    DEFAULT = "default"
+    AUTO = "auto"
+    PLAN = "plan"
+    BYPASS = "bypass"
+
+
 # Tools that share a single trust boundary: they all send data to a
 # third-party API (network egress). Approving one of them for a session
 # implies consent for the others, so they are gated by a single
 # per-session decision rather than a per-call prompt.
 _NETWORK_EGRESS_TOOLS = {
-    "web_search",
-    "image_search",
-    "url_fetch",
+    ToolName.WEB_SEARCH,
+    ToolName.IMAGE_SEARCH,
+    ToolName.URL_FETCH,
 }
 
 # Tools that must NEVER be session-cached as approved. These are
 # destructive/mutating and must re-prompt on every invocation regardless
 # of any earlier decision in the session.
 _NON_CACHABLE_TOOLS = {
-    "delete_file",
-    "execute_command",
-    "git_command",
-    "code_execute"
+    ToolName.DELETE_FILE,
+    ToolName.EXECUTE_COMMAND,
+    ToolName.GIT_COMMAND,
+    ToolName.CODE_EXECUTE
 }
 
 
@@ -88,6 +110,9 @@ class ToolExecutor:
         
         # Approval settings
         self.auto_approve_all = False
+        # Permission mode (consolidated from former permissions.py)
+        self.permission_mode = PermissionMode.DEFAULT
+        self._pre_plan_mode: Optional[PermissionMode] = None
         # Set of tool names that are pre-approved and skip the approval check
         # entirely.  Useful for delegating authority to child processes: the
         # parent pre-authorises specific tools, the child picks them up and
@@ -151,6 +176,35 @@ class ToolExecutor:
     def set_auto_approve(self, enabled: bool):
         """Enable/disable auto-approval for all tools."""
         self.auto_approve_all = enabled
+
+    def set_permission_mode(self, mode: PermissionMode):
+        """Set the permission mode."""
+        self.permission_mode = mode
+
+    def get_permission_mode(self) -> PermissionMode:
+        """Get the current permission mode."""
+        return self.permission_mode
+
+    def enter_plan_mode(self):
+        """Enter plan mode (read-only, except plan file writes).
+
+        Stashes the current mode so it can be restored via exit_plan_mode().
+        """
+        if self.permission_mode != PermissionMode.PLAN:
+            self._pre_plan_mode = self.permission_mode
+            self.permission_mode = PermissionMode.PLAN
+
+    def exit_plan_mode(self):
+        """Exit plan mode and restore the previous permission mode."""
+        if self.permission_mode == PermissionMode.PLAN and self._pre_plan_mode is not None:
+            self.permission_mode = self._pre_plan_mode
+            self._pre_plan_mode = None
+        elif self.permission_mode == PermissionMode.PLAN:
+            self.permission_mode = PermissionMode.AUTO
+
+    def is_read_only_mode(self) -> bool:
+        """Check if currently in read-only (plan) mode."""
+        return self.permission_mode == PermissionMode.PLAN
 
     def set_allow_tools(self, tools: set):
         """Set tools that are pre-approved and skip the approval check.
@@ -325,7 +379,15 @@ class ToolExecutor:
         self._approval_cache.pop(session_id, None)
     
     def requires_approval(self, name: str) -> bool:
-        """Check if a tool requires user approval."""
+        """Check if a tool requires user approval.
+
+        Respects the current permission mode:
+        - BYPASS/AUTO: nothing requires approval
+        - PLAN: nothing requires approval here (denial is handled separately)
+        - DEFAULT: defers to SAFE_TOOLS and allow_tools sets
+        """
+        if self.permission_mode in (PermissionMode.BYPASS, PermissionMode.AUTO):
+            return False
         if self.auto_approve_all:
             return False
         if name in self.allow_tools:
@@ -415,6 +477,12 @@ class ToolExecutor:
         if self.debug:
             args_preview = json.dumps(args, default=str)[:300] if args else "{}"
             logger.debug(f"[ToolExecutor] ▶ execute '{name}' args={args_preview}")
+        
+        # Plan mode: deny non-read-only tools (SAFE_TOOLS are read-only)
+        if self.permission_mode == PermissionMode.PLAN and name not in SAFE_TOOLS:
+            return self.normalize_tool_result(
+                name, {"success": False, "error": f"Write operations blocked in plan mode: '{name}'"}
+            )
         
         # Check approval
         approved = True
@@ -572,7 +640,7 @@ class ToolExecutor:
             
             # Auto-heal for edit_file read-before-edit error
             if (
-                name == "edit_file"
+                name == ToolName.EDIT_FILE
                 and not bool(result.get("success", True))
                 and isinstance(args, dict)
                 and args.get("file_path")
@@ -582,8 +650,8 @@ class ToolExecutor:
                 if self.debug:
                     logger.debug(f"[ToolExecutor] Auto-recovery: read_file before edit_file for '{file_path}'")
                 _ = self.normalize_tool_result(
-                    "read_file",
-                    await self._dispatch("read_file", {"file_path": file_path}, session_id),
+                    ToolName.READ_FILE,
+                    await self._dispatch(ToolName.READ_FILE, {"file_path": file_path}, session_id),
                 )
                 _prior_classification = result.get("_classification")
                 result = self.normalize_tool_result(name, await self._dispatch(name, args, session_id))

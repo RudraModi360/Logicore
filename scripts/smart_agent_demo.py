@@ -47,16 +47,16 @@ async def main(provider: str, model: str):
         storage=storage,
         debug=True,
         max_iterations=100,
-        # tools=[],
-        # skills=[]
+        tools=[],
+        skills=[],
         telemetry=True,
     )
     
     # with open(file="system_prompt.txt",mode='w',encoding='utf-8') as f:
     #     f.write(str(agent.system_prompt))
     # # (2) Resume an existing persisted session if present
-    # SESSION_ID = agent.create_session()
-    SESSION_ID='session-50412bff'
+    SESSION_ID = agent.create_session()
+    # SESSION_ID='session-50412bff'
     print(f"[new] started fresh session '{SESSION_ID}'")
 
     # (3) Attach persistent memory (standalone subsystem, driven per turn)
@@ -76,15 +76,30 @@ async def main(provider: str, model: str):
             if not msg or msg.lower() in ("quit", "exit"):
                 break
 
-            # Recall relevant past memories, then run the turn
-            messages = [{"role": "user", "content": msg}]
-            messages = await memory.inject_context(
-                messages, user_input=msg, use_llm_selection=True
+            # Recall relevant past memories, then run the turn.
+            # Build a temporary message list to extract memory context, but
+            # pass the raw string to agent.chat() so InputEnricher can detect
+            # file paths and build multimodal content properly.
+            enriched_messages = [{"role": "user", "content": msg}]
+            enriched_messages = await memory.inject_context(
+                enriched_messages, user_input=msg, use_llm_selection=True
             )
 
+            # Extract any memory system-reminder injected by memory.inject_context
+            # and inject it through the agent's own context engine so the session
+            # history stays clean.
+            memory_hint = None
+            for m in enriched_messages:
+                if m.get("role") == "system" and "system-reminder" in m.get("content", ""):
+                    memory_hint = m["content"]
+                    break
+            if memory_hint:
+                session = agent.get_session(SESSION_ID)
+                agent.context_engine.inject_hint(session.messages, memory_hint)
+
             resp = await agent.chat(
-                messages,  # pass enriched messages so orchestrator adds memory context
-                session_id=SESSION_ID,  # chat() auto-persists the session
+                msg,
+                session_id=SESSION_ID,
                 stream=True,
                 streaming_funct=lambda t: print(t, end="", flush=True),
             )
@@ -92,7 +107,7 @@ async def main(provider: str, model: str):
 
             # Persist what we learned from this turn
             await memory.submit_for_extraction(
-                messages + [{"role": "assistant", "content": resp}],
+                enriched_messages + [{"role": "assistant", "content": resp}],
                 session_id=SESSION_ID,
             )
             if memory.worker:

@@ -2,6 +2,7 @@ from typing import Dict, Any, List, Optional, Set
 import logging
 
 from .base import BaseTool, ToolResult
+from .tool_names import ToolName
 
 logger = logging.getLogger(__name__)
 from .filesystem import (
@@ -32,60 +33,60 @@ from .skill_loader import LoadSkillTool
 # Tool presets for different use cases
 TOOL_PRESETS = {
     "lightweight": [
-        "read_file", "create_file", "edit_file", "list_files",
-        "search_files", "fast_grep", "execute_command", "code_execute",
-        "list_processes", "kill_process", "get_process_info",
-        "get_process_output", "tail_process_output", "watch_process",
-        "web_search", "git_command"
+        ToolName.READ_FILE, ToolName.CREATE_FILE, ToolName.EDIT_FILE, ToolName.LIST_FILES,
+        ToolName.SEARCH_FILES, ToolName.FAST_GREP, ToolName.EXECUTE_COMMAND, ToolName.CODE_EXECUTE,
+        ToolName.LIST_PROCESSES, ToolName.KILL_PROCESS, ToolName.GET_PROCESS_INFO,
+        ToolName.GET_PROCESS_OUTPUT, ToolName.TAIL_PROCESS_OUTPUT, ToolName.WATCH_PROCESS,
+        ToolName.WEB_SEARCH, ToolName.GIT_COMMAND
     ],
     "smart": [
         # SmartAgent core tools - essential agentic toolkit
-        "bash", "datetime", "notes", "think",
+        ToolName.BASH, ToolName.DATETIME, ToolName.NOTES, ToolName.THINK,
         # Filesystem
-        "read_file", "create_file", "edit_file", "delete_file",
-        "list_files", "search_files", "fast_grep",
+        ToolName.READ_FILE, ToolName.CREATE_FILE, ToolName.EDIT_FILE, ToolName.DELETE_FILE,
+        ToolName.LIST_FILES, ToolName.SEARCH_FILES, ToolName.FAST_GREP,
         # Execution
-        "code_execute",
+        ToolName.CODE_EXECUTE,
         # Process management
-        "list_processes", "kill_process", "get_process_output",
+        ToolName.LIST_PROCESSES, ToolName.KILL_PROCESS, ToolName.GET_PROCESS_OUTPUT,
         # Web
-        "web_search", "image_search",
+        ToolName.WEB_SEARCH, ToolName.IMAGE_SEARCH,
         # Cron
-        "add_cron_job", "list_cron_jobs", "remove_cron_job", "get_crons",
+        ToolName.ADD_CRON_JOB, ToolName.LIST_CRON_JOBS, ToolName.REMOVE_CRON_JOB, ToolName.GET_CRONS,
         # Document
-        "read_document", "convert_document",
+        ToolName.READ_DOCUMENT, ToolName.CONVERT_DOCUMENT,
         # Git
-        "git_command",
+        ToolName.GIT_COMMAND,
         # Media
-        "media_search",
+        ToolName.MEDIA_SEARCH,
         # V2 Task Management
-        "task_create", "task_get", "task_update", "task_list", "task_next",
+        ToolName.TASK_CREATE, ToolName.TASK_GET, ToolName.TASK_UPDATE, ToolName.TASK_LIST, ToolName.TASK_NEXT,
         # Plan
-        "enter_plan_mode", "submit_plan", "view_plan",
+        ToolName.ENTER_PLAN_MODE, ToolName.SUBMIT_PLAN, ToolName.VIEW_PLAN,
         # Skill Management
-        "load_skill",
+        ToolName.LOAD_SKILL,
     ],
     "copilot": [
         # Copilot - coding focused with filesystem and execution
-        "read_file", "create_file", "edit_file", "delete_file",
-        "list_files", "search_files", "fast_grep",
-        "execute_command", "code_execute",
-        "list_processes", "kill_process", "get_process_output",
-        "git_command",
-        "web_search", "url_fetch",
+        ToolName.READ_FILE, ToolName.CREATE_FILE, ToolName.EDIT_FILE, ToolName.DELETE_FILE,
+        ToolName.LIST_FILES, ToolName.SEARCH_FILES, ToolName.FAST_GREP,
+        ToolName.EXECUTE_COMMAND, ToolName.CODE_EXECUTE,
+        ToolName.LIST_PROCESSES, ToolName.KILL_PROCESS, ToolName.GET_PROCESS_OUTPUT,
+        ToolName.GIT_COMMAND,
+        ToolName.WEB_SEARCH, ToolName.URL_FETCH,
         # V2 Task Management
-        "task_create", "task_get", "task_update", "task_list", "task_next",
+        ToolName.TASK_CREATE, ToolName.TASK_GET, ToolName.TASK_UPDATE, ToolName.TASK_LIST, ToolName.TASK_NEXT,
     ],
     "full": "__all__",  # Load all tools
     "minimal": [
-        "read_file", "create_file", "edit_file", "list_files",
-        "execute_command", "code_execute"
+        ToolName.READ_FILE, ToolName.CREATE_FILE, ToolName.EDIT_FILE, ToolName.LIST_FILES,
+        ToolName.EXECUTE_COMMAND, ToolName.CODE_EXECUTE
     ],
     "webdev": [
-        "read_file", "create_file", "edit_file", "list_files",
-        "search_files", "fast_grep", "execute_command", "code_execute",
-        "list_processes", "kill_process", "get_process_output",
-        "web_search", "url_fetch"
+        ToolName.READ_FILE, ToolName.CREATE_FILE, ToolName.EDIT_FILE, ToolName.LIST_FILES,
+        ToolName.SEARCH_FILES, ToolName.FAST_GREP, ToolName.EXECUTE_COMMAND, ToolName.CODE_EXECUTE,
+        ToolName.LIST_PROCESSES, ToolName.KILL_PROCESS, ToolName.GET_PROCESS_OUTPUT,
+        ToolName.WEB_SEARCH, ToolName.URL_FETCH
     ],
 }
 
@@ -107,58 +108,58 @@ class ToolRegistry:
         
         all_tool_classes = {
             # Task Management (registered first for prompt priority)
-            "task_create": TaskCreateTool,
-            "task_get": TaskGetTool,
-            "task_update": TaskUpdateTool,
-            "task_list": TaskListTool,
-            "task_next": TaskNextTool,
+            ToolName.TASK_CREATE: TaskCreateTool,
+            ToolName.TASK_GET: TaskGetTool,
+            ToolName.TASK_UPDATE: TaskUpdateTool,
+            ToolName.TASK_LIST: TaskListTool,
+            ToolName.TASK_NEXT: TaskNextTool,
             # Filesystem
-            "read_file": ReadFileTool,
-            "create_file": CreateFileTool,
-            "edit_file": EditFileTool,
-            "delete_file": DeleteFileTool,
-            "list_files": ListFilesTool,
-            "search_files": SearchFilesTool,
-            "fast_grep": FastGrepTool,
+            ToolName.READ_FILE: ReadFileTool,
+            ToolName.CREATE_FILE: CreateFileTool,
+            ToolName.EDIT_FILE: EditFileTool,
+            ToolName.DELETE_FILE: DeleteFileTool,
+            ToolName.LIST_FILES: ListFilesTool,
+            ToolName.SEARCH_FILES: SearchFilesTool,
+            ToolName.FAST_GREP: FastGrepTool,
             # Execution
-            "execute_command": ExecuteCommandTool,
-            "code_execute": CodeExecuteTool,
+            ToolName.EXECUTE_COMMAND: ExecuteCommandTool,
+            ToolName.CODE_EXECUTE: CodeExecuteTool,
             # Process management
-            "list_processes": ListProcessesTool,
-            "kill_process": KillProcessTool,
-            "get_process_info": GetProcessInfoTool,
-            "get_process_output": GetProcessOutputTool,
-            "tail_process_output": TailProcessOutputTool,
-            "watch_process": WatchProcessTool,
+            ToolName.LIST_PROCESSES: ListProcessesTool,
+            ToolName.KILL_PROCESS: KillProcessTool,
+            ToolName.GET_PROCESS_INFO: GetProcessInfoTool,
+            ToolName.GET_PROCESS_OUTPUT: GetProcessOutputTool,
+            ToolName.TAIL_PROCESS_OUTPUT: TailProcessOutputTool,
+            ToolName.WATCH_PROCESS: WatchProcessTool,
             # Web
-            "web_search": WebSearchTool,
-            "image_search": ImageSearchTool,
-            "url_fetch": UrlFetchTool,
+            ToolName.WEB_SEARCH: WebSearchTool,
+            ToolName.IMAGE_SEARCH: ImageSearchTool,
+            ToolName.URL_FETCH: UrlFetchTool,
             # Git
-            "git_command": GitCommandTool,
+            ToolName.GIT_COMMAND: GitCommandTool,
             # Document
-            "read_document": ReadDocumentTool,
-            "convert_document": ConvertDocumentTool,
+            ToolName.READ_DOCUMENT: ReadDocumentTool,
+            ToolName.CONVERT_DOCUMENT: ConvertDocumentTool,
             # Media
-            "media_search": MediaSearchTool,
+            ToolName.MEDIA_SEARCH: MediaSearchTool,
             # Cron
-            "add_cron_job": AddCronJobTool,
-            "list_cron_jobs": ListCronJobsTool,
-            "remove_cron_job": RemoveCronJobTool,
-            "get_crons": GetCronsTool,
+            ToolName.ADD_CRON_JOB: AddCronJobTool,
+            ToolName.LIST_CRON_JOBS: ListCronJobsTool,
+            ToolName.REMOVE_CRON_JOB: RemoveCronJobTool,
+            ToolName.GET_CRONS: GetCronsTool,
             # SmartAgent specific tools
-            "bash": SmartBashTool,
-            "datetime": DateTimeTool,
-            "notes": NotesTool,
-            "think": ThinkTool,
+            ToolName.BASH: SmartBashTool,
+            ToolName.DATETIME: DateTimeTool,
+            ToolName.NOTES: NotesTool,
+            ToolName.THINK: ThinkTool,
             # Plan
-            "enter_plan_mode": EnterPlanModeTool,
-            "submit_plan": SubmitPlanTool,
-            "exit_plan_mode": ExitPlanModeTool,
-            "update_plan_progress": UpdatePlanProgressTool,
-            "view_plan": ViewPlanTool,
+            ToolName.ENTER_PLAN_MODE: EnterPlanModeTool,
+            ToolName.SUBMIT_PLAN: SubmitPlanTool,
+            ToolName.EXIT_PLAN_MODE: ExitPlanModeTool,
+            ToolName.UPDATE_PLAN_PROGRESS: UpdatePlanProgressTool,
+            ToolName.VIEW_PLAN: ViewPlanTool,
             # Skill Management
-            "load_skill": LoadSkillTool,
+            ToolName.LOAD_SKILL: LoadSkillTool,
         }
         
         # Determine which tools to register
@@ -266,18 +267,19 @@ def execute_tool_smart(tool_name: str, tool_args: Dict[str, Any]) -> ToolResult:
 
 # Tool categories
 SAFE_TOOLS = [
-    'read_file', 'list_files', 'search_files', 'fast_grep', 
-    'read_document', 'media_search', 'list_cron_jobs', 'get_crons',
+    ToolName.READ_FILE, ToolName.LIST_FILES, ToolName.SEARCH_FILES, ToolName.FAST_GREP,
+    ToolName.READ_DOCUMENT, ToolName.MEDIA_SEARCH, ToolName.LIST_CRON_JOBS, ToolName.GET_CRONS,
     # Task management tools (safe, internal bookkeeping - no approval needed)
-    'task_create', 'task_get', 'task_update', 'task_list', 'task_next',
+    ToolName.TASK_CREATE, ToolName.TASK_GET, ToolName.TASK_UPDATE, ToolName.TASK_LIST, ToolName.TASK_NEXT,
     # Skill management (read-only, loads instructions into context)
-    'load_skill',
+    ToolName.LOAD_SKILL,
 ]
 APPROVAL_REQUIRED_TOOLS = [
-    'create_file', 'edit_file', 'web_search', 'image_search', 'url_fetch', 'convert_document',
-    'add_cron_job', 'remove_cron_job'
+    ToolName.CREATE_FILE, ToolName.EDIT_FILE, ToolName.WEB_SEARCH, ToolName.IMAGE_SEARCH,
+    ToolName.URL_FETCH, ToolName.CONVERT_DOCUMENT,
+    ToolName.ADD_CRON_JOB, ToolName.REMOVE_CRON_JOB
 ]
-DANGEROUS_TOOLS = ['delete_file', 'execute_command', 'git_command', 'code_execute']
+DANGEROUS_TOOLS = [ToolName.DELETE_FILE, ToolName.EXECUTE_COMMAND, ToolName.GIT_COMMAND, ToolName.CODE_EXECUTE]
 
 # Tools that must ALWAYS be available regardless of `tools=[]` or other
 # opt-out flags.  These give the agent the minimum ability to decompose
@@ -285,10 +287,10 @@ DANGEROUS_TOOLS = ['delete_file', 'execute_command', 'git_command', 'code_execut
 # skills on demand.
 ALWAYS_ON_TOOLS = [
     # Task management — agent needs these to track work
-    "task_create", "task_get", "task_update", "task_list", "task_next",
+    ToolName.TASK_CREATE, ToolName.TASK_GET, ToolName.TASK_UPDATE, ToolName.TASK_LIST, ToolName.TASK_NEXT,
     # Planning — agent needs these for complex multi-step tasks
-    "enter_plan_mode", "submit_plan", "exit_plan_mode",
-    "update_plan_progress", "view_plan",
+    ToolName.ENTER_PLAN_MODE, ToolName.SUBMIT_PLAN, ToolName.EXIT_PLAN_MODE,
+    ToolName.UPDATE_PLAN_PROGRESS, ToolName.VIEW_PLAN,
     # Skill loading — agent needs this to load skills on demand
-    "load_skill",
+    ToolName.LOAD_SKILL,
 ]

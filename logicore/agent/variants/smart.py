@@ -36,6 +36,7 @@ class SmartAgent(Agent):
         workspace_root: str = None,
         tool_preset: str = "smart",
         storage=None,
+        verify_output: bool = True,  # SmartAgent defaults to True
     ):
         super().__init__(
             provider=provider,
@@ -51,6 +52,7 @@ class SmartAgent(Agent):
             workspace_root=workspace_root,
             tool_preset=tool_preset,
             storage=storage,
+            verify_output=verify_output,
         )
 
         if not system_prompt:

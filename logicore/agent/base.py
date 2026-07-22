@@ -22,6 +22,13 @@ from logicore.providers.factory import create_provider
 from logicore.config import settings
 from logicore.gateway.gateway import ProviderGateway, get_gateway_for_provider
 from logicore.tools import ALL_TOOL_SCHEMAS, SAFE_TOOLS, TOOL_PRESETS, ALWAYS_ON_TOOLS
+from logicore.tools.tool_names import ToolName
+from logicore.agent.agent_config import AgentConfig
+from logicore.agent.agent_protocol import AgentProtocol
+from logicore.agent.agent_skills import AgentSkillsMixin
+from logicore.agent.agent_sessions import AgentSessionsMixin, safe_file_id, guess_mime
+from logicore.agent.agent_streaming import AgentStreamingMixin
+from logicore.agent.agent_prompt import AgentPromptMixin
 from logicore.config.prompts import get_system_prompt
 from logicore.skills import Skill, SkillLoader
 from logicore.telemetry.tracker import TelemetryTracker
@@ -36,7 +43,7 @@ from logicore.stream.events import StreamEvent, StreamEventType
 logger = logging.getLogger(__name__)
 
 
-class Agent:
+class Agent(AgentSkillsMixin, AgentSessionsMixin, AgentStreamingMixin, AgentPromptMixin, AgentProtocol):
     """
     A unified, modular AI Agent that supports:
     - Internal tools (filesystem, web, etc.)
@@ -45,6 +52,9 @@ class Agent:
     - Custom tool registration
     
     Uses composable components for extensibility.
+    
+    Implements AgentProtocol to define the contract expected by ChatOrchestrator
+    and other components.
     """
     
     def __init__(
@@ -73,7 +83,35 @@ class Agent:
         tool_executor: Optional[ToolExecutor] = None,
         chat_orchestrator: Optional[ChatOrchestrator] = None,
         input_enricher: Optional[InputEnricher] = None,
+        # New: typed config object (takes precedence over positional args)
+        config: Optional[AgentConfig] = None,
+        # Verification: auto-verify created artifacts before returning to user
+        verify_output: bool = False,
     ):
+        # If config is provided, extract values from it (config wins over positional args)
+        if config is not None:
+            provider = config.provider if config.provider is not None else provider
+            model = config.model if config.model is not None else model
+            api_key = config.api_key if config.api_key is not None else api_key
+            endpoint = config.endpoint if config.endpoint is not None else endpoint
+            system_prompt = config.system_prompt if config.system_prompt is not None else system_prompt
+            role = config.role
+            debug = config.debug
+            tools = config.tools if config.tools is not None else tools
+            tool_preset = config.tool_preset if config.tool_preset is not None else tool_preset
+            max_iterations = config.max_iterations
+            telemetry = config.telemetry
+            skills = config.skills if config.skills is not None else skills
+            workspace_root = config.workspace_root if config.workspace_root is not None else workspace_root
+            reasoning_level = config.reasoning_level
+            plan_mode = config.plan_mode
+            agent_id = config.agent_id if config.agent_id is not None else agent_id
+            approval_timeout = config.approval_timeout
+            allow_tools = config.allow_tools if config.allow_tools is not None else allow_tools
+            storage = config.storage if config.storage is not None else storage
+            tool_executor = config.tool_executor if config.tool_executor is not None else tool_executor
+            chat_orchestrator = config.chat_orchestrator if config.chat_orchestrator is not None else chat_orchestrator
+            input_enricher = config.input_enricher if config.input_enricher is not None else input_enricher
         # Provider setup
         if isinstance(provider, str):
             self.provider = create_provider(provider, model, api_key, endpoint)
@@ -105,6 +143,18 @@ class Agent:
         self._custom_system_message = system_prompt
         self.max_iterations = max_iterations
         self.role = role
+        
+        # Verification: inject verification instructions into system prompt
+        self.verify_output = verify_output
+        if verify_output:
+            try:
+                from logicore.config.prompts import get_verification_instructions
+                verification_instructions = get_verification_instructions()
+                self.default_system_message += verification_instructions
+                if self._custom_system_message:
+                    self._custom_system_message += verification_instructions
+            except ImportError:
+                pass
         
         # Telemetry
         self.telemetry_enabled = telemetry
@@ -212,6 +262,16 @@ class Agent:
         )
         self.input_enricher = input_enricher or InputEnricher(workspace_root=workspace_root, debug=debug)
         self._chat_orchestrator = chat_orchestrator or ChatOrchestrator(agent=self, debug=debug)
+        
+        # Verification: initialize orchestrator if enabled
+        self._verification_orchestrator = None
+        if verify_output:
+            try:
+                from logicore.verification.orchestrator import VerificationOrchestrator
+                from logicore.verification.config import VerificationConfig
+                self._verification_orchestrator = VerificationOrchestrator(VerificationConfig.from_env())
+            except ImportError:
+                logger.debug("[Agent] Verification module not available")
         
         # Skills Management
         self.skills: List[Skill] = []
@@ -336,9 +396,9 @@ class Agent:
             file_refs = []
             if session_obj.files:
                 for fname, content in session_obj.files.items():
-                    file_id = self._safe_file_id(fname)
+                    file_id = safe_file_id(fname)
                     data = content.encode("utf-8") if isinstance(content, str) else content
-                    mime = self._guess_mime(fname)
+                    mime = guess_mime(fname)
                     info = self._storage.save_attachment(session_id, file_id, data, mime)
                     file_refs.append({"name": fname, "path": info.path, "mime": info.mime})
 
@@ -410,385 +470,68 @@ class Agent:
             return self._planner.is_in_plan_mode
         return False
 
-    # === System Prompt Management ===
+    # === Tool Management ===
     
-    def _rebuild_system_prompt_with_tools(self):
-        from logicore.config.prompts import _format_tools
-        
-        tool_prompt_cap = 60
-        visible_tools = self.internal_tools[:tool_prompt_cap]
-        hidden_count = max(0, len(self.internal_tools) - len(visible_tools))
-        tools_section = _format_tools(visible_tools)
-        skills_section = self._build_skills_prompt_section()
-        
-        assembler = self.context_engine.prompt_assembler
-        
-        if self._custom_system_message:
-            self.default_system_message = assembler.patch_custom_prompt(
-                self._custom_system_message, tools_section, skills_section
-            )
-        else:
-            base_prompt = get_system_prompt(
-                model_name=self.model_name, 
-                role=self.role,
-                tools=self.internal_tools,
-                plan_mode=self._plan_mode_enabled,
-            )
-            self.default_system_message = assembler.assemble(
-                base_prompt, tools_section, skills_section, hidden_count
-            )
-        
-        for session in self.sessions.values():
-            if session.messages and session.messages[0].get("role") == "system":
-                session.messages[0]["content"] = self.default_system_message
-
-        # Verification gate: the system prompt is intentionally decoupled from
-        # the tool registry (users may ship custom tools or disable internals
-        # and edit the prompt freely), but a tool documented in the prompt that
-        # has no executor is a "phantom" the model will try to call and fail on.
-        # This is a soft check - it warns rather than failing - so customization
-        # stays unblocked while real drift is still surfaced.
-        self._verify_prompt_tools(self.internal_tools, self.default_system_message)
-
-    def _verify_prompt_tools(self, tool_schemas: list, prompt_text: str) -> list:
-        """Verify prompt-documented tools are actually executable.
-
-        The prompt is built from two sources that can drift from the executor:
-        the ``internal_tools`` schemas (the "Available Tools" section) and the
-        hardcoded few-shot examples (e.g. ``write_file(...)``). We reconcile
-        both against the live executor registry.
-
-        Severity is split so production stays quiet:
-        - Schema-level phantoms (a tool we tell the model is "available" but
-          cannot execute) are authoritative wiring bugs -> always warned.
-        - Example/prose-referenced names (incl. Agent API methods documented as
-          if they were tools) are documentation drift -> debug-only.
+    def _load_tools(self, mode: str = "default", preset: str = None, load_skills: bool = True):
+        """Consolidated tool loading — single entry point for all tool loading paths.
 
         Args:
-            tool_schemas: Tool schemas that were just fed into prompt construction.
-            prompt_text: The fully assembled system prompt (examples included).
-
-        Returns:
-            Sorted list of phantom tool names found (empty if none).
+            mode: "default" (all tools), "preset" (use preset name), "structural" (ALWAYS_ON only)
+            preset: Preset name when mode="preset" (e.g., "smart", "copilot", "minimal")
+            load_skills: Whether to load skill metadata
         """
-        executable = set(self.tool_executor.get_registered_tool_names())
-
-        # 1. Every schema documented in the prompt must be executable.
-        schema_phantoms: set = set()
-        for t in (tool_schemas or []):
-            name = t.get("function", {}).get("name") if isinstance(t, dict) else None
-            if name and name not in executable:
-                schema_phantoms.add(name)
-
-        # 2. Scan few-shot examples / prose for ``name(`` call references.
-        import re
-        call_refs = set(re.findall(r"`([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", prompt_text or ""))
-        ref_phantoms = {n for n in call_refs if n not in executable}
-
-        if schema_phantoms:
-            logger.warning(
-                "[Agent] System prompt lists tools with no registered executor "
-                "(phantom tools): %s", sorted(schema_phantoms)
-            )
-        if ref_phantoms:
-            logger.debug(
-                "[Agent] Prompt references tool-like names with no executor "
-                "(review for drift): %s", sorted(ref_phantoms)
-            )
-
-        return sorted(schema_phantoms | ref_phantoms)
-
-    # === Skill Management ===
-    
-    def _build_skills_prompt_section(self) -> str:
-        """Build the skills section for the system prompt.
-
-        Uses the indexed architecture: injects only the SKILL_INDEX.md routing
-        metadata, not full skill instructions. The agent uses the load_skill
-        tool to load full instructions on-demand when a task requires a skill.
-        """
-        if not self.skills:
-            return ""
-
-        # Read the skill index file
-        defaults_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "skills", "defaults"
-        )
-        index_path = os.path.join(defaults_dir, "SKILL_INDEX.md")
-        if os.path.exists(index_path):
-            with open(index_path, "r", encoding="utf-8") as f:
-                index_content = f.read().strip()
-        else:
-            # Fallback: build a minimal index from loaded skills
-            lines = ["# Skill Index", ""]
-            for skill in self.skills:
-                if skill.is_enabled:
-                    lines.append(f"- **{skill.name}**: {skill.description}")
-            index_content = "\n".join(lines)
-
-        return f"""
-
-## Skills (REQUIRED for document tasks)
-
-**IMPORTANT**: For ANY task involving Word, Excel, PowerPoint, or PDF files, you MUST:
-1. First call `load_skill` with the skill name to get the full instructions
-2. Then follow those instructions exactly (they include code templates, library recommendations, and quality checks)
-
-**Do NOT attempt document tasks without loading the skill first.** The skill contains critical information about available tools, code templates, and validation steps.
-
-Available skills:
-{index_content}
-"""
-
-    def _load_default_skills(self):
-        """Load skill metadata for the index. Tools are registered on-demand via load_skill."""
-        defaults_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "defaults")
-        if os.path.exists(defaults_dir):
-            index_entries, direct_skills = SkillLoader.discover_with_index(defaults_dir)
-            for skill in direct_skills:
-                self._register_skill_metadata(skill)
-            if not hasattr(self, '_skill_index_entries'):
-                self._skill_index_entries = {}
-            for entry in index_entries:
-                self._skill_index_entries[entry.name] = (defaults_dir, entry)
-                # Load skill metadata only (skip capability discovery to save prompt space)
-                skill = SkillLoader.load_skill_by_index(defaults_dir, entry.name)
-                if skill:
-                    self._register_skill_metadata(skill)
-
-    def _load_structural_tools(self, load_skills=True):
-        """Load the minimum tool set that every agent needs: task management,
-        planning, and the load_skill tool.  When *load_skills* is True, skill
-        metadata (index entries) and workspace skills are also registered so
-        the agent can discover and load skills on demand.  This is used when
-        ``tools=[]`` to keep the agent functional while suppressing the full
-        internal tool set.
-        """
-        from logicore.tasks import get_task_tools, get_task_tools_with_context
-        from logicore.tools.registry import ALWAYS_ON_TOOLS, ToolRegistry
+        from logicore.tasks import get_task_tools, get_task_tool_schemas, get_task_tools_with_context
 
         self._ensure_task_manager()
-        # Register task tool executors (the schemas come from ALWAYS_ON_TOOLS below)
+
+        # 1. Register task tool executors
         tools = (get_task_tools_with_context(self._task_tool_context)
                  if self._task_tool_context else get_task_tools())
         for tool in tools:
             self.tool_executor.register_custom_tool(tool.name, tool.run)
 
-        # Register only the ALWAYS_ON subset from the full registry (schemas)
-        temp_registry = ToolRegistry(enabled_tools=ALWAYS_ON_TOOLS)
-        self.internal_tools.extend(temp_registry.schemas)
+        # 2. Load tool schemas based on mode
+        if mode == "structural":
+            from logicore.tools.registry import ALWAYS_ON_TOOLS, ToolRegistry
+            temp_registry = ToolRegistry(enabled_tools=ALWAYS_ON_TOOLS)
+            self.internal_tools.extend(temp_registry.schemas)
+        elif mode == "preset" and preset:
+            from logicore.tools.registry import ToolRegistry
+            preset_tools = TOOL_PRESETS.get(preset, [])
+            temp_registry = ToolRegistry(enabled_tools=preset_tools)
+            # Avoid duplicating task-tool schemas
+            loaded_names = {t.get("function", {}).get("name") for t in temp_registry.schemas}
+            task_schemas = get_task_tool_schemas()
+            if not any(s.get("function", {}).get("name") in loaded_names for s in task_schemas):
+                self.internal_tools.extend(task_schemas)
+            self.internal_tools.extend(temp_registry.schemas)
+        else:  # "default"
+            # Avoid duplicating task-tool schemas
+            loaded_names = {t.get("function", {}).get("name") for t in ALL_TOOL_SCHEMAS}
+            task_schemas = get_task_tool_schemas()
+            if not any(s.get("function", {}).get("name") in loaded_names for s in task_schemas):
+                self.internal_tools.extend(task_schemas)
+            self.internal_tools.extend(ALL_TOOL_SCHEMAS)
 
         self.supports_tools = True
+
+        # 3. Load skills
         if load_skills:
-            self._load_default_skills()
-            self._load_workspace_skills()
+            if mode == "preset" and preset in ("minimal", "lightweight"):
+                pass  # Skip skills for minimal presets
+            else:
+                self._load_default_skills()
+                self._load_workspace_skills()
+
+        # 4. Rebuild prompt
         self._rebuild_system_prompt_with_tools()
 
-    def _load_workspace_skills(self):
-        """Auto-discover skills from workspace and home directories."""
-        import pathlib
-        search_paths = []
-        # Check workspace_root if set
-        if self.workspace_root:
-            ws = pathlib.Path(self.workspace_root)
-            for sub in (".agents/skills", "_agents/skills", ".agent/skills", "_agent/skills"):
-                search_paths.append(ws / sub)
-        # Always check user home ~/.agents/skills
-        home = pathlib.Path.home()
-        for sub in (".agents/skills", "_agents/skills"):
-            search_paths.append(home / sub)
+    def _load_structural_tools(self, load_skills=True):
+        """Load the minimum tool set that every agent needs."""
+        self._load_tools(mode="structural", load_skills=load_skills)
 
-        loaded_names = {s.name for s in self.skills}
-        for skill_dir in search_paths:
-            if skill_dir.exists():
-                discovered = SkillLoader.discover(str(skill_dir))
-                for skill in discovered:
-                    if skill.name not in loaded_names:
-                        self._register_skill(skill)
-                        loaded_names.add(skill.name)
-
-    def _load_default_skills_for_preset(self, preset: str):
-        skip_skill_presets = {"minimal", "lightweight"}
-        if preset in skip_skill_presets:
-            return
-        self._load_default_skills()
-        
-    def load_skills(self, skills):
-        defaults_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "defaults")
-        for item in skills:
-            if isinstance(item, Skill):
-                self._register_skill(item)
-            elif isinstance(item, str):
-                if any(s.name == item for s in self.skills):
-                    continue
-                skill_path = os.path.join(defaults_dir, item)
-                skill = SkillLoader.load(skill_path)
-                if not skill and hasattr(self, '_skill_index_entries') and item in self._skill_index_entries:
-                    skill_dir, entry = self._skill_index_entries[item]
-                    skill = SkillLoader.load_skill_by_index(skill_dir, item)
-                if not skill and self.workspace_root:
-                    ws_skills = SkillLoader.discover_workspace_skills(self.workspace_root)
-                    for ws_skill in ws_skills:
-                        if ws_skill.name.lower() == item.lower():
-                            skill = ws_skill
-                            break
-                if skill:
-                    self._register_skill(skill)
-        if self.skills:
-            self._rebuild_system_prompt_with_tools()
-
-    def load_skill(self, skill: Skill):
-        self._register_skill(skill)
-        self._rebuild_system_prompt_with_tools()
-
-    def unload_skill(self, skill_name: str) -> bool:
-        skill_to_remove = None
-        for skill in self.skills:
-            if skill.name == skill_name:
-                skill_to_remove = skill
-                break
-        if not skill_to_remove:
-            return False
-        skill_tool_names = {
-            cap.name for cap in skill_to_remove.get_registered_capabilities()
-            if cap.schema
-        }
-        self.internal_tools = [
-            t for t in self.internal_tools
-            if t.get("function", {}).get("name") not in skill_tool_names
-        ]
-        for tool_name in skill_tool_names:
-            self.tool_executor.unregister_skill_tool(tool_name)
-        self.skills.remove(skill_to_remove)
-        self._rebuild_system_prompt_with_tools()
-        return True
-
-    def enable_skill(self, skill_name: str) -> bool:
-        for skill in self.skills:
-            if skill.name == skill_name:
-                skill.enable()
-                self._rebuild_system_prompt_with_tools()
-                return True
-        return False
-
-    def disable_skill(self, skill_name: str) -> bool:
-        for skill in self.skills:
-            if skill.name == skill_name:
-                skill.disable()
-                self._rebuild_system_prompt_with_tools()
-                return True
-        return False
-
-    def load_skill_from_index(self, skill_name: str) -> bool:
-        if not hasattr(self, '_skill_index_entries') or skill_name not in self._skill_index_entries:
-            return False
-        skills_dir, entry = self._skill_index_entries[skill_name]
-        skill = SkillLoader.load_skill_by_index(skills_dir, skill_name)
-        if skill:
-            self._register_skill(skill)
-            self._rebuild_system_prompt_with_tools()
-            return True
-        return False
-
-    def list_available_skills(self) -> List[Dict[str, Any]]:
-        result = []
-        for skill in self.skills:
-            result.append({
-                "name": skill.name,
-                "description": skill.description,
-                "status": "loaded",
-                "capabilities": len(skill.capabilities),
-                "examples": len(skill.examples),
-                "templates": len(skill.templates),
-                "validation_rules": len(skill.validation_rules),
-                "enabled": skill.is_enabled
-            })
-        if hasattr(self, '_skill_index_entries'):
-            loaded_names = {s.name for s in self.skills}
-            for name, (skills_dir, entry) in self._skill_index_entries.items():
-                if name not in loaded_names:
-                    result.append({
-                        "name": entry.name,
-                        "description": entry.description,
-                        "status": "indexed",
-                        "trigger": entry.trigger,
-                        "cost_tier": entry.cost_tier
-                    })
-        return result
-
-    def _register_skill(self, skill: Skill):
-        """Register a skill and its tool capabilities."""
-        if any(s.name == skill.name for s in self.skills):
-            return
-        self.skills.append(skill)
-        self._register_skill_tools(skill)
-
-    def _register_skill_metadata(self, skill: Skill):
-        """Register a skill for metadata only (no tool registration).
-
-        Used during startup to keep skill metadata available for the index
-        without bloating the system prompt with skill tool schemas.
-        Tools are registered on-demand when load_skill is called.
-        """
-        if any(s.name == skill.name for s in self.skills):
-            return
-        self.skills.append(skill)
-
-    def _register_skill_tools(self, skill: Skill):
-        """Register a skill's tool capabilities with the agent."""
-        if skill.name in self._skill_tools_registered:
-            return
-        self._skill_tools_registered.add(skill.name)
-        for cap in skill.get_registered_capabilities():
-            if cap.schema:
-                schema = dict(cap.schema)
-                func = schema.get("function", {})
-                func["x-origin"] = f"skill:{skill.name}"
-                func["x-capability-type"] = cap.cap_type.value
-                func["x-complexity"] = cap.complexity
-                if cap.alternatives:
-                    func["x-alternatives"] = cap.alternatives
-
-                tool_name = func.get("name")
-                existing_names = {
-                    t.get("function", {}).get("name") for t in self.internal_tools
-                    if isinstance(t, dict)
-                }
-                if tool_name in existing_names:
-                    logger.warning(f"Tool naming conflict: skill '{skill.name}' registers '{tool_name}' — skipping")
-                    continue
-                self.internal_tools.append(schema)
-                if cap.executor:
-                    self.tool_executor.register_skill_tool(tool_name, cap.executor)
-
-        if skill.has_capabilities():
-            self.supports_tools = True
-
-    # === Tool Management ===
-    
     def load_default_tools(self):
-        from logicore.tasks import get_task_tools, get_task_tool_schemas, get_task_tools_with_context
-        # Ensure task manager is initialized
-        self._ensure_task_manager()
-        # Use context-based tools if available (multi-agent safe)
-        tools = get_task_tools_with_context(self._task_tool_context) if self._task_tool_context else get_task_tools()
-        # Register task-tool executors unconditionally so the agent can always
-        # plan and track multi-step work.
-        for tool in tools:
-            self.tool_executor.register_custom_tool(tool.name, tool.run)
-        # The full internal tool set (ALL_TOOL_SCHEMAS) already includes the
-        # task tools. Only add their schemas separately when the loaded set
-        # does not already contain them, otherwise they are rendered twice in
-        # the system prompt (duplicate tool definitions + token bloat).
-        loaded_names = {t.get("function", {}).get("name") for t in ALL_TOOL_SCHEMAS}
-        task_schemas = get_task_tool_schemas()
-        if not any(s.get("function", {}).get("name") in loaded_names for s in task_schemas):
-            self.internal_tools.extend(task_schemas)
-        self.internal_tools.extend(ALL_TOOL_SCHEMAS)
-        self.supports_tools = True
-        self._load_default_skills()
-        self._rebuild_system_prompt_with_tools()
+        self._load_tools(mode="default")
     
     def load_tools_preset(self, preset: str):
         if preset == "full":
@@ -796,29 +539,7 @@ Available skills:
             return
         if preset not in TOOL_PRESETS:
             return
-        preset_tools = TOOL_PRESETS[preset]
-        from logicore.tasks import get_task_tools, get_task_tool_schemas, get_task_tools_with_context
-        # Ensure task manager is initialized
-        self._ensure_task_manager()
-        # Use context-based tools if available (multi-agent safe)
-        tools = get_task_tools_with_context(self._task_tool_context) if self._task_tool_context else get_task_tools()
-        # Register task-tool executors unconditionally so the agent can always
-        # plan and track multi-step work.
-        for tool in tools:
-            self.tool_executor.register_custom_tool(tool.name, tool.run)
-        from logicore.tools.registry import ToolRegistry
-        temp_registry = ToolRegistry(enabled_tools=preset_tools)
-        # Avoid duplicating task-tool schemas: only add them if the preset does
-        # not already include them (the smart/copilot presets do, minimal/
-        # lightweight/webdev do not).
-        loaded_names = {t.get("function", {}).get("name") for t in temp_registry.schemas}
-        task_schemas = get_task_tool_schemas()
-        if not any(s.get("function", {}).get("name") in loaded_names for s in task_schemas):
-            self.internal_tools.extend(task_schemas)
-        self.internal_tools.extend(temp_registry.schemas)
-        self.supports_tools = True
-        self._load_default_skills_for_preset(preset)
-        self._rebuild_system_prompt_with_tools()
+        self._load_tools(mode="preset", preset=preset)
     
     def set_system_prompt(self, system_prompt: str):
         self._custom_system_message = system_prompt
@@ -905,154 +626,6 @@ Available skills:
         }
         self.add_custom_tool(schema, func)
 
-    # === Session Management ===
-    
-    def _get_session_lock(self, session_id: str) -> "asyncio.Lock":
-        if session_id not in self._session_locks:
-            self._session_locks[session_id] = asyncio.Lock()
-        return self._session_locks[session_id]
-
-    def get_session(self, session_id: str = "default") -> AgentSession:
-        if session_id not in self.sessions:
-            # If storage is available, try to restore a previous session
-            restored = self._restore_session_from_storage(session_id)
-            if restored is None:
-                restored = AgentSession(session_id, self.default_system_message)
-            self.sessions[session_id] = restored
-        return self.sessions[session_id]
-
-    def _restore_session_from_storage(self, session_id: str):
-        """Load a previous session from storage and reconstruct the in-memory state.
-
-        Returns ``None`` when no prior data exists or storage is not configured.
-        The current agent's system prompt is always used (not the stored one),
-        so prompt updates are automatically picked up.
-        """
-        if not self._storage or not self._storage.initialized:
-            return None
-        try:
-            stored = self._storage.load_session(session_id)
-            if not stored:
-                return None
-            logger.debug(
-                "[Agent] restoring session %s from storage | messages=%d",
-                session_id, len(stored),
-            )
-            # Reconstruct: use current system prompt, restore conversation history
-            session = AgentSession(session_id, self.default_system_message)
-            # Strip old system message(s) but preserve compression summaries
-            history = []
-            for m in stored:
-                if m.get("role") == "system":
-                    content = m.get("content", "")
-                    # Keep compression summaries (they contain vital context)
-                    if "Previous Conversation Summary" in content:
-                        history.append(m)
-                else:
-                    history.append(m)
-            # Rebuild messages list: current system prompt + old conversation
-            session.messages = [{"role": "system", "content": self.default_system_message}] + history
-            # Restore metadata (tags, last_tool_directory, etc.)
-            saved_meta = self._storage.load_session_metadata(session_id)
-            if saved_meta:
-                # Rehydrate VFS files from Tier-3 assets folder using the stored refs
-                refs = saved_meta.pop("_vfs_files", None)
-                if refs:
-                    for ref in refs:
-                        try:
-                            data = self._storage.load_attachment(ref["path"])
-                            if data is None:
-                                continue
-                            content = data.decode("utf-8") if ref.get("mime", "").startswith("text/") or self._is_text(data) else data.decode("utf-8", "replace")
-                            session.files[ref["name"]] = content
-                        except Exception as fe:
-                            if self.debug:
-                                logger.warning("[Agent] failed to restore file %s: %s", ref.get("name"), fe)
-                session.metadata.update(saved_meta)
-            return session
-        except Exception as e:
-            if self.debug:
-                logger.warning("[Agent] failed to restore session %s: %s", session_id, e)
-            return None
-
-    @staticmethod
-    def _is_text(data: bytes) -> bool:
-        """Heuristic: treat content as text if it decodes cleanly as UTF-8."""
-        try:
-            data.decode("utf-8")
-            return True
-        except UnicodeDecodeError:
-            return False
-
-    @staticmethod
-    def _safe_file_id(name: str) -> str:
-        """Turn a VFS filename into a filesystem-safe, unique-per-session id."""
-        import re
-        base = re.sub(r"[^A-Za-z0-9._-]", "_", name)
-        if not base:
-            base = "file"
-        return base
-
-    @staticmethod
-    def _guess_mime(name: str) -> str:
-        """Best-effort MIME guess from a filename extension."""
-        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-        return {
-            "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-            "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
-            "pdf": "application/pdf", "txt": "text/plain", "csv": "text/csv",
-            "json": "application/json", "md": "text/markdown", "html": "text/html",
-            "htm": "text/html", "css": "text/css", "js": "text/javascript",
-            "zip": "application/zip",
-        }.get(ext, "application/octet-stream")
-
-    def clear_session(self, session_id: str = "default"):
-        if session_id in self.sessions:
-            self.sessions[session_id].clear_history()
-        self.tool_executor.clear_session_approvals(session_id)
-    
-    def create_session(self, session_id: str = None, tags: Dict[str, str] = None) -> str:
-        if session_id is None:
-            import uuid
-            session_id = f"session-{uuid.uuid4().hex[:8]}"
-        session = AgentSession(session_id, self.default_system_message)
-        if tags:
-            session.metadata["tags"] = tags
-        session.metadata["created_at"] = datetime.now().isoformat()
-        self.sessions[session_id] = session
-        return session_id
-    
-    def list_sessions(self) -> List[Dict[str, Any]]:
-        result = []
-        for session_id, session in self.sessions.items():
-            result.append({
-                "session_id": session_id,
-                "tags": session.metadata.get("tags", {}),
-                "message_count": len(session.messages),
-                "created_at": session.created_at.isoformat() if hasattr(session, 'created_at') else None,
-                "last_activity": session.last_activity.isoformat() if hasattr(session, 'last_activity') else None,
-            })
-        return result
-    
-    def delete_session(self, session_id: str) -> bool:
-        if session_id not in self.sessions:
-            return False
-        del self.sessions[session_id]
-        self.tool_executor.clear_session_approvals(session_id)
-        if self._task_store and self._task_store.task_list_id == session_id:
-            self._task_manager = None
-            self._task_store = None
-        if session_id in self._session_progress_writers:
-            del self._session_progress_writers[session_id]
-        return True
-    
-    def get_session_by_tags(self, tags: Dict[str, str]) -> Optional[str]:
-        for session_id, session in self.sessions.items():
-            session_tags = session.metadata.get("tags", {})
-            if all(session_tags.get(k) == v for k, v in tags.items()):
-                return session_id
-        return None
-
     # === Execution ===
     
     def set_callbacks(self, **kwargs):
@@ -1088,7 +661,7 @@ Available skills:
         if not self._is_reminder_like_request(text):
             return None
         seconds = self._extract_reminder_window_seconds(text)
-        has_cron = "add_cron_job" in tool_names
+        has_cron = ToolName.ADD_CRON_JOB in tool_names
         if seconds is not None and seconds < 60:
             return (
                 "<reminder_routing_hint>\n"
@@ -1107,7 +680,7 @@ Available skills:
     def _normalize_tool_paths(self, session: AgentSession, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(args, dict):
             return args
-        file_tools = {"read_file", "edit_file", "create_file", "delete_file"}
+        file_tools = {ToolName.READ_FILE, ToolName.EDIT_FILE, ToolName.CREATE_FILE, ToolName.DELETE_FILE}
         if tool_name not in file_tools:
             return args
         file_path = args.get("file_path")
@@ -1122,7 +695,7 @@ Available skills:
         if not isinstance(last_dir, str) or not last_dir:
             return args
         candidate = os.path.join(last_dir, path_str)
-        if tool_name == "create_file" or os.path.exists(candidate):
+        if tool_name == ToolName.CREATE_FILE or os.path.exists(candidate):
             normalized = args.copy()
             normalized["file_path"] = candidate
             return normalized
@@ -1131,12 +704,12 @@ Available skills:
     def _update_tool_directory_context(self, session: AgentSession, tool_name: str, args: Dict[str, Any], result: Dict[str, Any]):
         if not isinstance(result, dict) or not bool(result.get("success")):
             return
-        if tool_name == "list_files":
+        if tool_name == ToolName.LIST_FILES:
             directory = args.get("directory") if isinstance(args, dict) else None
             if isinstance(directory, str) and directory.strip() and directory.strip() != ".":
                 session.metadata["last_tool_directory"] = os.path.normpath(directory.strip())
             return
-        if tool_name in {"create_file", "read_file", "edit_file", "delete_file"} and isinstance(args, dict):
+        if tool_name in {ToolName.CREATE_FILE, ToolName.READ_FILE, ToolName.EDIT_FILE, ToolName.DELETE_FILE} and isinstance(args, dict):
             file_path = args.get("file_path")
             if not isinstance(file_path, str) or not file_path.strip():
                 return
@@ -1170,208 +743,6 @@ Available skills:
                 workspace_root=str(settings.paths.sessions_dir),
                 session_id=session_id,
             )
-
-    # === Main Chat Method ===
-    
-    async def chat(
-        self, 
-        user_input: Union[str, List[Dict[str, Any]]], 
-        session_id: str = None, 
-        callbacks: Dict[str, Callable] = None, 
-        stream: bool = False, 
-        streaming_funct: Callable = None,
-        generate_walkthrough: bool = False,
-        new_session: bool = False,
-        session_tags: Dict[str, str] = None,
-        **kwargs
-    ) -> str:
-        if new_session:
-            session_id = self.create_session(tags=session_tags)
-        elif session_id is None:
-            session_id = "default"
-        if session_tags and session_id not in self.sessions:
-            session = self.get_session(session_id)
-            session.metadata["tags"] = session_tags
-        
-        self._ensure_task_manager(session_id)
-        self.execution_log = []
-        self.execution_log.append(f"Agent Started Task. User Request: {str(user_input)[:200]}")
-        
-        # Enrich input
-        user_input = await self.input_enricher.enrich_async(user_input)
-        
-        try:
-            response = await self._chat_orchestrator.run(
-                user_input=user_input,
-                session_id=session_id,
-                callbacks=callbacks,
-                stream=stream,
-                streaming_funct=streaming_funct,
-                generate_walkthrough=generate_walkthrough,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            # Global guard: an unexpected error (e.g. a tool raising outside the
-            # executor's own try/except) must not kill the whole process. The
-            # streaming path already isolates producer errors; mirror that here.
-            logger.error(f"[Agent] Chat loop terminated unexpectedly: {e}")
-            response = f"Error during execution: {e}"
-
-        # Persist session + telemetry to storage (best-effort)
-        self._persist_session(session_id, response)
-
-        return response
-
-    # === Streaming (event-based) API ===
-
-    async def stream_run(
-        self,
-        user_input: Union[str, List[Dict[str, Any]]],
-        session_id: str = None,
-        callbacks: Dict[str, Callable] = None,
-        generate_walkthrough: bool = False,
-        new_session: bool = False,
-        session_tags: Dict[str, str] = None,
-        **kwargs,
-    ) -> "AgentRunResult":
-        """
-        Start a streaming agent run and return an :class:`AgentRunResult`.
-
-        The returned object is both awaitable (``final = await run``) and an
-        async iterator of :class:`StreamEvent` (``async for ev in run.stream_events()``).
-        The agent loop runs as a background task, so a UI that raises or stops
-        early only affects its own drain loop — call ``run.cancel()`` to stop
-        the run early. This is the recommended API for frontend integration.
-
-        Example:
-            run = await agent.stream_run("summarize this repo", session_id="s1")
-            async for ev in run.stream_events():
-                await sse_send(ev)        # ev.to_sse() built-in
-            final = await run              # final text
-        """
-        if new_session:
-            session_id = self.create_session(tags=session_tags)
-        elif session_id is None:
-            session_id = "default"
-        if session_tags and session_id not in self.sessions:
-            session = self.get_session(session_id)
-            session.metadata["tags"] = session_tags
-
-        self._ensure_task_manager(session_id)
-        self.execution_log = []
-        self.execution_log.append(f"Agent Started Task. User Request: {str(user_input)[:200]}")
-
-        user_input = await self.input_enricher.enrich_async(user_input)
-
-        active_callbacks = self.callbacks.copy()
-        if callbacks:
-            active_callbacks.update(callbacks)
-
-        import uuid
-        emitter = StreamEmitter(session_id=session_id, run_id=uuid.uuid4().hex)
-
-        async def _produce() -> None:
-            try:
-                final = await self._chat_orchestrator.run(
-                    user_input=user_input,
-                    session_id=session_id,
-                    callbacks=active_callbacks,
-                    generate_walkthrough=generate_walkthrough,
-                    emitter=emitter,
-                )
-                emitter.final = final
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # isolate unexpected producer errors
-                try:
-                    emitter.emit(StreamEvent.create(
-                        StreamEventType.ERROR, {"message": str(e), "recoverable": False}
-                    ))
-                except Exception:
-                    pass
-                emitter.final = f"Error during execution: {e}"
-            finally:
-                emitter.close()
-
-        task = asyncio.ensure_future(_produce())
-        return AgentRunResult(emitter, task, self)
-
-    async def stream(
-        self,
-        user_input: Union[str, List[Dict[str, Any]]],
-        session_id: str = None,
-        **kwargs,
-    ):
-        """
-        Convenience async generator that yields :class:`StreamEvent` objects for
-        a single agent run. Cancels the underlying run if the consumer stops
-        iterating early.
-
-        Example:
-            async for ev in agent.stream("hello", session_id="s1"):
-                print(ev.type, ev.data)
-        """
-        run = await self.stream_run(user_input, session_id=session_id, **kwargs)
-        async for ev in run.stream_events():
-            yield ev
-
-    def cancel_run(self, run: "AgentRunResult") -> None:
-        """Cancel an in-flight streaming run."""
-        if run is not None:
-            run.cancel()
-
-    def stream_sync(
-        self,
-        user_input: Union[str, List[Dict[str, Any]]],
-        session_id: str = "default",
-        on_event: Callable = None,
-        **kwargs,
-    ) -> str:
-        """
-        Synchronous streaming — **no server and no async framework required**.
-
-        Runs the agent run to completion and invokes ``on_event(event)`` for
-        every :class:`StreamEvent` as it arrives (e.g. print tokens, update a
-        local UI). This is the simplest way to get live token streaming in a
-        plain script; a web server is only needed if you want to push the same
-        events to a browser, and is entirely optional.
-
-        Args:
-            user_input: User message (str or multimodal list).
-            session_id: Session identifier.
-            on_event: Callable invoked with each ``StreamEvent`` (optional).
-            **kwargs: forwarded to :meth:`stream_run`.
-
-        Returns:
-            The final agent response as a string.
-
-        Example (no server):
-            agent = Agent(provider="ollama", model="llama3.2:3b")
-            agent.stream_sync(
-                "summarize this repo",
-                on_event=lambda ev: (
-                    print(ev.data.get("delta", ""), end="", flush=True)
-                    if ev.type == "token" else None
-                ),
-            )
-        """
-        async def _drive():
-            run = await self.stream_run(user_input, session_id=session_id, **kwargs)
-            async for ev in run.stream_events():
-                if on_event:
-                    on_event(ev)
-            return await run
-
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            # Not inside a running loop — safe to drive one to completion.
-            return asyncio.run(_drive())
-        raise RuntimeError(
-            "stream_sync() cannot be called from within a running event loop. "
-            "Use `async for ev in agent.stream(...)` instead."
-        )
 
     # === Walkthrough Generation ===
     

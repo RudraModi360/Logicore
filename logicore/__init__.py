@@ -1,7 +1,8 @@
 __version__ = "1.0.3"
 
 from .agent.base import Agent
-from .agent.tool_executor import ToolExecutor
+from .agent.tool_executor import ToolExecutor, PermissionMode
+from .agent.tool_pipeline import ToolPipeline
 from .agent.chat_orchestrator import ChatOrchestrator
 from .agent.input_enricher import InputEnricher
 from .agent.variants.copilot import CopilotAgent
@@ -28,6 +29,8 @@ __all__ = [
     # Core Agent
     "Agent",
     "ToolExecutor",
+    "PermissionMode",
+    "ToolPipeline",
     "ChatOrchestrator",
     "InputEnricher",
     "CopilotAgent",

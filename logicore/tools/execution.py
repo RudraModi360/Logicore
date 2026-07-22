@@ -348,319 +348,7 @@ def _get_default_shell() -> str:
     return 'bash'
 
 
-# --- Command Translation for Cross-OS Compatibility ---
 
-def _translate_command_to_powershell(command: str) -> str:
-    """
-    Translate common Unix/Linux commands to PowerShell equivalents.
-    This helps when LLM models generate Unix-style commands on Windows.
-    
-    Args:
-        command: The original command string
-        
-    Returns:
-        Translated command for PowerShell, or original if no translation needed
-    """
-    cmd = command.strip()
-    
-    # Direct command translations (order matters - check longer patterns first)
-    translations = [
-        # mkdir -p <path> → New-Item -ItemType Directory -Force -Path <path>
-        (r'^mkdir\s+-p\s+["\']?([^"\']+)["\']?\s*$', r'New-Item -ItemType Directory -Force -Path "\1"'),
-        (r'^mkdir\s+["\']?([^"\']+)["\']?\s*$', r'New-Item -ItemType Directory -Force -Path "\1"'),
-        
-        # rm -rf <path> → Remove-Item -Recurse -Force -Path <path>
-        (r'^rm\s+-rf\s+["\']?([^"\']+)["\']?\s*$', r'Remove-Item -Recurse -Force -Path "\1"'),
-        (r'^rm\s+-r\s+["\']?([^"\']+)["\']?\s*$', r'Remove-Item -Recurse -Force -Path "\1"'),
-        (r'^rm\s+["\']?([^"\']+)["\']?\s*$', r'Remove-Item -Force -Path "\1"'),
-        
-        # cp -r <src> <dst> → Copy-Item -Recurse -Path <src> -Destination <dst>
-        (r'^cp\s+-r\s+["\']?([^"\']+)["\']?\s+["\']?([^"\']+)["\']?\s*$', r'Copy-Item -Recurse -Path "\1" -Destination "\2"'),
-        (r'^cp\s+["\']?([^"\']+)["\']?\s+["\']?([^"\']+)["\']?\s*$', r'Copy-Item -Path "\1" -Destination "\2"'),
-        
-        # mv <src> <dst> → Move-Item -Path <src> -Destination <dst>
-        (r'^mv\s+["\']?([^"\']+)["\']?\s+["\']?([^"\']+)["\']?\s*$', r'Move-Item -Path "\1" -Destination "\2"'),
-        
-        # ls → Get-ChildItem
-        (r'^ls\s*$', 'Get-ChildItem'),
-        (r'^ls\s+["\']?([^"\']+)["\']?\s*$', r'Get-ChildItem -Path "\1"'),
-        
-        # pwd → Get-Location
-        (r'^pwd\s*$', 'Get-Location'),
-        
-        # cd <path> → Set-Location <path>
-        (r'^cd\s+["\']?([^"\']+)["\']?\s*$', r'Set-Location "\1"'),
-        (r'^cd\s*$', 'Set-Location ~'),
-        
-        # cat <file> → Get-Content <file>
-        (r'^cat\s+["\']?([^"\']+)["\']?\s*$', r'Get-Content "\1"'),
-        
-        # touch <file> → New-Item -ItemType File -Path <file> -Force
-        (r'^touch\s+["\']?([^"\']+)["\']?\s*$', r'New-Item -ItemType File -Path "\1" -Force'),
-        
-        # echo <text> > <file> → Set-Content -Path <file> -Value "<text>"
-        # This is complex, skip for now
-        
-        # find <dir> -name <pattern> → Get-ChildItem -Path <dir> -Filter <pattern> -Recurse
-        (r'^find\s+["\']?([^"\']+)["\']?\s+-name\s+["\']?([^"\']+)["\']?\s*$', 
-         r'Get-ChildItem -Path "\1" -Filter "\2" -Recurse'),
-        
-        # which <cmd> → Get-Command <cmd>
-        (r'^which\s+["\']?([^"\']+)["\']?\s*$', r'Get-Command "\1"'),
-        
-        # env | grep <pattern> → Get-ChildItem Env: | Where-Object { $_.Name -match "<pattern>" }
-        (r'^env\s*\|\s*grep\s+["\']?([^"\']+)["\']?\s*$', 
-         r'Get-ChildItem Env: | Where-Object { $_.Name -match "\1" }'),
-        
-        # df -h → Get-PSDrive | Select-Object Name, Used, Free
-        (r'^df\s+-?h?\s*$', 'Get-PSDrive | Select-Object Name, Used, Free'),
-        
-        # du -sh <path> → (Get-ChildItem -Path <path> -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
-        # Complex, skip
-        
-        # chmod <mode> <file> → (no direct equivalent, just inform)
-        # skip
-        
-        # ps aux → Get-Process
-        (r'^ps\s+aux\s*$', 'Get-Process'),
-        (r'^ps\s*$', 'Get-Process'),
-        
-        # kill <pid> → Stop-Process -Id <pid> -Force
-        (r'^kill\s+["\']?(\d+)["\']?\s*$', r'Stop-Process -Id \1 -Force'),
-        
-        # wget <url> → Invoke-WebRequest -Uri <url> -OutFile <filename>
-        # Complex, skip for now
-        
-        # curl <url> → Invoke-WebRequest -Uri <url>
-        (r'^curl\s+["\']?([^"\']+)["\']?\s*$', r'Invoke-WebRequest -Uri "\1"'),
-        
-        # uname -a → $PSVersionTable
-        (r'^uname\s+-?a?\s*$', '$PSVersionTable'),
-        
-        # whoami → $env:USERNAME
-        (r'^whoami\s*$', '$env:USERNAME'),
-        
-        # date → Get-Date
-        (r'^date\s*$', 'Get-Date'),
-        
-        # clear / cls → Clear-Host
-        (r'^clear\s*$', 'Clear-Host'),
-        (r'^cls\s*$', 'Clear-Host'),
-        
-        # grep <pattern> → Select-String -Pattern <pattern>
-        (r'^grep\s+["\']?([^"\']+)["\']?\s*$', r'Select-String -Pattern "\1"'),
-        
-        # wc -l → (Measure-Object -Line).Lines
-        (r'^wc\s+-?l?\s*$', '(Measure-Object -Line).Lines'),
-        
-        # head -n <num> → Select-Object -First <num>
-        (r'^head\s+-?n?\s*(\d+)?\s*$', lambda m: f'Select-Object -First {m.group(1) or "10"}'),
-        
-        # tail -n <num> → Select-Object -Last <num>
-        (r'^tail\s+-?n?\s*(\d+)?\s*$', lambda m: f'Select-Object -Last {m.group(1) or "10"}'),
-        
-        # sort → Sort-Object
-        (r'^sort\s*$', 'Sort-Object'),
-        
-        # uniq → Sort-Object -Unique
-        (r'^uniq\s*$', 'Sort-Object -Unique'),
-        
-        # xargs → ForEach-Object
-        # Complex, skip
-        
-        # awk → ForEach-Object { $_ -split " " | Select-Object <fields> }
-        # Complex, skip
-        
-        # sed → ForEach-Object { $_ -replace "pattern", "replacement" }
-        # Complex, skip
-        
-        # diff → Compare-Object
-        (r'^diff\s+["\']?([^"\']+)["\']?\s+["\']?([^"\']+)["\']?\s*$', 
-         r'Compare-Object (Get-Content "\1") (Get-Content "\2")'),
-        
-        # tar -xzf → Expand-Archive
-        (r'^tar\s+-?xzf?\s+["\']?([^"\']+)["\']?\s*$', r'Expand-Archive -Path "\1" -DestinationPath "."'),
-        
-        # zip → Compress-Archive
-        (r'^zip\s+-?r?\s+["\']?([^"\']+)["\']?\s+["\']?([^"\']+)["\']?\s*$', 
-         r'Compress-Archive -Path "\2" -DestinationPath "\1"'),
-        
-        # unzip → Expand-Archive
-        (r'^unzip\s+["\']?([^"\']+)["\']?\s*$', r'Expand-Archive -Path "\1" -DestinationPath "."'),
-    ]
-    
-    # Handle chained commands with && (convert to PowerShell semicolon)
-    if '&&' in cmd:
-        parts = cmd.split('&&')
-        translated_parts = [_translate_command_to_powershell(p.strip()) for p in parts]
-        return '; '.join(translated_parts)
-    
-    # Handle pipes - translate each part separately
-    if '|' in cmd and '||' not in cmd:
-        parts = cmd.split('|')
-        translated_parts = [_translate_command_to_powershell(p.strip()) for p in parts]
-        return ' | '.join(translated_parts)
-    
-    # Try each translation pattern
-    for pattern, replacement in translations:
-        match = re.match(pattern, cmd, re.IGNORECASE)
-        if match:
-            result = re.sub(pattern, replacement, cmd, count=1, flags=re.IGNORECASE)
-            return result
-    
-    # Handle output redirection > - keep as-is (PowerShell supports >)
-    
-    return cmd
-
-
-def _translate_command_to_bash(command: str) -> str:
-    """
-    Translate common PowerShell commands to bash equivalents.
-    This helps when LLM models generate PowerShell-style commands on Linux/Mac.
-    
-    Args:
-        command: The original command string
-        
-    Returns:
-        Translated command for bash, or original if no translation needed
-    """
-    cmd = command.strip()
-    
-    # PowerShell to bash translations
-    translations = [
-        # Get-ChildItem → ls
-        (r'^Get-ChildItem\s+-Path\s+["\']?([^"\']+)["\']?\s*$', r'ls "\1"'),
-        (r'^Get-ChildItem\s*$', 'ls'),
-        
-        # Get-Content → cat
-        (r'^Get-Content\s+["\']?([^"\']+)["\']?\s*$', r'cat "\1"'),
-        
-        # Set-Location → cd
-        (r'^Set-Location\s+["\']?([^"\']+)["\']?\s*$', r'cd "\1"'),
-        (r'^Set-Location\s*$', 'cd ~'),
-        
-        # Get-Location → pwd
-        (r'^Get-Location\s*$', 'pwd'),
-        
-        # New-Item -ItemType Directory → mkdir
-        (r'^New-Item\s+-ItemType\s+Directory\s+-Force\s+-Path\s+["\']?([^"\']+)["\']?\s*$', r'mkdir -p "\1"'),
-        
-        # New-Item -ItemType File → touch
-        (r'^New-Item\s+-ItemType\s+File\s+-Path\s+["\']?([^"\']+)["\']?\s*-Force\s*$', r'touch "\1"'),
-        
-        # Remove-Item → rm
-        (r'^Remove-Item\s+-Recurse\s+-Force\s+-Path\s+["\']?([^"\']+)["\']?\s*$', r'rm -rf "\1"'),
-        (r'^Remove-Item\s+-Force\s+-Path\s+["\']?([^"\']+)["\']?\s*$', r'rm -f "\1"'),
-        
-        # Copy-Item → cp
-        (r'^Copy-Item\s+-Recurse\s+-Path\s+["\']?([^"\']+)["\']?\s+-Destination\s+["\']?([^"\']+)["\']?\s*$', 
-         r'cp -r "\1" "\2"'),
-        (r'^Copy-Item\s+-Path\s+["\']?([^"\']+)["\']?\s+-Destination\s+["\']?([^"\']+)["\']?\s*$', 
-         r'cp "\1" "\2"'),
-        
-        # Move-Item → mv
-        (r'^Move-Item\s+-Path\s+["\']?([^"\']+)["\']?\s+-Destination\s+["\']?([^"\']+)["\']?\s*$', 
-         r'mv "\1" "\2"'),
-        
-        # Get-Command → which
-        (r'^Get-Command\s+["\']?([^"\']+)["\']?\s*$', r'which "\1"'),
-        
-        # Get-Process → ps
-        (r'^Get-Process\s*$', 'ps aux'),
-        
-        # Stop-Process → kill
-        (r'^Stop-Process\s+-Id\s+(\d+)\s*-Force\s*$', r'kill -9 \1'),
-        
-        # Invoke-WebRequest → curl
-        (r'^Invoke-WebRequest\s+-Uri\s+["\']?([^"\']+)["\']?\s*$', r'curl "\1"'),
-        
-        # Clear-Host → clear
-        (r'^Clear-Host\s*$', 'clear'),
-        
-        # $env:USERNAME → whoami
-        (r'^\$env:USERNAME\s*$', 'whoami'),
-        
-        # $PSVersionTable → uname -a
-        (r'^\$PSVersionTable\s*$', 'uname -a'),
-        
-        # Get-Date → date
-        (r'^Get-Date\s*$', 'date'),
-        
-        # Select-String -Pattern <pattern> → grep <pattern>
-        (r'^Select-String\s+-Pattern\s+["\']?([^"\']+)["\']?\s*$', r'grep "\1"'),
-        
-        # (Measure-Object -Line).Lines → wc -l
-        (r'^\(Measure-Object\s+-Line\)\.Lines\s*$', 'wc -l'),
-        
-        # Select-Object -First <num> → head -n <num>
-        (r'^Select-Object\s+-First\s+(\d+)\s*$', r'head -n \1'),
-        
-        # Select-Object -Last <num> → tail -n <num>
-        (r'^Select-Object\s+-Last\s+(\d+)\s*$', r'tail -n \1'),
-        
-        # Sort-Object → sort
-        (r'^Sort-Object\s*$', 'sort'),
-        
-        # Sort-Object -Unique → sort | uniq
-        (r'^Sort-Object\s+-Unique\s*$', 'sort | uniq'),
-        
-        # Compare-Object → diff
-        # Complex, skip
-        
-        # Expand-Archive → unzip
-        (r'^Expand-Archive\s+-Path\s+["\']?([^"\']+)["\']?\s*-DestinationPath\s+["\']?([^"\']+)["\']?\s*$', 
-         r'unzip "\1" -d "\2"'),
-        
-        # Compress-Archive → zip
-        (r'^Compress-Archive\s+-Path\s+["\']?([^"\']+)["\']?\s*-DestinationPath\s+["\']?([^"\']+)["\']?\s*$', 
-         r'zip "\2" "\1"'),
-    ]
-    
-    # Try each translation pattern
-    for pattern, replacement in translations:
-        match = re.match(pattern, cmd, re.IGNORECASE)
-        if match:
-            result = re.sub(pattern, replacement, cmd, count=1, flags=re.IGNORECASE)
-            return result
-    
-    return cmd
-
-
-def _auto_translate_command(command: str, target_shell: str) -> str:
-    """
-    Automatically translate a command to the target shell's syntax.
-    
-    Args:
-        command: The original command
-        target_shell: 'powershell' or 'bash'
-        
-    Returns:
-        Translated command appropriate for the target shell
-    """
-    os_name = _detect_host_os()
-    
-    if target_shell == 'powershell' and os_name != 'windows':
-        # On non-Windows, translating to PowerShell doesn't make sense
-        return command
-    elif target_shell == 'bash' and os_name == 'windows':
-        # On Windows, translating to bash doesn't make sense
-        return command
-    
-    # Check if command looks like it's for a different shell
-    unix_indicators = ['mkdir -p', 'rm -rf', 'cp -r', 'ls ', 'cat ', 'chmod ', 'chown ']
-    powershell_indicators = ['Get-ChildItem', 'Get-Content', 'Set-Location', 'New-Item', 'Remove-Item']
-    
-    has_unix_syntax = any(ind in command for ind in unix_indicators)
-    has_powershell_syntax = any(ind in command for ind in powershell_indicators)
-    
-    if target_shell == 'powershell' and has_unix_syntax and not has_powershell_syntax:
-        # Command looks like Unix but we're targeting PowerShell
-        return _translate_command_to_powershell(command)
-    elif target_shell == 'bash' and has_powershell_syntax and not has_unix_syntax:
-        # Command looks like PowerShell but we're targeting bash
-        return _translate_command_to_bash(command)
-    
-    return command
 
 
 def _is_likely_python_code(command: str) -> bool:
@@ -691,37 +379,64 @@ def _is_likely_python_code(command: str) -> bool:
     return False
 
 
+def _is_likely_javascript_code(command: str) -> bool:
+    """
+    Heuristic to detect if a command string is actually JavaScript/Node.js code.
+    Returns True if the command appears to be JavaScript that cannot run directly in bash/PowerShell.
+    """
+    # JavaScript indicators that cannot run in bash/PowerShell
+    js_indicators = [
+        'import PptxGenJS',
+        'import {',
+        'from "pptxgenjs"',
+        "from 'pptxgenjs'",
+        'const pptx',
+        'await pptx.writeFile',
+        'require(',
+        'console.log(',
+        'async function',
+        '=> {',
+        '.then(',
+    ]
+    
+    # Check for JavaScript-specific patterns
+    for indicator in js_indicators:
+        if indicator in command:
+            return True
+    
+    # Check for file extensions that suggest JS
+    if command.strip().endswith('.js') and ('node ' in command or 'npm ' in command):
+        return True
+    
+    return False
+
+
 def _get_shell_command(shell: str, command: str, cwd: str = None) -> list:
     """
     Build the subprocess command list for the given shell.
     Returns a list suitable for subprocess.run().
     
-    Auto-translates commands if they appear to be for a different shell.
+    Commands are passed through directly - no translation.
+    The system prompt provides OS-specific command guidance.
     """
-    os_name = _detect_host_os()
-    
-    # Auto-translate command to target shell syntax
-    translated_command = _auto_translate_command(command, shell)
-    
     if shell == 'powershell':
         # PowerShell: use -Command for inline commands
         if cwd:
-            # Prepend cd to command
-            ps_cmd = ['powershell', '-NoProfile', '-Command', f"Set-Location '{cwd}'; {translated_command}"]
+            ps_cmd = ['powershell', '-NoProfile', '-Command', f"Set-Location '{cwd}'; {command}"]
         else:
-            ps_cmd = ['powershell', '-NoProfile', '-Command', translated_command]
+            ps_cmd = ['powershell', '-NoProfile', '-Command', command]
         return ps_cmd
     
     elif shell == 'cmd':
         # CMD: use /c
-        cmd_list = ['cmd', '/c', translated_command]
+        cmd_list = ['cmd', '/c', command]
         return cmd_list
     
     else:
         # bash (Linux/macOS)
         if cwd:
-            return ['bash', '-c', f"cd '{cwd}' && {translated_command}"]
-        return ['bash', '-c', translated_command]
+            return ['bash', '-c', f"cd '{cwd}' && {command}"]
+        return ['bash', '-c', command]
 
 
 # --- Schemas ---
@@ -775,24 +490,20 @@ class ExecuteCommandTool(BaseTool):
     
     Features:
     - Auto-detects OS and uses appropriate shell (PowerShell on Windows, bash on Linux/macOS)
-    - Auto-translates commands between OS syntaxes (Unix ↔ PowerShell)
-    - Auto-detects Python code and writes to temp files (avoids escaping issues)
+    - Auto-detects Python/JavaScript code and writes to temp files
+    - Commands are passed directly to the shell (no translation)
     
-    The agent can use either Unix or PowerShell commands - they will be
-    automatically translated to the correct shell syntax for the current OS.
+    The agent should use OS-native commands:
+    - Windows: PowerShell commands (Get-ChildItem, New-Item, etc.)
+    - Linux/Mac: bash commands (ls, mkdir, etc.)
     
-    The agent should:
-    - Use native OS commands (dir on Windows, ls on Linux) OR
-    - Use any OS commands - they will be auto-translated
-    - For complex Python, this tool auto-detects and handles it
-    - Or use code_execute tool explicitly for Python
+    For large code blocks, write to a temp file and execute rather than inline.
     """
     name = "execute_command"
     description = (
         "Execute shell commands on the host OS. "
-        "Auto-detects OS and translates commands between Unix/PowerShell syntax. "
-        "Python code is auto-detected and handled via temp files. "
-        "For explicit Python execution, use code_execute tool."
+        "Python/JavaScript code is auto-detected and handled via temp files. "
+        "Use OS-native commands (PowerShell on Windows, bash on Linux/Mac)."
     )
     args_schema = ExecuteCommandParams
 
@@ -838,6 +549,109 @@ class ExecuteCommandTool(BaseTool):
             return ToolResult(success=False, error=f"Python code timed out after {timeout}s.")
         except Exception as e:
             return ToolResult(success=False, error=f"Failed to execute Python code: {e}")
+
+    def _run_javascript_code(self, code: str, cwd: str, timeout: int, ignore_error: bool) -> ToolResult:
+        """Execute JavaScript code by writing to a temp file and running with node."""
+        try:
+            # Check if node is available
+            try:
+                node_check = subprocess.run(
+                    ['node', '--version'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if node_check.returncode != 0:
+                    return ToolResult(
+                        success=False, 
+                        error="Node.js is not installed or not in PATH. Install Node.js to run JavaScript code."
+                    )
+            except FileNotFoundError:
+                return ToolResult(
+                    success=False, 
+                    error="Node.js is not installed. Install Node.js from https://nodejs.org to run JavaScript code."
+                )
+            
+            # Find project root with node_modules
+            project_root = None
+            search_dir = cwd or os.getcwd()
+            for _ in range(5):  # Search up to 5 levels up
+                if os.path.exists(os.path.join(search_dir, 'node_modules')):
+                    project_root = search_dir
+                    break
+                parent = os.path.dirname(search_dir)
+                if parent == search_dir:  # Reached root
+                    break
+                search_dir = parent
+            
+            # Extract JavaScript code from node -e '...' commands
+            js_code = code.strip()
+            
+            # Handle node -e '...' or node -e "..." syntax
+            node_e_match = re.match(r'^node\s+-e\s+["\'](.*)["\']\s*$', js_code, re.DOTALL)
+            if node_e_match:
+                js_code = node_e_match.group(1)
+            
+            # Handle node -e with backtick template literals (common in Windows)
+            if js_code.startswith("node -e '") or js_code.startswith('node -e "'):
+                # Extract content between quotes after node -e
+                if js_code.startswith("node -e '"):
+                    js_code = js_code[len("node -e '"):]
+                    if js_code.endswith("'"):
+                        js_code = js_code[:-1]
+                elif js_code.startswith('node -e "'):
+                    js_code = js_code[len('node -e "'):]
+                    if js_code.endswith('"'):
+                        js_code = js_code[:-1]
+            
+            # Write code to temp file
+            fd, tmp_path = tempfile.mkstemp(suffix='.js')
+            try:
+                os.chmod(tmp_path, 0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as tmp:
+                    tmp.write(js_code)
+
+                # Set up environment with NODE_PATH
+                env = os.environ.copy()
+                if project_root:
+                    node_path = os.path.join(project_root, 'node_modules')
+                    env['NODE_PATH'] = node_path
+                
+                # Run with node
+                result = subprocess.run(
+                    ['node', tmp_path],
+                    capture_output=True,
+                    text=True,
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout
+                )
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
+            output_parts = []
+            if stdout:
+                output_parts.append(f"STDOUT:\n{stdout}")
+            if stderr:
+                output_parts.append(f"STDERR:\n{stderr}")
+            output = "\n".join(output_parts) if output_parts else "(No output)"
+
+            if result.returncode == 0 or ignore_error:
+                return ToolResult(success=True, content=output)
+            else:
+                return ToolResult(
+                    success=False, 
+                    content=output, 
+                    error=f"JavaScript execution failed (Exit Code {result.returncode})"
+                )
+
+        except subprocess.TimeoutExpired:
+            return ToolResult(success=False, error=f"JavaScript code timed out after {timeout}s.")
+        except Exception as e:
+            return ToolResult(success=False, error=f"Failed to execute JavaScript code: {e}")
 
     def run(
         self, 
@@ -885,6 +699,10 @@ class ExecuteCommandTool(BaseTool):
                             f"PID: {background_manager.get_process_info(proc_id).get('pid', 'unknown')}"
                 )
 
+            # Auto-detect JavaScript code and handle via temp file
+            if _is_likely_javascript_code(command):
+                return self._run_javascript_code(command, cwd, timeout, ignore_error)
+
             # Auto-detect Python code and handle via temp file
             if _is_likely_python_code(command):
                 return self._run_python_code(command, cwd, timeout, ignore_error)
@@ -925,21 +743,24 @@ class ExecuteCommandTool(BaseTool):
                 error=f"Shell '{shell}' not found on {os_name}. Ensure it is installed and in PATH."
             )
         except Exception as e:
-            error_msg = "Failed to execute command. Check permissions and command syntax."
+            error_msg = f"Failed to execute command: {e}"
             
             # Provide helpful suggestions based on common errors
             error_str = str(e).lower()
-            if 'no such file' in error_str or 'not found' in error_str:
+            os_name = _detect_host_os()
+            
+            if 'not recognized' in error_str or 'not found' in error_str:
                 if os_name == 'windows':
-                    error_msg += "\n\nTip: On Windows, use PowerShell commands like:"
-                    error_msg += "\n  - New-Item -ItemType Directory -Force -Path 'path' (instead of mkdir -p)"
-                    error_msg += "\n  - Get-ChildItem (instead of ls)"
-                    error_msg += "\n  - Get-Content (instead of cat)"
+                    error_msg += "\n\nHint: Use PowerShell commands on Windows:"
+                    error_msg += "\n  - New-Item -ItemType Directory -Force -Path 'path'"
+                    error_msg += "\n  - Get-ChildItem (not ls)"
+                    error_msg += "\n  - Get-Content (not cat)"
+                    error_msg += "\n  - Or write code to a .py/.js temp file and execute it"
                 else:
-                    error_msg += "\n\nTip: On Linux/Mac, use bash commands like:"
-                    error_msg += "\n  - mkdir -p (instead of New-Item)"
-                    error_msg += "\n  - ls (instead of Get-ChildItem)"
-                    error_msg += "\n  - cat (instead of Get-Content)"
+                    error_msg += "\n\nHint: Use bash commands on Linux/Mac:"
+                    error_msg += "\n  - mkdir -p (not New-Item)"
+                    error_msg += "\n  - ls (not Get-ChildItem)"
+                    error_msg += "\n  - cat (not Get-Content)"
             
             return ToolResult(success=False, error=error_msg)
 

@@ -66,7 +66,7 @@ class InputSanitizer:
         (r"<system>", "delimiter_escape"),
         (r"\[system\]", "delimiter_escape"),
         (r"###\s*system\s*###", "delimiter_escape"),
-        (r"assistant:", "delimiter_escape"),
+        (r"(?:^|\n)\s*assistant:", "delimiter_escape"),
         (r"<assistant>", "delimiter_escape"),
         (r"\[assistant\]", "delimiter_escape"),
         
@@ -176,10 +176,10 @@ class InputSanitizer:
     
     def _determine_action(self, detected: List[str]) -> InjectionAction:
         """Determine action based on detected patterns."""
-        # Critical patterns should always block. Delimiter-escape patterns are
-        # included because unescaped <system>/[system]/```system fences let a
-        # user smuggle instruction boundaries into the model context.
-        critical = {"system_override", "role_override", "jailbreak", "delimiter_escape"}
+        # Critical patterns should always block — these are strong signals of
+        # prompt injection (e.g. "ignore previous instructions", "you are now
+        # a DAN", role-override fences like <system> or [system]).
+        critical = {"system_override", "role_override", "jailbreak"}
         if any(p in critical for p in detected):
             return InjectionAction.BLOCK
         

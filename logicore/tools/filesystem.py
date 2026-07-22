@@ -3,7 +3,7 @@ import fnmatch
 import shutil
 from collections import deque
 from typing import List, Optional, Literal, Set, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from .base import BaseTool, ToolResult
 from .dedup import file_state_cache
 
@@ -125,9 +125,16 @@ class SearchFilesParams(BaseModel):
     group_by_file: bool = Field(False, description='Group results by filename.')
 
 class FastGrepParams(BaseModel):
-    keyword: str = Field(..., description='The keyword or regex pattern to search for.')
+    keyword: str = Field(..., description='The keyword or regex pattern to search for. Use this parameter name (keyword), NOT "pattern".')
     directory: str = Field('.', description='The directory to search in.')
     file_pattern: Optional[str] = Field(None, description='Glob pattern to filter files to be searched (e.g., "*.py", "**/*.js").')
+
+    @model_validator(mode='before')
+    @classmethod
+    def _alias_pattern_to_keyword(cls, values):
+        if isinstance(values, dict) and 'pattern' in values and 'keyword' not in values:
+            values['keyword'] = values.pop('pattern')
+        return values
 
 # --- Tools ---
 
@@ -803,7 +810,7 @@ class SearchFilesTool(BaseTool):
 
 class FastGrepTool(BaseTool):
     name = "fast_grep"
-    description = "Search for a keyword or regex pattern in a directory. This is an alias for the search_files tool."
+    description = "Search for a keyword or regex pattern in a directory. Use 'keyword' parameter (not 'pattern')."
     args_schema = FastGrepParams
 
     def run(self, keyword: str, directory: str = '.', file_pattern: Optional[str] = None) -> ToolResult:

@@ -24,6 +24,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Optional
 
+from logicore.tools.tool_names import ToolName
+
 logger = logging.getLogger("logicore.agent.tool_guardrails")
 
 
@@ -33,17 +35,17 @@ logger = logging.getLogger("logicore.agent.tool_guardrails")
 
 # Read-only tools: tracked for no-progress detection
 IDEMPOTENT_TOOLS: FrozenSet[str] = frozenset({
-    "read_file", "list_files", "search_files", "fast_grep",
-    "glob", "web_search", "web_extract", "get_file_info",
+    ToolName.READ_FILE, ToolName.LIST_FILES, ToolName.SEARCH_FILES, ToolName.FAST_GREP,
+    "glob", ToolName.WEB_SEARCH, "web_extract", "get_file_info",
     "check_command_exists", "get_system_info", "get_user_input",
 })
 
 # Write tools: never tracked for no-progress (they always change state)
 MUTATING_TOOLS: FrozenSet[str] = frozenset({
-    "write_file", "edit_file", "bash", "delete_file",
+    "write_file", ToolName.EDIT_FILE, ToolName.BASH, ToolName.DELETE_FILE,
     "create_directory", "move_file", "copy_file",
-    "execute_code", "send_message", "add_cron_job",
-    "load_skill", "manage_note",
+    ToolName.CODE_EXECUTE, "send_message", ToolName.ADD_CRON_JOB,
+    ToolName.LOAD_SKILL, "manage_note",
 })
 
 
@@ -103,16 +105,16 @@ class ToolCallGuardrailConfig:
     hard_stop_enabled: bool = True
     
     # --- Exact call repetition (same tool + same args) ---
-    exact_failure_warn_after: int = 2     # Warn after 2 consecutive failures
-    exact_failure_block_after: int = 5    # Block after 5 consecutive failures
+    exact_failure_warn_after: int = 3     # Warn after 3 consecutive failures
+    exact_failure_block_after: int = 8    # Block after 8 consecutive failures
     
     # --- Same-tool failures (same tool, any args) ---
-    same_tool_failure_warn_after: int = 3   # Warn after 3 failures
-    same_tool_failure_halt_after: int = 8   # Halt after 8 failures
+    same_tool_failure_warn_after: int = 5   # Warn after 5 failures
+    same_tool_failure_halt_after: int = 12  # Halt after 12 failures
     
     # --- No-progress (idempotent tools returning same result) ---
-    no_progress_warn_after: int = 2     # Warn after 2 identical results
-    no_progress_block_after: int = 5    # Block after 5 identical results
+    no_progress_warn_after: int = 3     # Warn after 3 identical results
+    no_progress_block_after: int = 8    # Block after 8 identical results
     
     # Tool classification
     idempotent_tools: FrozenSet[str] = field(default_factory=lambda: IDEMPOTENT_TOOLS)
@@ -206,17 +208,17 @@ def append_toolguard_guidance(result: str, decision: ToolGuardrailDecision) -> s
 
 def _tool_failure_recovery_hint(tool_name: str) -> str:
     """Generate a tool-specific recovery hint."""
-    if tool_name in ("bash", "execute_code"):
+    if tool_name in (ToolName.BASH, ToolName.CODE_EXECUTE):
         return (
             "Try a different command or approach. "
             "Check for syntax errors, missing dependencies, or permission issues."
         )
-    if tool_name in ("read_file", "list_files", "search_files", "fast_grep", "glob"):
+    if tool_name in (ToolName.READ_FILE, ToolName.LIST_FILES, ToolName.SEARCH_FILES, ToolName.FAST_GREP, "glob"):
         return (
             "Try a different path, pattern, or search query. "
             "Verify the path exists and is accessible."
         )
-    if tool_name in ("write_file", "edit_file"):
+    if tool_name in ("write_file", ToolName.EDIT_FILE):
         return (
             "Check the file path, permissions, and content format. "
             "Try reading the file first to understand its current state."
