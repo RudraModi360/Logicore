@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 from logicore.agent.base import Agent
 from logicore.agent.session import AgentSession
 from logicore.providers.base import LLMProvider
@@ -35,6 +35,7 @@ class CopilotAgent(Agent):
         workspace_root: str = None,
         tool_preset: str = "copilot",
         storage=None,
+        model_config: Optional[Dict[str, Any]] = None,
     ):
         # Use copilot-specific prompt if no custom message provided
         if not system_prompt:
@@ -55,6 +56,7 @@ class CopilotAgent(Agent):
             workspace_root=workspace_root,
             tool_preset=tool_preset,
             storage=storage,
+            model_config=model_config,
         )
         
     async def chat(self, user_input: Union[str, List[Dict[str, Any]]], session_id: str = None, stream: bool = False, generate_walkthrough: bool = True, **kwargs) -> str:

@@ -80,7 +80,7 @@ class Agent:
     ):
         # Provider setup
         if isinstance(provider, str):
-            self.provider = create_provider(provider, model, api_key, endpoint)
+            self.provider = create_provider(provider, model, api_key, endpoint, model_config=model_config)
             self.model_name = model or "Default Model"
         else:
             self.provider = provider
@@ -139,9 +139,30 @@ class Agent:
 
         # Model profile (Plan 01): resolve the active model's context window,
         # tier and masking/compression ratios instead of assuming 128k.
+        # Providers resolve their own profile at construction (modular: the
+        # LLM connection can carry its config standalone). The Agent then:
+        #   1. reuses the provider's profile when no agent-level override,
+        #   2. resolves a fresh one from agent model_config (and pushes it
+        #      back onto the provider so both stay in sync),
+        #   3. falls back to auto-resolution for providers without profiles.
         from logicore.runtime.model_profile import ModelProfile
         self.model_config = model_config
-        self.model_profile = ModelProfile.resolve(self.model_name, model_config)
+        _provider_profile = getattr(self.provider, "model_profile", None)
+        if model_config is not None:
+            if (_provider_profile is not None
+                    and getattr(self.provider, "model_config", None) == model_config):
+                self.model_profile = _provider_profile
+            else:
+                self.model_profile = ModelProfile.resolve(self.model_name, model_config)
+                try:
+                    self.provider.model_config = model_config
+                    self.provider.model_profile = self.model_profile
+                except Exception as e:
+                    logger.debug(f"[Agent] Could not sync model_profile onto provider: {e}")
+        elif _provider_profile is not None:
+            self.model_profile = _provider_profile
+        else:
+            self.model_profile = ModelProfile.resolve(self.model_name, None)
 
         # Context engine
         from logicore.runtime.context import ContextEngine

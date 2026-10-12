@@ -35,9 +35,43 @@ class LLMProvider(ABC):
     # Default capabilities (subclasses should override)
     _capabilities: set = {ProviderCapability.CHAT, ProviderCapability.STREAMING}
 
+    # Model profiling (Plan 01): every provider can carry its context-window
+    # profile so it works standalone ("just the LLM connection + config")
+    # without an Agent. Subclasses call setup_model_profile() in __init__.
+    model_config: Optional[Dict[str, Any]] = None
+    model_profile: Optional[Any] = None
+
     @abstractmethod
     def __init__(self, model_name: str, api_key: Optional[str] = None, **kwargs):
         pass
+
+    def setup_model_profile(self, model_config: Optional[Dict[str, Any]] = None) -> Any:
+        """Attach a ModelProfile (context window, tier, masking ratios) to this provider.
+
+        Modular by design: any provider can resolve its own profile at
+        construction time. If ``model_config`` is None and the provider
+        exposes a legacy ``context_window`` attribute (e.g. CustomProvider),
+        that value is folded in as ``context_length``.
+
+        Returns:
+            The resolved ModelProfile.
+        """
+        from logicore.runtime.model_profile import ModelProfile
+
+        effective = model_config
+        if effective is None:
+            legacy_window = getattr(self, "context_window", None)
+            if legacy_window:
+                effective = {"context_length": int(legacy_window)}
+        name = self.get_model_name() or "unknown"
+        profile = ModelProfile.resolve(name, effective)
+        self.model_config = effective
+        self.model_profile = profile
+        return profile
+
+    def get_model_profile(self) -> Optional[Any]:
+        """Return the attached ModelProfile (None if never set up)."""
+        return getattr(self, "model_profile", None)
 
     @abstractmethod
     def get_model_name(self) -> str:
@@ -92,9 +126,11 @@ class LLMProvider(ABC):
     
     def get_metadata(self) -> Dict[str, Any]:
         """Get provider metadata for monitoring/debugging."""
+        profile = getattr(self, "model_profile", None)
         return {
             "provider_name": self.provider_name,
             "model_name": self.get_model_name(),
             "provider_id": self.get_provider_id(),
             "capabilities": [c.value for c in self._capabilities],
+            "model_profile": profile.to_dict() if profile is not None else None,
         }

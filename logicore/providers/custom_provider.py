@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Any
 from .base import LLMProvider, ProviderCapability
 from logicore.config.settings import get_api_key
 from logicore.config.env import _raw
@@ -36,6 +36,7 @@ class CustomProvider(LLMProvider):
         api_key: Optional[str] = None,
         endpoint: Optional[str] = None,
         context_window: Optional[int] = None,
+        model_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
         try:
@@ -95,6 +96,8 @@ class CustomProvider(LLMProvider):
         if endpoint:
             ep_lower = endpoint.lower()
             self._is_ollama = "11434" in ep_lower or "ollama" in ep_lower
+
+        self.setup_model_profile(model_config)
 
     def get_model_name(self) -> str:
         return self.model_name

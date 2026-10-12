@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 from logicore.providers.base import LLMProvider
 from logicore.agent.base import Agent
 from logicore.config.prompts import get_smart_agent_solo_prompt
@@ -37,6 +37,7 @@ class SmartAgent(Agent):
         workspace_root: str = None,
         tool_preset: str = "smart",
         storage=None,
+        model_config: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(
             provider=provider,
@@ -53,6 +54,7 @@ class SmartAgent(Agent):
             workspace_root=workspace_root,
             tool_preset=tool_preset,
             storage=storage,
+            model_config=model_config,
         )
 
         if not system_prompt:

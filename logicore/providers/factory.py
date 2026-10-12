@@ -30,6 +30,7 @@ def create_provider(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
     endpoint: Optional[str] = None,
+    model_config: Optional[Dict] = None,
 ) -> LLMProvider:
     """
     Factory method to create providers from strings.
@@ -44,6 +45,10 @@ def create_provider(
     - openai: OpenAI API
     - custom: Custom provider with endpoint
     
+    ``model_config`` (optional dict: context_length / model_tier /
+    masking_ratio / compression_ratio) is attached to the provider's
+    ModelProfile so even a bare LLM connection carries its window config.
+
     To add a new provider:
     1. Create the provider class in logicore/providers/
     2. Register it: register_provider("myprovider", MyProvider)
@@ -59,32 +64,34 @@ def create_provider(
             kwargs["api_key"] = api_key
         if endpoint:
             kwargs["endpoint"] = endpoint
+        if model_config is not None:
+            kwargs["model_config"] = model_config
         return cls(**kwargs)
     
     # Built-in providers
     if provider_name == "ollama":
         from logicore.providers.ollama_provider import OllamaProvider
-        return OllamaProvider(model_name=model or "gpt-oss:20b-cloud", endpoint=endpoint)
+        return OllamaProvider(model_name=model or "gpt-oss:20b-cloud", endpoint=endpoint, model_config=model_config)
     
     elif provider_name == "groq":
         from logicore.providers.groq_provider import GroqProvider
-        return GroqProvider(model_name=model or "llama-3.3-70b-versatile", api_key=api_key, endpoint=endpoint)
+        return GroqProvider(model_name=model or "llama-3.3-70b-versatile", api_key=api_key, endpoint=endpoint, model_config=model_config)
     
     elif provider_name == "gemini":
         from logicore.providers.gemini_provider import GeminiProvider
-        return GeminiProvider(model_name=model or "gemini-pro", api_key=api_key, endpoint=endpoint)
+        return GeminiProvider(model_name=model or "gemini-pro", api_key=api_key, endpoint=endpoint, model_config=model_config)
     
     elif provider_name == "azure":
         from logicore.providers.azure_provider import AzureProvider
-        return AzureProvider(model_name=model, api_key=api_key, endpoint=endpoint)
+        return AzureProvider(model_name=model, api_key=api_key, endpoint=endpoint, model_config=model_config)
     
     elif provider_name == "openai":
         from logicore.providers.openai_provider import OpenAIProvider
-        return OpenAIProvider(model_name=model or "gpt-4", api_key=api_key, endpoint=endpoint)
+        return OpenAIProvider(model_name=model or "gpt-4", api_key=api_key, endpoint=endpoint, model_config=model_config)
     
     elif provider_name == "custom":
         from logicore.providers.custom_provider import CustomProvider
-        return CustomProvider(model_name=model, api_key=api_key, endpoint=endpoint)
+        return CustomProvider(model_name=model, api_key=api_key, endpoint=endpoint, model_config=model_config)
     
     else:
         supported = list(_PROVIDER_REGISTRY.keys()) + [

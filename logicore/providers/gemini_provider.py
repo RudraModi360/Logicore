@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Any
 from .base import LLMProvider
 from logicore.config.settings import get_api_key
 
@@ -14,7 +14,8 @@ class GeminiProvider(LLMProvider):
     """
     provider_name = "gemini"
 
-    def __init__(self, model_name: str, api_key: Optional[str] = None, endpoint: Optional[str] = None, **kwargs):
+    def __init__(self, model_name: str, api_key: Optional[str] = None, endpoint: Optional[str] = None,
+                 model_config: Optional[Dict[str, Any]] = None, **kwargs):
         from google import genai
 
         self.model_name = model_name
@@ -30,6 +31,7 @@ class GeminiProvider(LLMProvider):
             self.client = genai.Client(api_key=self.api_key, http_options=http_options)
         else:
             self.client = genai.Client(api_key=self.api_key)
+        self.setup_model_profile(model_config)
 
     def get_model_name(self) -> str:
         return self.model_name

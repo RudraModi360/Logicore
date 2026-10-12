@@ -1,5 +1,5 @@
 import ollama
-from typing import Optional
+from typing import Optional, Dict, Any
 from .base import LLMProvider
 
 
@@ -11,12 +11,14 @@ class OllamaProvider(LLMProvider):
     """
     provider_name = "ollama"
 
-    def __init__(self, model_name: str, api_key: Optional[str] = None, endpoint: Optional[str] = None, **kwargs):
+    def __init__(self, model_name: str, api_key: Optional[str] = None, endpoint: Optional[str] = None,
+                 model_config: Optional[Dict[str, Any]] = None, **kwargs):
         self.model_name = model_name
         self.endpoint = endpoint
         if endpoint:
             kwargs["host"] = endpoint
         self.client = ollama.Client(**kwargs)
+        self.setup_model_profile(model_config)
 
     def get_model_name(self) -> str:
         return self.model_name

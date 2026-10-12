@@ -167,3 +167,90 @@ def test_runtime_config_serialization_includes_profile():
     assert payload["model_profile"]["tier"] == "standard"
     assert payload["model_profile"]["context_length"] == 128000
     assert payload["context"]["max_context_tokens"] == 128000
+
+
+def test_provider_carries_model_profile_standalone():
+    from logicore.providers.ollama_provider import OllamaProvider
+
+    provider = OllamaProvider(model_name="llama3.2:3b", model_config={"context_length": 8000})
+    assert provider.model_profile is not None
+    assert provider.model_profile.context_length == 8000
+    assert provider.get_model_profile() is provider.model_profile
+    assert provider.get_metadata()["model_profile"]["context_length"] == 8000
+
+
+def test_provider_auto_resolves_profile_without_config():
+    from logicore.providers.ollama_provider import OllamaProvider
+
+    provider = OllamaProvider(model_name="gemma4:cloud")
+    assert provider.model_profile.context_length == 128000
+    assert provider.model_profile.source == "registry"
+
+
+def test_factory_forwards_model_config():
+    from logicore.providers.factory import create_provider
+
+    provider = create_provider(
+        "ollama", model="custom-x", model_config={"context_length": 20000, "model_tier": "standard"}
+    )
+    assert provider.model_profile.context_length == 20000
+
+
+def test_custom_provider_folds_legacy_context_window():
+    from logicore.providers.custom_provider import CustomProvider
+
+    provider = CustomProvider(
+        model_name="qwen3:0.6b", endpoint="http://localhost:1234/v1", context_window=32768
+    )
+    assert provider.model_profile.context_length == 32768
+
+
+def test_agent_reuses_provider_profile():
+    from logicore import Agent
+    from logicore.providers.ollama_provider import OllamaProvider
+
+    provider = OllamaProvider(model_name="llama3.2:3b", model_config={"context_length": 8000})
+    agent = Agent(provider=provider)
+    assert agent.model_profile is provider.model_profile
+    assert agent.runtime_config.context.max_context_tokens == 8000
+
+
+def test_agent_model_config_overrides_and_syncs_provider():
+    from logicore import Agent
+    from logicore.providers.ollama_provider import OllamaProvider
+
+    provider = OllamaProvider(model_name="llama3.2:3b", model_config={"context_length": 8000})
+    agent = Agent(
+        provider=provider,
+        model_config={"context_length": 20000, "model_tier": "standard"},
+    )
+    assert agent.model_profile.context_length == 20000
+    assert agent.model_profile.source == "config"
+    assert provider.model_profile.context_length == 20000
+    assert agent.runtime_config.context.max_context_tokens == 20000
+
+
+def test_agent_with_string_provider_inherits_factory_profile():
+    from logicore import Agent
+
+    agent = Agent(provider="ollama", model="gemma4:cloud")
+    assert agent.model_profile.context_length == 128000
+    assert agent.model_profile.source == "registry"
+
+
+def test_all_variants_accept_model_config():
+    from logicore.agent.variants.copilot import CopilotAgent
+    from logicore.agent.variants.smart import SmartAgent
+    from logicore.agent.variants.mcp import MCPAgent
+
+    cfg = {"context_length": 16000, "model_tier": "small"}
+    cases = [
+        (CopilotAgent, {}),
+        (SmartAgent, {}),
+        (MCPAgent, {"tool_preset": "minimal"}),
+    ]
+    for cls, extra in cases:
+        agent = cls(model="custom-llm", model_config=cfg, **extra)
+        assert agent.model_profile.context_length == 16000, cls.__name__
+        assert agent.model_profile.tier == "small", cls.__name__
+        assert agent.runtime_config.context.max_context_tokens == 16000, cls.__name__

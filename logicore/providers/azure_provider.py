@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from .base import LLMProvider
 from logicore.config.settings import get_api_key
 from logicore.config.env import _raw
@@ -31,6 +31,7 @@ class AzureProvider(LLMProvider):
         endpoint: Optional[str] = None,
         api_version: Optional[str] = None,
         model_type: Optional[str] = None,
+        model_config: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         self.deployment_name = model_name
@@ -48,6 +49,7 @@ class AzureProvider(LLMProvider):
 
         self.client = None
         self._init_client()
+        self.setup_model_profile(model_config)
 
         logger.info(f"Initialized Azure {self.model_type} provider for deployment: {self.deployment_name}")
 

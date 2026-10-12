@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Any
 from .base import LLMProvider
 from logicore.config.settings import get_api_key
 
@@ -14,7 +14,8 @@ class OpenAIProvider(LLMProvider):
     """
     provider_name = "openai"
 
-    def __init__(self, model_name: str, api_key: Optional[str] = None, endpoint: Optional[str] = None, **kwargs):
+    def __init__(self, model_name: str, api_key: Optional[str] = None, endpoint: Optional[str] = None,
+                 model_config: Optional[Dict[str, Any]] = None, **kwargs):
         try:
             from openai import OpenAI
         except ImportError:
@@ -30,6 +31,7 @@ class OpenAIProvider(LLMProvider):
         if endpoint:
             client_kwargs["base_url"] = endpoint
         self.client = OpenAI(**client_kwargs, **kwargs)
+        self.setup_model_profile(model_config)
 
     def get_model_name(self) -> str:
         return self.model_name

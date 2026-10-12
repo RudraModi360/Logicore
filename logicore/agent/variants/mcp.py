@@ -98,6 +98,7 @@ class MCPAgent(Agent):
         workspace_root: str = None,
         tool_preset: str = None,
         storage=None,
+        model_config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize MCPAgent.
@@ -142,6 +143,7 @@ class MCPAgent(Agent):
                 skills=effective_skills,
                 workspace_root=workspace_root,
                 storage=storage,
+                model_config=model_config,
             )
         else:
             # Default: load all tools
@@ -159,6 +161,7 @@ class MCPAgent(Agent):
                 skills=effective_skills,
                 workspace_root=workspace_root,
                 storage=storage,
+                model_config=model_config,
             )
         
         # MCP-specific configuration
