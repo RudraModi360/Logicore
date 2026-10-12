@@ -69,6 +69,8 @@ class Agent:
         agent_id: str = None,
         approval_timeout: float = 120.0,
         allow_tools: set = None,
+        # Model profile override (Plan 01): {"context_length": int, "model_tier": str}
+        model_config: Optional[Dict[str, Any]] = None,
         # Storage (optional — enables session persistence)
         storage=None,
         # Composable components (optional overrides)
@@ -135,10 +137,18 @@ class Agent:
         # to enable session persistence. Without it, the agent runs stateless.
         self._storage = storage
 
+        # Model profile (Plan 01): resolve the active model's context window,
+        # tier and masking/compression ratios instead of assuming 128k.
+        from logicore.runtime.model_profile import ModelProfile
+        self.model_config = model_config
+        self.model_profile = ModelProfile.resolve(self.model_name, model_config)
+
         # Context engine
         from logicore.runtime.context import ContextEngine
         from logicore.runtime.config import RuntimeConfig
         _rt_config = RuntimeConfig.from_settings()
+        self.runtime_config = _rt_config
+        _rt_config.apply_model_profile(self.model_profile)
         self.context_engine = ContextEngine(
             config=_rt_config,
             llm_provider=self.provider,

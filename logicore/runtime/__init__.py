@@ -6,6 +6,7 @@ and recoverable agent execution. Inspired by gemini-cli architecture patterns.
 
 Components:
 - RuntimeConfig: Centralized configuration (no hardcoded thresholds)
+- ModelProfile: Model config & context profiling (tier/window/ratios per model)
 - TurnManager: Bounded execution with state machine
 - LoopDetectionEngine: Multi-layer loop detection with recovery
 - ContextWindowManager: Intelligent context compression and masking
@@ -25,6 +26,7 @@ from logicore.runtime.config import (
     TelemetryConfig,
     PlannerConfig,
 )
+from logicore.runtime.model_profile import ModelProfile, ModelTier
 from logicore.runtime.turn_manager import TurnManager, TurnContext, TurnStatus
 from logicore.runtime.loop_detection import (
     LoopDetectionEngine,
@@ -88,6 +90,9 @@ __all__ = [
     "TelemetryConfig",
     "ReasoningConfig",
     "PlannerConfig",
+    # Model profiling
+    "ModelProfile",
+    "ModelTier",
     # Turn Management
     "TurnManager",
     "TurnContext",

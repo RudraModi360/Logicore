@@ -30,7 +30,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from enum import Enum
 
 # All environment access flows through the single config gateway.
@@ -298,9 +298,23 @@ class RuntimeConfig:
     
     # Model-specific context windows (canonical source: context_engine.token_estimator)
     model_context_windows: Dict[str, int] = field(default_factory=lambda: _get_canonical_model_windows())
-    
+
+    # Active ModelProfile (Plan 01). Set via apply_model_profile(); when present
+    # it overrides the generic window lookups so context management adapts to
+    # the specific model this runtime was built for.
+    model_profile: Optional[Any] = None
+
+    def apply_model_profile(self, profile: Any) -> Any:
+        """Store the ModelProfile and write its ratios/windows into self.context."""
+        self.model_profile = profile
+        if profile is not None:
+            profile.apply_to_context(self.context)
+        return profile
+
     def get_model_context_window(self, model_name: str, provider=None) -> int:
         """Get context window size for a model, with fallback to default."""
+        if self.model_profile is not None:
+            return int(self.model_profile.context_length)
         from logicore.runtime.context.token_estimator import get_model_context_window
         return get_model_context_window(model_name, provider)
     
@@ -394,6 +408,7 @@ class RuntimeConfig:
             "max_history_messages": self.max_history_messages,
             "http_timeout_seconds": self.http_timeout_seconds,
             "debug": self.debug,
+            "model_profile": self.model_profile.to_dict() if self.model_profile is not None else None,
             "loop_detection": {
                 "enabled": self.loop_detection.enabled,
                 "tool_call_threshold": self.loop_detection.tool_call_threshold,
@@ -404,6 +419,7 @@ class RuntimeConfig:
                 "stagnant_turns_threshold": self.loop_detection.stagnant_turns_threshold,
             },
             "context": {
+                "max_context_tokens": self.context.max_context_tokens,
                 "compression_threshold_ratio": self.context.compression_threshold_ratio,
                 "compression_threshold_tokens": self.context.compression_threshold_tokens,
                 "preserve_recent_ratio": self.context.preserve_recent_ratio,

@@ -139,6 +139,7 @@ class BasicAgent:
             agent_tools = []
             agent_preset = tool_preset or "chatbot"
         
+        model_config = kwargs.pop("model_config", None)
         self._agent = Agent(
             provider=provider,
             model=model,
@@ -153,6 +154,7 @@ class BasicAgent:
             workspace_root=workspace_root,
             tool_preset=agent_preset,
             storage=storage,
+            model_config=model_config,
         )
         
         # Register custom tools first (needed for tool descriptions in system prompt)
