@@ -383,6 +383,21 @@ You are ready to help. Use your tools effectively.
         """
         return self._agent.telemetry
 
+    @property
+    def model_profile(self):
+        """Resolved ModelProfile (context window, tier, masking/compression ratios)."""
+        return self._agent.model_profile
+
+    @property
+    def model_config(self):
+        """Raw model_config dict passed at construction (may be None)."""
+        return self._agent.model_config
+
+    @property
+    def runtime_config(self):
+        """RuntimeConfig with the resolved model profile applied."""
+        return self._agent.runtime_config
+
     async def cleanup(self):
         """Cleanup resources."""
         await self._agent.cleanup()
