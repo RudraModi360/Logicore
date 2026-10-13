@@ -8,7 +8,7 @@ Prior to this fix, tool output masking (disk offloading) was completely unreacha
 ---
 
 ## Status & Tracking
-- **Status:** `READY FOR DEV`
+- **Status:** `SANDBOX PASS — AWAITING PO SIGN-OFF`
 - **Owner:** Developer Agent Team
 - **Reviewer:** Product Owner
 - **Target Files:**
@@ -205,3 +205,28 @@ pytest tests/test_context_manager.py -k "masking or compression" -v
 - [ ] Placeholder containing file path and `read_file(...)` instruction is inserted into `session.messages`.
 - [ ] Summarization runs on windows < 100k tokens without `SKIPPED_SMALL`.
 - [ ] Changes to `current_messages` are synced back to `session.messages`.
+
+---
+
+## Prototype Status (experiment-first — NOT yet in framework)
+
+Per the agreed workflow, the fixes are prototyped **entirely in `experiments/`**
+first. The real framework (`logicore/`) is untouched until the PO signs off.
+
+- **Prototype:** `experiments/context_engine/fixed.py` — subclasses the working
+  framework machinery and overrides only the buggy methods, so the delta is
+  exactly the fix:
+  - `FixedTokenBudget.should_mask_tool_outputs` — Bug 1 enabler (independent trigger)
+  - `FixedCompressionService.__init__` — Bug 2 (model-aware threshold, no 100k floor)
+  - `FixedMaskingService._create_masked_content` — `read_file()` retrieval instruction
+  - `FixedContextWindowManager.manage` — Bug 1 (gate inversion) + Bug 3 (session sync)
+- **Sandbox:** `python experiments/plan02_context_fix_sandbox.py` — runs each of the
+  three root-bug scenarios twice (BEFORE = real framework / AFTER = prototype) and
+  prints a side-by-side verdict. Traces under `debug/traces/plan02/`.
+
+Latest sandbox result: **BEFORE = FAIL on all 3, AFTER = PASS on all 3.**
+
+**Next step (blocked on PO):** once the sandbox looks right, port the delta from
+`experiments/context_engine/fixed.py` into the framework classes
+(`manager.py`, `compression.py`, `token_budget.py`, `masking.py`) and wire
+`session_provider=self.get_session` in `agent/base.py`.
