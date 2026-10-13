@@ -4,13 +4,26 @@ TokenEstimator: Centralized token counting for the context engine.
 Replaces ad-hoc `chars // 4` estimates scattered across the codebase.
 Provides a single source of truth for token measurement.
 
-Optionally uses tiktoken (BPE) for accurate counting when available.
-Falls back to character-length heuristic (~4 chars per token).
+Two modes (both produce a PRE-REQUEST estimate; the ACTUAL tokens always
+come from the provider-reported usage on the response):
+
+* Legacy (zero-arg): tiktoken cl100k when available, else ~4 chars/token.
+  Unchanged behavior for existing callers.
+* Provider-aware: pass provider= + model= to get a counter tuned to that
+  provider's tokenizer. Fixed providers (openai/azure/anthropic/gemini/
+  groq/ollama) are accurate; custom endpoints try HF -> tiktoken -> heuristic
+  and always surface an inaccuracy warning on fallback.
+
+Usage truth note: for the six fixed providers the response usage is the
+source of truth for input/output/cache/reasoning tokens. This estimator only
+sizes the request BEFORE the call (compression/masking/budget decisions).
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 from typing import List, Dict, Any, Optional, Callable
 
 logger = logging.getLogger(__name__)
@@ -172,44 +185,209 @@ class TokenEstimator:
     """
     Estimates token counts for messages and text.
 
-    Uses tiktoken BPE when available, falls back to character-length heuristic.
-    Accepts a custom counter for model-specific tokenizers.
+    Zero-arg (BC): tiktoken BPE when available, else ~4 chars/token.
+    Provider-aware: TokenEstimator(provider="openai", model="gpt-4o") picks a
+    counter tuned to that provider. An explicit token_counter always wins.
+
+    The count returned is a PRE-REQUEST estimate. Actual input/output/cache/
+    reasoning tokens are reported by the provider on the response and
+    normalized via logicore.telemetry.canonical.normalize_usage.
     """
 
-    def __init__(self, token_counter: Optional[Callable[[str], int]] = None):
-        if token_counter is not None:
-            self._counter = token_counter
+    # Per-message role/template overhead (ChatML-style wrap ~4 special tokens).
+    _MSG_OVERHEAD = {"gemini": 1, "anthropic": 3}
+    _DEFAULT_MSG_OVERHEAD = 4
+    # Conversation priming overhead (OpenAI-style +3; Gemini ~+1).
+    _CONV_OVERHEAD = {"gemini": 1, "openai": 3, "azure": 3}
+    _DEFAULT_CONV_OVERHEAD = 1
+
+    # Heuristic chars-per-token by content type (calibrated).
+    _PROSE_CPT = 4.0
+    _CODE_CPT = 3.2
+    _JSON_CPT = 2.8
+    _CODE_MARKERS = ("def ", "function", "return ", "=>", "->", "import ", "class ")
+    _JSON_PUNCT = set('{}",:[]')
+
+    def __init__(
+        self,
+        token_counter: Optional[Callable[[str], int]] = None,
+        provider: str = "unknown",
+        model: str = "default",
+    ):
+        self.provider = (provider or "unknown").lower()
+        self.model = model or "default"
+        self._explicit = token_counter
+        self.warnings: List[str] = []
+        self._accuracy = "estimated"
+        if self._explicit is not None:
+            self._counter = self._explicit
+            self._accuracy = "exact"
         else:
-            # Auto-detect tiktoken
-            tiktoken_counter = get_tiktoken_counter()
-            if tiktoken_counter is not None:
-                self._counter = tiktoken_counter
-                logger.debug("[TokenEstimator] Using tiktoken BPE tokenizer")
-            else:
-                self._counter = self._default_counter
-                logger.debug("[TokenEstimator] Using heuristic tokenizer (~4 chars/token)")
+            self._counter = self._build_counter()
+
+    # ------------------------------------------------------------------ builders
+    def _build_counter(self) -> Callable[[str], int]:
+        p = self.provider
+        if p in ("openai", "azure"):
+            return self._tiktoken_for_model(self.model)
+        if p == "anthropic" or "claude" in self.model.lower():
+            self.warnings.append(
+                "Anthropic tokenizer unavailable; using tiktoken cl100k approximation (~3% error)"
+            )
+            self._accuracy = "estimated"
+            return get_tiktoken_counter("cl100k_base") or self._default_counter
+        if p == "gemini":
+            self.warnings.append(
+                "Gemini pre-count uses a calibrated heuristic; actual tokens are reported by the API"
+            )
+            return self._heuristic_counter("gemini")
+        if p in ("groq", "ollama"):
+            # Llama-family BPE is close to cl100k; actual tokens come from usage.
+            self._accuracy = "medium"
+            return get_tiktoken_counter("cl100k_base") or self._default_counter
+        if p == "custom":
+            return self._custom_counter()
+        # unknown -> legacy behavior
+        tc = get_tiktoken_counter()
+        self._accuracy = "high" if tc else "estimated"
+        return tc or self._default_counter
+
+    def _tiktoken_for_model(self, model: str) -> Callable[[str], int]:
+        if not _TIKTOKEN_AVAILABLE:
+            self.warnings.append("tiktoken unavailable; falling back to ~4 chars/token")
+            self._accuracy = "estimated"
+            return self._default_counter
+        name = (model or "").lower()
+        if name.startswith(("gpt-4o", "gpt-4.1", "o3", "o4")):
+            self._accuracy = "exact"
+            return get_tiktoken_counter("o200k_base") or self._default_counter
+        if name.startswith(("gpt-3.5-turbo-instruct", "davinci")):
+            self._accuracy = "exact"
+            return get_tiktoken_counter("p50k_base") or self._default_counter
+        if name.startswith(("gpt-4", "gpt-3.5", "o1", "text-embedding")):
+            self._accuracy = "exact"
+            return get_tiktoken_counter("cl100k_base") or self._default_counter
+        try:
+            enc = tiktoken.encoding_for_model(model)
+            self._accuracy = "exact"
+            return self._wrap_encoding(enc)
+        except Exception:
+            self.warnings.append(
+                "Model not in tiktoken registry — fell back to cl100k_base (high, not exact)"
+            )
+            self._accuracy = "high"
+            return get_tiktoken_counter("cl100k_base") or self._default_counter
+
+    @staticmethod
+    def _wrap_encoding(enc) -> Callable[[str], int]:
+        def _count(text: str) -> int:
+            if not text:
+                return 0
+            return len(enc.encode(text, disallowed_special=()))
+        return _count
 
     @staticmethod
     def _default_counter(text: str) -> int:
-        """Default: ~4 characters per token."""
+        """Ultimate fallback: ~4 characters per token."""
         if not text:
             return 0
         return len(text) // 4
 
+    def _heuristic_counter(self, provider: str) -> Callable[[str], int]:
+        # Gemini multiplier is 1.0 (SentencePiece calibration handled via overhead).
+        def _count(text: str) -> int:
+            if not text:
+                return 0
+            ratio = self._detect_ratio(text)
+            return max(1, math.ceil(len(text) / ratio))
+        self._accuracy = "estimated"
+        return _count
+
+    def _custom_counter(self) -> Callable[[str], int]:
+        """Custom endpoints: try HF (from model name) -> tiktoken -> heuristic.
+
+        Mirrors the experiment's approach: no static model->tokenizer map; load
+        HF AutoTokenizer straight from the model name when possible. Always
+        warns when the count may be inaccurate.
+        """
+        # 1. HF AutoTokenizer from the model name (lazy, cached, guarded).
+        hf = self._try_hf_counter(self.model)
+        if hf is not None:
+            self._accuracy = "high"
+            return hf
+        # 2. tiktoken cl100k as a reasonable middle ground.
+        tc = get_tiktoken_counter("cl100k_base")
+        if tc is not None:
+            self.warnings.append(
+                "Custom endpoint: HF tokenizer unavailable; using tiktoken cl100k — count may be inaccurate"
+            )
+            self._accuracy = "medium"
+            return tc
+        # 3. Heuristic fallback — always flagged.
+        self.warnings.append(
+            "Custom endpoint: count may be inaccurate — heuristic fallback (~4 chars/token) only"
+        )
+        self._accuracy = "estimated"
+        return self._default_counter
+
+    @staticmethod
+    def _try_hf_counter(model: str) -> Optional[Callable[[str], int]]:
+        if not model or model == "default":
+            return None
+        try:
+            from transformers import AutoTokenizer
+        except Exception:
+            return None
+        try:
+            tok = AutoTokenizer.from_pretrained(model, trust_remote_code=False)
+        except Exception:
+            return None
+
+        def _count(text: str) -> int:
+            if not text:
+                return 0
+            try:
+                return len(tok.encode(text, add_special_tokens=False))
+            except Exception:
+                return max(1, len(text) // 4)
+        return _count
+
+    @staticmethod
+    def _detect_ratio(text: str) -> float:
+        stripped = text.strip()
+        if stripped[:1] in ("{", "["):
+            punct = sum(1 for c in text if c in TokenEstimator._JSON_PUNCT)
+            if punct / max(len(text), 1) > 0.08:
+                return TokenEstimator._JSON_CPT
+            return TokenEstimator._CODE_CPT
+        lowered = text.lower()
+        hits = sum(1 for m in TokenEstimator._CODE_MARKERS if m in lowered)
+        if hits >= 2 or text.count("\n    ") >= 3:
+            return TokenEstimator._CODE_CPT
+        return TokenEstimator._PROSE_CPT
+
+    # ------------------------------------------------------------------ counting
     def count_tokens(self, text: str) -> int:
-        """Count tokens in a string."""
-        return self._counter(text)
+        """Count tokens in a string (pre-request estimate)."""
+        return self._counter(text or "")
+
+    def count_tool_tokens(self, tool_defs: List[Dict[str, Any]]) -> int:
+        """Count tool schema tokens as compact JSON."""
+        if not tool_defs:
+            return 0
+        blob = json.dumps(tool_defs, separators=(",", ":"), ensure_ascii=False)
+        return self._counter(blob)
+
+    def _msg_overhead(self, msg: Dict[str, Any]) -> int:
+        if not msg.get("role"):
+            return 0
+        return self._MSG_OVERHEAD.get(self.provider, self._DEFAULT_MSG_OVERHEAD)
 
     def count_message_tokens(self, msg: Dict[str, Any]) -> int:
-        """Estimate tokens in a single message."""
-        total = 0
-        role = msg.get("role", "")
+        """Estimate tokens in a single message (content + role overhead)."""
+        total = self._msg_overhead(msg)
         content = msg.get("content", "")
 
-        # Role overhead (~4 tokens)
-        total += 4
-
-        # Content tokens
         if isinstance(content, str):
             total += self._counter(content)
         elif isinstance(content, list):
@@ -217,20 +395,22 @@ class TokenEstimator:
                 if isinstance(part, dict):
                     if "text" in part:
                         total += self._counter(part["text"])
-                    elif "type" in part and part["type"] == "image_url":
-                        total += 1000  # Image rough estimate
+                    elif part.get("type") == "image_url":
+                        total += 1000
                 elif isinstance(part, str):
                     total += self._counter(part)
 
-        # Tool calls overhead
         if "tool_calls" in msg:
-            total += self._counter(str(msg["tool_calls"]))
+            total += self._counter(json.dumps(msg["tool_calls"], default=str))
 
         return total
 
     def count_messages_tokens(self, messages: List[Dict[str, Any]]) -> int:
-        """Estimate total tokens across a list of messages."""
-        return sum(self.count_message_tokens(m) for m in messages)
+        """Estimate total tokens across a list of messages (incl. priming overhead)."""
+        total = sum(self.count_message_tokens(m) for m in messages)
+        if messages:
+            total += self._CONV_OVERHEAD.get(self.provider, self._DEFAULT_CONV_OVERHEAD)
+        return total
 
     def categorize_tokens(
         self, messages: List[Dict[str, Any]]
@@ -254,3 +434,16 @@ class TokenEstimator:
                 categories["messages"] += tokens
 
         return categories
+
+    # ------------------------------------------------------------------ introspection
+    def get_accuracy_class(self) -> str:
+        """How much to trust this estimator's pre-request numbers."""
+        return self._accuracy
+
+    def describe(self) -> Dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "accuracy_class": self._accuracy,
+            "warnings": list(self.warnings),
+        }

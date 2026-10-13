@@ -327,9 +327,16 @@ class GeminiGateway(ProviderGateway):
             candidates = getattr(um, "candidates_token_count", None) or 0
             cached = getattr(um, "cached_content_token_count", None) or 0
             total = getattr(um, "total_token_count", None) or 0
-            usage = {"prompt_tokens": prompt, "completion_tokens": candidates, "total_tokens": total}
+            # thoughts_token_count = billed thinking output. candidates alone
+            # EXCLUDES it (unlike OpenAI where completion_tokens includes
+            # reasoning), so fold it into completion to keep
+            # total == prompt + completion consistent with the API dashboard.
+            thoughts = getattr(um, "thoughts_token_count", None) or 0
+            usage = {"prompt_tokens": prompt, "completion_tokens": candidates + thoughts, "total_tokens": total}
             if cached:
                 usage["prompt_tokens_details"] = {"cached_tokens": cached}
+            if thoughts:
+                usage["output_tokens_details"] = {"reasoning_tokens": thoughts}
 
         return NormalizedMessage(role="assistant", content=content, tool_calls=tool_calls, usage=usage)
 
@@ -496,9 +503,12 @@ class GeminiGateway(ProviderGateway):
             candidates = getattr(last_usage_metadata, "candidates_token_count", None) or 0
             cached = getattr(last_usage_metadata, "cached_content_token_count", None) or 0
             total = getattr(last_usage_metadata, "total_token_count", None) or 0
-            usage = {"prompt_tokens": prompt, "completion_tokens": candidates, "total_tokens": total}
+            thoughts = getattr(last_usage_metadata, "thoughts_token_count", None) or 0
+            usage = {"prompt_tokens": prompt, "completion_tokens": candidates + thoughts, "total_tokens": total}
             if cached:
                 usage["prompt_tokens_details"] = {"cached_tokens": cached}
+            if thoughts:
+                usage["output_tokens_details"] = {"reasoning_tokens": thoughts}
             if usage:
                 _gateway_debug(self, f"chat_stream usage: {usage}")
 

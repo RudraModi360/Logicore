@@ -107,13 +107,20 @@ class ContextWindowManager:
         self.config = config
         self.model_name = model_name
         from logicore.runtime.context.token_estimator import TokenEstimator
-        self._estimator = token_counter if isinstance(token_counter, TokenEstimator) else TokenEstimator(token_counter)
+        provider_name = getattr(llm_provider, "provider_name", "unknown") if llm_provider else "unknown"
+        if isinstance(token_counter, TokenEstimator):
+            self._estimator = token_counter
+        elif token_counter is not None:
+            self._estimator = TokenEstimator(token_counter)
+        else:
+            self._estimator = TokenEstimator(provider=provider_name, model=model_name)
         self._token_counter = self._estimator.count_tokens
         
-        # Initialize sub-services (pass llm_provider for context_window override)
-        self.budget = TokenBudget(config, model_name, token_counter, provider=llm_provider)
-        self.compression_service = CompressionService(config, llm_provider, token_counter)
-        self.masking_service = ToolOutputMaskingService(config, token_counter)
+        # Initialize sub-services (pass the provider-aware estimator so all
+        # threshold decisions use the same tokenizer).
+        self.budget = TokenBudget(config, model_name, self._estimator, provider=llm_provider)
+        self.compression_service = CompressionService(config, llm_provider, self._estimator)
+        self.masking_service = ToolOutputMaskingService(config, self._estimator)
         
         # Results history per session
         self._results: Dict[str, List[ContextManagementResult]] = {}
@@ -404,7 +411,13 @@ class ContextEngine:
         from logicore.runtime.context.message_pipeline import MessagePipeline
         from logicore.runtime.context.tool_output_distiller import ToolOutputDistiller
 
-        self.token_estimator = TokenEstimator(token_counter)
+        provider_name = getattr(llm_provider, "provider_name", "unknown") if llm_provider else "unknown"
+        if isinstance(token_counter, TokenEstimator):
+            self.token_estimator = token_counter
+        elif token_counter is not None:
+            self.token_estimator = TokenEstimator(token_counter)
+        else:
+            self.token_estimator = TokenEstimator(provider=provider_name, model=model_name)
         # Resolve the system-prompt token cap. Prefer a ratio of the actual
         # model context window; fall back to the absolute configured default.
         from logicore.runtime.context.token_estimator import get_model_context_window
@@ -429,7 +442,7 @@ class ContextEngine:
             config=config,
             llm_provider=llm_provider,
             model_name=model_name,
-            token_counter=token_counter,
+            token_counter=self.token_estimator,
         )
 
         # Per-session results history

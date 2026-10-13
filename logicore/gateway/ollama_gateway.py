@@ -22,6 +22,43 @@ OLLAMA_EMPTY_RETRY_ATTEMPTS = 5
 OLLAMA_EMPTY_RETRY_BACKOFF = 0.5
 
 
+def _pick(obj, key):
+    """Read a field from either a dict or an attribute-style object."""
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _ollama_usage(response) -> Optional[dict]:
+    """Build a usage dict from Ollama final-chunk stats.
+
+    Per https://github.com/ollama/ollama/blob/main/docs/api.md the final
+    response carries ``prompt_eval_count`` (prompt tokens),
+    ``prompt_eval_cached_count`` (prompt tokens served from KV cache) and
+    ``eval_count`` (generated tokens). All three are provider-reported --
+    no local estimation involved.
+    """
+    prompt_eval = _pick(response, "prompt_eval_count")
+    eval_count = _pick(response, "eval_count")
+    cached = _pick(response, "prompt_eval_cached_count")
+    raw = _pick(response, "usage") or {}
+    usage = None
+    if isinstance(raw, dict) and raw:
+        usage = {k: v for k, v in raw.items() if k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+    if prompt_eval is not None or eval_count is not None or cached is not None:
+        if usage is None:
+            usage = {}
+        if "prompt_tokens" not in usage and prompt_eval is not None:
+            usage["prompt_tokens"] = prompt_eval
+        if "completion_tokens" not in usage and eval_count is not None:
+            usage["completion_tokens"] = eval_count
+        if cached:
+            usage["prompt_tokens_details"] = {"cached_tokens": cached}
+        if "prompt_tokens" in usage and "completion_tokens" in usage:
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+    return usage
+
+
 class OllamaGateway(ProviderGateway):
     """Gateway for Ollama (local models via ollama SDK).
     
@@ -206,18 +243,7 @@ class OllamaGateway(ProviderGateway):
             else:
                 _gateway_debug(self, f"Response: {len(content)} chars content, no tool calls")
 
-            usage = None
-            prompt_eval = getattr(response, "prompt_eval_count", None)
-            eval_count = getattr(response, "eval_count", None)
-            _gateway_debug(self, f"Ollama response: prompt_eval_count={prompt_eval} eval_count={eval_count}")
-            if prompt_eval is not None or eval_count is not None:
-                usage = {}
-                if prompt_eval is not None:
-                    usage["prompt_tokens"] = prompt_eval
-                if eval_count is not None:
-                    usage["completion_tokens"] = eval_count
-                if "prompt_tokens" in usage and "completion_tokens" in usage:
-                    usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            usage = _ollama_usage(response)
             _gateway_debug(self, f"Ollama extracted usage: {usage}")
 
             return NormalizedMessage(
@@ -249,21 +275,7 @@ class OllamaGateway(ProviderGateway):
                 if not message.get("content") and not message.get("tool_calls"):
                     raise ValueError("Ollama retry returned empty message with no content or tool calls")
 
-                usage = None
-                raw_usage = response.get("usage") or {}
-                if raw_usage:
-                    usage = {k: v for k, v in raw_usage.items() if k in ("prompt_tokens", "completion_tokens", "total_tokens")}
-                prompt_eval = response.get("prompt_eval_count")
-                eval_count = response.get("eval_count")
-                if prompt_eval is not None or eval_count is not None:
-                    if usage is None:
-                        usage = {}
-                    if "prompt_tokens" not in usage and prompt_eval is not None:
-                        usage["prompt_tokens"] = prompt_eval
-                    if "completion_tokens" not in usage and eval_count is not None:
-                        usage["completion_tokens"] = eval_count
-                    if "prompt_tokens" in usage and "completion_tokens" in usage:
-                        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+                usage = _ollama_usage(response)
 
                 return NormalizedMessage(
                     role=message.get("role", "assistant"),
@@ -338,15 +350,19 @@ class OllamaGateway(ProviderGateway):
                     if isinstance(chunk, dict):
                         pe = chunk.get("prompt_eval_count")
                         ec = chunk.get("eval_count")
+                        cc = chunk.get("prompt_eval_cached_count")
                     else:
                         pe = getattr(chunk, "prompt_eval_count", None)
                         ec = getattr(chunk, "eval_count", None)
-                    if pe is not None or ec is not None:
+                        cc = getattr(chunk, "prompt_eval_cached_count", None)
+                    if pe is not None or ec is not None or cc:
                         stream_usage = {}
                         if pe is not None:
                             stream_usage["prompt_tokens"] = pe
                         if ec is not None:
                             stream_usage["completion_tokens"] = ec
+                        if cc:
+                            stream_usage["prompt_tokens_details"] = {"cached_tokens": cc}
                         if "prompt_tokens" in stream_usage and "completion_tokens" in stream_usage:
                             stream_usage["total_tokens"] = stream_usage["prompt_tokens"] + stream_usage["completion_tokens"]
 
@@ -433,17 +449,7 @@ class OllamaGateway(ProviderGateway):
                 message = response["message"]
                 if not message.get("content") and not message.get("tool_calls"):
                     raise ValueError("Ollama sanitized retry returned empty message with no content or tool calls")
-                retry_usage = None
-                pe = response.get("prompt_eval_count")
-                ec = response.get("eval_count")
-                if pe is not None or ec is not None:
-                    retry_usage = {}
-                    if pe is not None:
-                        retry_usage["prompt_tokens"] = pe
-                    if ec is not None:
-                        retry_usage["completion_tokens"] = ec
-                    if "prompt_tokens" in retry_usage and "completion_tokens" in retry_usage:
-                        retry_usage["total_tokens"] = retry_usage["prompt_tokens"] + retry_usage["completion_tokens"]
+                retry_usage = _ollama_usage(response)
                 return NormalizedMessage(
                     role=message.get("role", "assistant"),
                     content=message.get("content", ""),

@@ -135,14 +135,22 @@ class ToolBudgetConfig:
 # ---------------------------------------------------------------------------
 
 
-def estimate_tokens_from_schemas(tool_defs: Iterable[Dict[str, Any]]) -> int:
+def estimate_tokens_from_schemas(
+    tool_defs: Iterable[Dict[str, Any]],
+    provider: str = "unknown",
+    model: str = "default",
+) -> int:
     """Estimate token cost of a tool-defs list using centralized token estimator.
 
     Order-of-magnitude precision is fine — this gates an activate/skip decision
     where the cliff is typically tens of thousands of tokens.
+
+    Args:
+        provider: Provider name for a provider-aware count (optional).
+        model: Model name for a provider-aware count (optional).
     """
     from logicore.runtime.context.token_estimator import TokenEstimator
-    _estimator = TokenEstimator()
+    _estimator = TokenEstimator(provider=provider, model=model)
     total_tokens = 0
     for td in tool_defs:
         try:
