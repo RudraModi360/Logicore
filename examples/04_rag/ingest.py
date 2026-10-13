@@ -454,7 +454,7 @@ def _ocr_pdf_to_markdown(pdf_path: str, images_dir: str, save_path: str = None) 
         return ""
 
     # Vision API config
-    api_key = os.environ.get("OPENAI_API_KEY", "sk-E1299H1AW8bqd4vmVjBESrzweXzk73TXFsZd7MhhYLsLNmNJHIJ0ZGEGWUjFKNpt")
+    api_key = os.environ.get("OPENAI_API_KEY", "skxxxxxxxxxxxxxx")
     base_url = os.environ.get("OPENAI_BASE_URL", "https://opencode.ai/zen/v1")
     model = os.environ.get("OCR_MODEL", "mimo-v2.5-free")
 

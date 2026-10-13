@@ -1,13 +1,20 @@
 """Simple interactive chatbot — using SmartAgent with live streaming."""
+
 import asyncio
 import json
 import os
 
-from logicore import SmartAgent
+from logicore import SmartAgent,MCPAgent , BasicAgent , Agent
 from logicore.stream.events import StreamEventType
 from logicore.utils.colors import (
-    colored, error, tool_call, tool_result,
-    DIM, RESET, GRAY, BLUE,
+    colored,
+    error,
+    tool_call,
+    tool_result,
+    DIM,
+    RESET,
+    GRAY,
+    BLUE,
 )
 
 
@@ -56,14 +63,22 @@ def make_stream_handler():
 
 
 async def main():
-    agent = SmartAgent(
+    agent = Agent(
         provider="ollama",
-        model="gpt-oss:20b-cloud",
+        model="qwen3.5:0.8b",
         debug=False,
         telemetry=False,
         max_iterations=60,
         tools=[],
+        model_config={"context_length": 32768, "model_tier": "large"},
     )
+    
+    print(f"Using model: {BLUE}{agent.model_name}{RESET}\n")
+    p = agent.model_profile
+    print("context_length:", p.context_length)
+    print("tier:", p.tier)
+    print("masking_ratio:", p.masking_ratio, "-> protect", p.protection_threshold_tokens(), "tokens")
+    print("compression_ratio:", p.compression_ratio, "-> compress at", p.compression_threshold_tokens(), "tokens")
     on_event = make_stream_handler()
     print("Agent ready. Type 'quit' to exit.\n")
     while (msg := input("You: ").strip()) and msg != "quit":

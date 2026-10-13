@@ -76,7 +76,7 @@ async def run(provider: str, model: str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", default="ollama")
-    parser.add_argument("--model", default="gpt-oss:20b-cloud")
+    parser.add_argument("--model", default="gemma4:cloud")
     args = parser.parse_args()
     asyncio.run(run(args.provider, args.model))
 

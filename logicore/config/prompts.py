@@ -1179,8 +1179,6 @@ You can accomplish tasks involving:
 ## Runtime Context
 - Time: {current_time}
 - Working directory: {cwd}
-- Username: {username}
-- Home directory: {home_dir}
 - Model: {model_name}
 
 You are ready to help. Search for tools, discover solutions, and take action."""
