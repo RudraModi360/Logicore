@@ -213,20 +213,30 @@ pytest tests/test_context_manager.py -k "masking or compression" -v
 Per the agreed workflow, the fixes are prototyped **entirely in `experiments/`**
 first. The real framework (`logicore/`) is untouched until the PO signs off.
 
-- **Prototype:** `experiments/context_engine/fixed.py` — subclasses the working
-  framework machinery and overrides only the buggy methods, so the delta is
-  exactly the fix:
+- **Prototype engine:** `experiments/context_engine/fixed.py` — subclasses the
+  working framework machinery and overrides only the buggy methods, so the delta
+  is exactly the fix:
   - `FixedTokenBudget.should_mask_tool_outputs` — Bug 1 enabler (independent trigger)
   - `FixedCompressionService.__init__` — Bug 2 (model-aware threshold, no 100k floor)
   - `FixedMaskingService._create_masked_content` — `read_file()` retrieval instruction
   - `FixedContextWindowManager.manage` — Bug 1 (gate inversion) + Bug 3 (session sync)
-- **Sandbox:** `python experiments/plan02_context_fix_sandbox.py` — runs each of the
-  three root-bug scenarios twice (BEFORE = real framework / AFTER = prototype) and
-  prints a side-by-side verdict. Traces under `debug/traces/plan02/`.
+- **Live demo on the real prototype agent:** `python experiments/plan02_agent_demo.py`
+  — plugs the context engine into `experiments/prototype_agent.py` (real tools
+  bash/read_file/create_file/edit_file/web_search, real ModelClient, real loop) by
+  wrapping `ModelClient.chat` so masking/compaction run before every LLM call and
+  persist back into the live session. Compare with `--no-context` for the baseline.
 
-Latest sandbox result: **BEFORE = FAIL on all 3, AFTER = PASS on all 3.**
+  Example (small window so masking triggers on one big read):
+  ```
+  python experiments/plan02_agent_demo.py --model ollama/gemma4:cloud \
+      --context-length 8192 --model-tier small \
+      --turns "read <some big file> and report the char count"
+  ```
+  With `--context`: `[ctx] 5580 -> 354 tokens (saved 5226) masked=1`, and the agent
+  re-reads the file on the next turn via the `read_file('<path>')` instruction.
+  With `--no-context`: session stays ~5244 tokens (no masking).
 
-**Next step (blocked on PO):** once the sandbox looks right, port the delta from
+**Next step (blocked on PO):** once the live demo looks right, port the delta from
 `experiments/context_engine/fixed.py` into the framework classes
 (`manager.py`, `compression.py`, `token_budget.py`, `masking.py`) and wire
 `session_provider=self.get_session` in `agent/base.py`.
