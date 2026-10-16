@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 
+
 from logicore import SmartAgent,MCPAgent , BasicAgent , Agent
 from logicore.stream.events import StreamEventType
 from logicore.utils.colors import (
@@ -65,11 +66,11 @@ def make_stream_handler():
 async def main():
     agent = Agent(
         provider="ollama",
-        model="qwen3.5:0.8b",
+        model="gemma4:cloud",
         debug=False,
         telemetry=False,
         max_iterations=60,
-        tools=[],
+        # tools=[],
         model_config={"context_length": 32768, "model_tier": "large"},
     )
     

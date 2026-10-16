@@ -102,3 +102,5 @@ deploy/
 gemini-cli (1)
 
 prob-sol/
+traces/
+prompts/

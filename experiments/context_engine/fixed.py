@@ -10,6 +10,7 @@ buggy method, so the delta is exactly the fix:
   FixedMaskingService._create_masked_content     -> read_file() retrieval instruction
   FixedContextWindowManager.manage               -> Bug 1 (gate inversion) + Bug 3 (session sync)
   FixedContextWindowManager._sync_back_to_session-> Bug 3 persistence helper
+   FixedContextWindowManager._truncate_messages    -> pin active user turn
 
 Nothing here is imported by the framework. Wire it into a sandbox, watch the
 traces, and only once it looks right do we port the delta into logicore/.
@@ -187,6 +188,78 @@ class FixedContextWindowManager(ContextWindowManager):
         self.budget.record_snapshot()
         self._store_result(session_id, result)
         return result, current_messages
+
+    def _truncate_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        target_tokens: int,
+    ) -> List[Dict[str, Any]]:
+        """Emergency truncation that never drops the active user turn.
+
+        The inherited version walks newest-first and BREAKS at the first
+        message that alone exceeds the target — so one fat tool result leaves
+        system-only context, the model loses the question entirely and returns
+        nothing (observed live: 8397 -> 377 tokens, '(no response)').
+        This override pins the latest user message (trimming its content to
+        fit if needed) and SKIPS oversize middle messages instead of breaking.
+        """
+        system_msg = None
+        rest = list(messages)
+        if rest and rest[0].get("role") == "system":
+            system_msg = rest[0]
+            rest = rest[1:]
+
+        def _size(msg: Dict[str, Any]) -> int:
+            content = str(msg.get("content") or "")
+            if msg.get("tool_calls"):
+                content += str(msg["tool_calls"])
+            return self._count_tokens(content)
+
+        latest_user_idx = None
+        for i in range(len(rest) - 1, -1, -1):
+            if rest[i].get("role") == "user":
+                latest_user_idx = i
+                break
+
+        ordered: List[Dict[str, Any]] = []
+        used = 0
+        if system_msg is not None:
+            used += self._count_tokens(str(system_msg.get("content") or ""))
+            ordered.append(system_msg)
+
+        # Reserve room for the pinned question first, trimming it if needed.
+        pinned = None
+        if latest_user_idx is not None:
+            pinned = dict(rest[latest_user_idx])
+            room = max(0, target_tokens - used)
+            size = _size(pinned)
+            if size > room:
+                content = str(pinned.get("content") or "")
+                if room <= 0:
+                    pinned["content"] = "[truncated]"
+                else:
+                    keep_chars = max(64, int(len(content) * room / max(size, 1)))
+                    pinned["content"] = content[:keep_chars] + "...[truncated]"
+                size = _size(pinned)
+            used += size
+
+        # Fill remaining budget newest-first; skip (never break on) oversize.
+        keep = [False] * len(rest)
+        for i in range(len(rest) - 1, -1, -1):
+            if i == latest_user_idx:
+                continue
+            size = _size(rest[i])
+            if used + size > target_tokens:
+                continue
+            keep[i] = True
+            used += size
+
+        for i, msg in enumerate(rest):
+            if i == latest_user_idx:
+                ordered.append(pinned)
+            elif keep[i]:
+                ordered.append(msg)
+        return ordered
 
     def _sync_back_to_session(self, session_id: str, current_messages: List[Dict[str, Any]]) -> None:
         if not self._session_provider:
