@@ -666,18 +666,55 @@ Available skills:
     def _load_structural_tools(self, load_planning=False, load_skills=False):
         """Load the minimum tool set when ``tools=[]``.
 
-        When *load_planning* is True, task management + plan tools are loaded.
-        When *load_skills* is True, skill metadata (index entries) and workspace
-        skills are also registered so the agent can discover and load skills on
-        demand.
+        ``ALWAYS_ON_TOOLS`` (task management, planning, ``load_skill``) are
+        registered unconditionally. The registry contract says these must be
+        available "regardless of ``tools=[]``", and they matter for correctness:
+        without them ``supports_tools`` stays False, so **no tools array is ever
+        sent to the provider**. The model — which still sees tool instructions
+        in the system prompt — then writes its tool call into the answer text
+        instead of emitting a native one, the orchestrator sees no tool calls
+        and returns that text as the final answer. Result: the run stops right
+        where the model tried to act and the user is prompted for the next
+        turn, identically for every provider.
+
+        When *load_planning* is True, the full task management + plan tool set
+        is loaded.  When *load_skills* is True, skill metadata (index entries)
+        and workspace skills are also registered so the agent can discover and
+        load skills on demand.
         """
+        from logicore.tasks import get_task_tools, get_task_tools_with_context
+        from logicore.tools.registry import ToolRegistry
+
+        # Task/plan executors first — their schemas come in below. The agent
+        # always needs to be able to decompose and track multi-step work.
+        self._ensure_task_manager()
+        task_tools = (get_task_tools_with_context(self._task_tool_context)
+                      if self._task_tool_context else get_task_tools())
+        for tool in task_tools:
+            self.tool_executor.register_custom_tool(tool.name, tool.run)
+
         if load_planning:
+            # Plan + task schemas + prompt rebuild.
             self._load_plan_tools_only()
+
+        # ALWAYS_ON floor: never let ``tools=[]`` drop below the minimum set
+        # (also backfills the plan path, which does not include load_skill).
+        existing = {
+            t.get("function", {}).get("name")
+            for t in self.internal_tools
+            if isinstance(t, dict)
+        }
+        missing = [n for n in ALWAYS_ON_TOOLS if n not in existing]
+        if missing:
+            temp = ToolRegistry(enabled_tools=missing)
+            self.internal_tools.extend(temp.schemas)
+            self.supports_tools = True
+
         if load_skills:
             self._load_default_skills()
             self._load_workspace_skills()
-        if not load_planning and not load_skills:
-            self._rebuild_system_prompt_with_tools()
+
+        self._rebuild_system_prompt_with_tools()
 
     def _load_workspace_skills(self):
         """Auto-discover skills from workspace and home directories."""

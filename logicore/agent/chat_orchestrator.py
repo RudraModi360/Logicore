@@ -18,7 +18,7 @@ import asyncio
 from typing import Dict, Any, Callable, List, Optional, Union
 import logging
 
-from logicore.gateway.gateway import NormalizedMessage
+from logicore.gateway.gateway import NormalizedMessage, extract_tool_calls_from_text
 from logicore.security.input_sanitizer import InputSanitizer, InjectionAction
 from logicore.stream.events import StreamEvent, StreamEventType
 from logicore.stream.emitter import StreamEmitter
@@ -546,6 +546,39 @@ class ChatOrchestrator:
             # 2. Parse response
             content, tool_calls, gemini_content = self._parse_response(response)
 
+            # Every tool call must carry an id: some providers (Ollama) return
+            # them without one, and OpenAI-compatible APIs reject a tool reply
+            # that has no matching tool_call_id — which would abort the whole
+            # turn and bounce back to the user prompt. Backfill once here; the
+            # same object is stored in history, so id and reply always match.
+            for _idx, _tc in enumerate(tool_calls):
+                if isinstance(_tc, dict) and not _tc.get("id"):
+                    _func = _tc.get("function")
+                    _fname = _func.get("name") if isinstance(_func, dict) else _tc.get("name")
+                    _tc["id"] = f"call_{_fname or 'tool'}_{_idx}"
+
+            # Fallback: recover tool calls the model wrote into its text.
+            # When a provider reports no native tool calls (unsupported by the
+            # model, or dropped during normalization) the answer would normally
+            # be treated as final — the run stops exactly where the model tried
+            # to act and the user is asked for the next turn. Only fenced JSON
+            # naming an *actually registered* tool is executed (see helper).
+            if not tool_calls and content:
+                _allowed = [
+                    t.get("function", {}).get("name")
+                    for t in (all_tools if all_tools is not None else [])
+                    if isinstance(t, dict) and t.get("function", {}).get("name")
+                ] or tool_names
+                recovered_calls = extract_tool_calls_from_text(content, _allowed)
+                if recovered_calls:
+                    tool_calls = recovered_calls
+                    if self.debug:
+                        logger.debug(
+                            "[ChatOrchestrator] Recovered %d text-embedded tool call(s): %s",
+                            len(tool_calls),
+                            [tc.get("function", {}).get("name") for tc in tool_calls],
+                        )
+
             # Execute AFTER_MODEL hooks
             after_model_ctx = HookContext(
                 hook_point=HookPoint.AFTER_MODEL,
@@ -677,6 +710,33 @@ class ChatOrchestrator:
             for tc in tool_calls:
                 name, args, tc_id = self._extract_tool_call_details(tc)
                 if not name:
+                    # Malformed call (no usable tool name). Never leave it
+                    # unanswered: an assistant message with tool_calls and no
+                    # matching tool reply makes the *next* provider call fail
+                    # validation (400), which aborts the turn and returns
+                    # control to the user as if the model had stopped. Reply
+                    # with a synthetic error so the model can self-correct.
+                    malformed = self.agent.tool_executor.normalize_tool_result(
+                        "unknown_tool",
+                        {
+                            "success": False,
+                            "error": (
+                                "Malformed tool call: no tool name could be read from "
+                                "the request. Re-issue it in the standard shape "
+                                '{"name": "...", "arguments": {...}}.'
+                            ),
+                        },
+                    )
+                    tool_msg = {
+                        "role": "tool",
+                        "name": "unknown_tool",
+                        "content": self.agent._serialize_tool_result_for_model("unknown_tool", malformed),
+                    }
+                    if tc_id:
+                        tool_msg["tool_call_id"] = tc_id
+                    session.add_message(tool_msg)
+                    if self.debug:
+                        logger.warning(f"[Tool] Dropped malformed tool call (unparseable): {str(tc)[:200]}")
                     continue
 
                 # Loop detection: feed the tool call. Detects consecutive repeats
@@ -1345,13 +1405,31 @@ class ChatOrchestrator:
         return ("continue", None)
 
     def _extract_tool_call_details(self, tc) -> tuple[str, dict, str]:
-        """Extract name, args, id from a tool call."""
+        """Extract name, args, id from a tool call.
+
+        Accepts the nested OpenAI shape (``{"function": {...}}``) as well as
+        the flat shape some providers/tools emit (``{"name": ..., "arguments":
+        ...}``), so a parseable call is never dropped just because the envelope
+        differs between providers.
+        """
         try:
             if isinstance(tc, dict):
                 func = tc.get('function')
-                if not isinstance(func, dict):
-                    return None, None, None
-                return func.get('name'), func.get('arguments', {}), tc.get('id')
+                if isinstance(func, dict):
+                    args = func.get('arguments')
+                    if args is None:
+                        args = tc.get('arguments', {})
+                    return func.get('name') or tc.get('name'), args, tc.get('id')
+                # Flat shape: {"name": ..., "arguments"/"args"/"params": {...}}
+                name = tc.get('name') or tc.get('tool_name') or tc.get('tool')
+                if name:
+                    args = tc.get('arguments')
+                    if args is None:
+                        args = tc.get('args', tc.get('params', {}))
+                    return name, args, tc.get('id')
+                # Unreadable name — still surface the id so the caller can
+                # post a matching tool reply (otherwise history dangles).
+                return None, None, tc.get('id')
             else:
                 func = getattr(tc, 'function', None)
                 return (
@@ -1361,7 +1439,7 @@ class ChatOrchestrator:
                 )
         except Exception as e:
             logger.error(f"Failed to parse tool call: {e}")
-            return None, None, None
+            return None, None, getattr(tc, "id", None)
 
     async def _execute_single_tool(self, name, args, tc_id, session, session_id, callbacks, local_result_cache):
         """Execute a single tool call and return result."""

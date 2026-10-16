@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional, Callable
 import asyncio
 import inspect
 import logging
+import re as _re
 
 logger = logging.getLogger(__name__)
 
@@ -256,19 +257,47 @@ def _convert_local_images_to_base64(messages: List[Dict[str, Any]]) -> List[Dict
 
 
 def _normalize_openai_tool_calls(raw_tool_calls) -> List[Dict[str, Any]]:
-    """Convert SDK tool_calls objects to standard dicts."""
+    """Convert SDK tool_calls objects *or* plain dicts to standard dicts.
+
+    Several callers hand us raw JSON instead of SDK objects (the Azure
+    Inference HTTP fallback, OpenAI-compatible proxies, mocks/tests). Those
+    dict-shaped calls must not be silently dropped: a lost tool call makes the
+    orchestrator see ``tool_calls == []`` and treat the response as the final
+    answer, so the run stops right where the model tried to call a tool and
+    control bounces back to the user for the next turn.
+    """
     tool_calls = []
-    if raw_tool_calls:
-        for tc in raw_tool_calls:
-            if hasattr(tc, "function"):
-                tool_calls.append({
-                    "id": getattr(tc, "id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                })
+    if not raw_tool_calls:
+        return tool_calls
+
+    for tc in raw_tool_calls:
+        if isinstance(tc, dict):
+            func = tc.get("function")
+            if isinstance(func, dict):
+                name = func.get("name")
+                arguments = func.get("arguments")
+            else:
+                # Flat shape: {"name": ..., "arguments"/"args": ...}
+                name = tc.get("name")
+                arguments = tc.get("arguments", tc.get("args"))
+            if not name:
+                continue
+            if arguments is None:
+                arguments = "{}"
+            tool_calls.append({
+                "id": tc.get("id") or f"call_{name}",
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            })
+        elif hasattr(tc, "function"):
+            tool_calls.append({
+                "id": getattr(tc, "id", ""),
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            })
     return tool_calls
 
 
@@ -296,3 +325,159 @@ def _accumulate_openai_stream_tool_calls(tool_call_chunks: dict) -> List[Dict[st
             "function": {"name": tc["name"], "arguments": arguments},
         })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Text-embedded tool call recovery (provider-agnostic fallback)
+# ---------------------------------------------------------------------------
+
+_FENCED_BLOCK_RE = _re.compile(
+    r"```[ \t]*([A-Za-z0-9_+\-]*)?[ \t]*(?:\r?\n)?(.*?)```", _re.DOTALL
+)
+
+# Argument-bearing keys, tried in order, for flat/dict tool-call shapes.
+_ARGUMENT_KEYS = ("arguments", "args", "params", "parameters")
+# Name-bearing keys, tried in order.
+_NAME_KEYS = ("tool_name", "tool", "name")
+
+
+def _coerce_tool_call(candidate: Any, available_tools: Optional[set] = None) -> Optional[Dict[str, Any]]:
+    """Turn one parsed JSON candidate into a normalized tool call dict.
+
+    Accepted shapes (what models actually emit when they write the call
+    instead of — or in addition to — using the native tool-call channel):
+
+    - ``{"type": "function", "function": {"name": ..., "arguments": {...}}}``
+    - ``{"name": ..., "arguments": {...}}``
+    - ``{"tool_name": ..., "params"/"arguments": {...}}``
+
+    Returns ``None`` when the candidate is not a tool call, or when its name
+    is not in ``available_tools`` (guard against executing JSON the model only
+    *mentioned* in prose/examples).
+    """
+    import json as _json
+
+    if not isinstance(candidate, dict):
+        return None
+
+    func = candidate.get("function")
+    if isinstance(func, dict):
+        name = func.get("name")
+        arguments = func.get("arguments")
+    else:
+        name = None
+        for key in _NAME_KEYS:
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                name = value.strip()
+                break
+        arguments = None
+        for key in _ARGUMENT_KEYS:
+            if key in candidate:
+                arguments = candidate.get(key)
+                break
+
+    if not name or not isinstance(name, str):
+        return None
+    # Guard: only execute calls to tools that are actually registered.
+    if available_tools is not None and name not in available_tools:
+        return None
+
+    if arguments is None:
+        arguments = {}
+    elif isinstance(arguments, str):
+        try:
+            parsed = _json.loads(arguments) if arguments.strip() else {}
+        except (ValueError, TypeError):
+            parsed = arguments  # keep raw; tool executor reports a clear error
+        arguments = parsed
+    if not isinstance(arguments, dict):
+        # e.g. a JSON array/scalar — wrap so the executor still gets an object.
+        arguments = {"input": arguments}
+
+    return {
+        "id": f"call_text_{name}",
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+def extract_tool_calls_from_text(
+    content: Optional[str],
+    available_tools: Optional[List[str]] = None,
+    max_calls: int = 4,
+) -> List[Dict[str, Any]]:
+    """Recover tool calls a model wrote into its answer text.
+
+    Used as a fallback by the orchestrator when the provider reported **no**
+    native tool calls: models that can't (or don't) emit the native channel —
+    or providers that drop them — print the call as a fenced JSON block, and
+    without this the orchestrator treats that text as the final response, the
+    turn ends and the user is asked for input again ("stops right when it made
+    the tool call").
+
+    Conservative by design so a JSON snippet the model merely *mentions* is
+    never executed: only fenced ``` blocks (or a message that is a single JSON
+    object) are considered, the payload must be a dict, and the tool name must
+    be in ``available_tools`` when that is provided.
+    """
+    if not content or not content.strip():
+        return []
+
+    allowed = set(available_tools) if available_tools is not None else None
+    candidates: List[Any] = []
+
+    for match in _FENCED_BLOCK_RE.finditer(content):
+        block = match.group(2).strip()
+        if not block:
+            continue
+        try:
+            candidates.append(_json_loads_object(block))
+        except (ValueError, TypeError):
+            continue
+
+    # Whole message is a bare JSON object (no fence).
+    stripped = content.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            candidates.append(_json_loads_object(stripped))
+        except (ValueError, TypeError):
+            pass
+
+    # Later blocks are the model's most recent intent → try them first.
+    recovered: List[Dict[str, Any]] = []
+    seen_names = set()
+    for candidate in reversed(candidates):
+        if isinstance(candidate, list):
+            # A block holding a list of calls: {"calls": [...]} style payloads
+            # are rare; keep it simple and only accept dicts of a single call.
+            continue
+        call = _coerce_tool_call(candidate, allowed)
+        if call and call["function"]["name"] not in seen_names:
+            recovered.append(call)
+            seen_names.add(call["function"]["name"])
+            if len(recovered) >= max_calls:
+                break
+
+    recovered.reverse()
+    return recovered
+
+
+def _json_loads_object(text: str) -> Any:
+    """``json.loads`` with a small tolerance for prose around the object.
+
+    Models often wrap the call ("Here is the call:\n```json ... ```"), so if a
+    strict parse fails we retry on the outermost ``{...}`` region.
+    """
+    import json
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        obj = json.loads(text[start:end + 1])
+    if isinstance(obj, dict):
+        return obj
+    raise ValueError("not a JSON object")

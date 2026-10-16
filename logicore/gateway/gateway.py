@@ -21,6 +21,7 @@ from .base import (
     _convert_local_images_to_base64,
     _normalize_openai_tool_calls,
     _accumulate_openai_stream_tool_calls,
+    extract_tool_calls_from_text,
 )
 from .openai_gateway import OpenAIGateway
 from .gemini_gateway import GeminiGateway
@@ -42,4 +43,5 @@ __all__ = [
     "ResilientGateway",
     "get_gateway_for_provider",
     "get_resilient_gateway",
+    "extract_tool_calls_from_text",
 ]
