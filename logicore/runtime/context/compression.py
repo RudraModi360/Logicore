@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -119,6 +120,7 @@ SUMMARY:"""
         config: RuntimeConfig,
         llm_provider: Optional[LLMProvider] = None,
         token_counter: Optional[Callable[[str], int]] = None,
+        model_name: str = "default",
     ):
         """
         Args:
@@ -128,6 +130,10 @@ SUMMARY:"""
         """
         self.config = config
         self.llm = llm_provider
+        self.model_name = model_name
+        self.compression_threshold_tokens = config.get_compression_threshold_for_model(
+            model_name, llm_provider
+        )
         from logicore.runtime.context.token_estimator import TokenEstimator
         self._estimator = token_counter if isinstance(token_counter, TokenEstimator) else TokenEstimator(token_counter)
         self._token_counter = self._estimator.count_tokens
@@ -145,26 +151,7 @@ SUMMARY:"""
     def _count_tokens(self, text: str) -> int:
         """Count tokens in text."""
         return self._token_counter(text)
-    
-    def _estimate_message_tokens(self, messages: List[Dict[str, Any]]) -> int:
-        """Estimate tokens in a list of messages."""
-        total = 0
-        for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total += self._count_tokens(content)
-            elif isinstance(content, list):
-                # Handle multimodal content
-                for part in content:
-                    if isinstance(part, dict) and "text" in part:
-                        total += self._count_tokens(part["text"])
-            
-            # Tool calls add some overhead
-            if "tool_calls" in msg:
-                total += self._count_tokens(str(msg["tool_calls"])) // 2
         
-        return total
-    
     def _find_split_point(
         self,
         messages: List[Dict[str, Any]],
@@ -251,6 +238,59 @@ SUMMARY:"""
         
         return "\n\n".join(parts)
     
+    _CORRECTION_PATTERN = re.compile(
+        r"i said|use\s+.+?\s+not\s+|you got.*?wrong|not\s+.+?\s+model|wrong.*?model",
+        re.IGNORECASE,
+    )
+    _MODEL_PATTERN = re.compile(
+        r"MiniCPM[-o]?\s*\d*\.?\d*|Phi-?3\s*Vision|Moondream2|Llava[-v]?\d*\.?\d*|Qwen2-VL-\d*\.?\d*",
+        re.IGNORECASE,
+    )
+    
+    def _extract_key_facts(
+        self,
+        messages: List[Dict[str, Any]],
+        limit: int = 10,
+    ) -> List[str]:
+        """Facts the summary must keep (user corrections, model references).
+
+        Same signals ContextWindowManager pins during masking/truncation, so
+        summarization cannot drop what the other engines protect.
+        """
+        facts: List[str] = []
+        seen: set = set()
+        
+        def add(fact: str) -> None:
+            fact = " ".join(fact.split())[:200]
+            if fact and fact not in seen:
+                seen.add(fact)
+                facts.append(fact)
+        
+        for msg in messages:
+            if len(facts) >= limit:
+                break
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and "text" in part
+                )
+            text = str(content or "")
+            if not text:
+                continue
+            if role == "user":
+                match = self._CORRECTION_PATTERN.search(text)
+                if match:
+                    add(text[max(0, match.start() - 60):match.end() + 60].strip())
+            elif role in ("tool", "assistant"):
+                for match in self._MODEL_PATTERN.finditer(text):
+                    add(match.group(0))
+                    if len(facts) >= limit:
+                        break
+        return facts
+    
     async def compress(
         self,
         messages: List[Dict[str, Any]],
@@ -270,8 +310,8 @@ SUMMARY:"""
             CompressionResult with status and compressed messages
         """
         # Check if compression needed
-        original_tokens = self._estimate_message_tokens(messages)
-        threshold = self.config.context.compression_threshold_tokens
+        original_tokens = self._estimator.count_messages_tokens(messages)
+        threshold = self.compression_threshold_tokens
         
         if original_tokens < threshold:
             return CompressionResult(
@@ -326,12 +366,25 @@ SUMMARY:"""
             )
         
         try:
+            # Extract key facts that must survive compression (model names,
+            # user corrections, decisions) so they aren't lost in summarization.
+            key_facts = self._extract_key_facts(messages)
+            facts_block = ""
+            if key_facts:
+                facts_block = (
+                    "\n\nCRITICAL FACTS TO PRESERVE (must appear in summary):\n"
+                    + "\n".join(f"- {f}" for f in key_facts)
+                    + "\n"
+                )
+
             conversation_text = self._format_messages_for_summary(to_compress)
-            prompt = self.COMPRESSION_PROMPT.format(conversation=conversation_text)
+            prompt = self.COMPRESSION_PROMPT.format(
+                conversation=conversation_text + facts_block
+            )
             
             logger.info(
                 f"[CompressionService] 🔄 Compressing {len(to_compress)} messages "
-                f"({original_tokens} tokens → target {self.config.context.compression_threshold_tokens})"
+                f"({original_tokens} tokens → target {self.compression_threshold_tokens})"
             )
             print(
                 f"\n{info('[CompressionService]')} Compressing {len(to_compress)} messages "
@@ -386,7 +439,7 @@ SUMMARY:"""
             
             # Build compressed history
             summary_tokens = self._count_tokens(summary)
-            compressed_tokens = summary_tokens + self._estimate_message_tokens(to_preserve)
+            compressed_tokens = summary_tokens + self._estimator.count_messages_tokens(to_preserve)
             
             # Check if compression actually helped
             if compressed_tokens >= original_tokens:

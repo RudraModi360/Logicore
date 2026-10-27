@@ -8,15 +8,30 @@ Prior to this fix, tool output masking (disk offloading) was completely unreacha
 ---
 
 ## Status & Tracking
-- **Status:** `SANDBOX PASS — AWAITING PO SIGN-OFF`
+- **Status:** `PHASE-1 HYGIENE SHIPPED · PHASE 2–4 HARDENING IN PROGRESS (PLAN 02B)`
 - **Owner:** Developer Agent Team
 - **Reviewer:** Product Owner
 - **Target Files:**
-  - [`logicore/runtime/context/manager.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/manager.py) [MODIFY]
-  - [`logicore/runtime/context/compression.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/compression.py) [MODIFY]
-  - [`logicore/runtime/context/token_budget.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/token_budget.py) [MODIFY]
-  - [`logicore/runtime/context/masking.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/masking.py) [MODIFY]
+  - [`logicore/runtime/context/manager.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/manager.py) [MODIFIED — A1 only; Phase 3 in 02B]
+  - [`logicore/runtime/context/compression.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/compression.py) [MODIFIED — A1 only; Phase 2 in 02B]
+  - [`logicore/runtime/context/token_budget.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/token_budget.py) [MODIFIED — Phase 1]
+  - [`logicore/runtime/context/masking.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/masking.py) [MODIFIED — Phase 1]
+  - [`logicore/runtime/context/tool_output_distiller.py`](file:///c:/Users/rudra/Desktop/Scratchy/logicore/runtime/context/tool_output_distiller.py) [MODIFY — Phase 4, Group B merge]
+  - `experiments/context_engine/distill.py` [EXPERIMENT — Group B; retires after Phase 4 port]
   - `tests/test_context_manager.py` [MODIFY / ADD]
+
+### Progress
+- **Group A:** A1 token-estimator delegation **ported to `logicore/`**
+  (`manager.py::_estimate_messages_tokens`, `manager.py::_categorize_tokens`,
+  `compression.py::_estimate_message_tokens` — uncommitted working tree).
+  A2 hard limit, A3 window-relative `min_prunable`, A4 fresh compression client,
+  A5 `context_manage` telemetry, Bug 1 gate inversion, Bug 3 session sync: **NOT**
+  ported yet — covered by sibling plan `02B_FRAMEWORK_HARDENING_AND_HARD_TRUNCATION.md`.
+- **Group B (tool-output distillation at insertion):** experiment done + all gates PASS.
+  Port target merged into Phase 4 of plan 02B: offload-only design PO-approved,
+  merged into existing `tool_output_distiller.py` (no parallel module).
+- **Group C (compaction quality / summary):** not started.
+- **pytest:** baseline (7 pre-existing failures).
 
 ---
 
@@ -240,3 +255,46 @@ first. The real framework (`logicore/`) is untouched until the PO signs off.
 `experiments/context_engine/fixed.py` into the framework classes
 (`manager.py`, `compression.py`, `token_budget.py`, `masking.py`) and wire
 `session_provider=self.get_session` in `agent/base.py`.
+
+---
+
+## Group B: Tool-Output Distillation at Insertion (experiment — awaiting sign-off)
+
+**Premise:** masking/compression (Group A) are *reactive* — they wait for a bulky
+output to already sit in the session, then reclaim space under budget pressure.
+Distillation is *preventive* — it runs the instant a tool returns, so the bulky
+payload never enters the context window at all. Group B shrinks how often Group A
+has to fire; the two are complementary, not competing.
+
+### Design
+- **New:** `experiments/context_engine/distill.py`
+  - `ToolOutputDistiller` — if a tool result exceeds a threshold, the full output
+    is saved to `temp/<session>/` and replaced with a ~200-char excerpt + path +
+    `read_file('<path>')` instruction (same retrieval story as masking).
+  - `DISTILL_EXEMPT_TOOLS` — `read_file` plus the interactive tools
+    (`ask_user`/`human_feedback`/…). **Why:** our own stubs tell the agent to use
+    `read_file` to retrieve full content; distilling `read_file`'s result would
+    make the stub self-defeating (seen live: agent re-read, got another stub,
+    gave up). Exempting it fixed the retrieval path — agent then retrieved the
+    real value (69,082,000) from an Insee page.
+  - `wrap_tool_impls()` — wraps `TOOL_IMPLS` at the tool boundary (the demo's
+    existing hook point), so `run_turn` only ever sees the distilled string.
+  - Threshold scales with the window (`max(500, window // 10)`) — same philosophy
+    as A3's `min_prunable` floor, not a fixed absolute.
+- **Wiring:** `experiments/plan02_agent_demo.py` — `--distill/--no-distill`
+  (default ON), per-turn `[distill] checked/distilled/tokens_saved` report.
+- **Coexistence fix (prototype, for the port):** `FixedMaskingService` now
+  overrides `_is_already_masked` to treat `[OUTPUT_DISTILLED]` as handled too —
+  otherwise masking would re-mask an already-distilled stub (wasted double
+  indirection).
+
+### Validation Gates (all PASS)
+| Gate | Result |
+|---|---|
+| Replay (original 15k overflow trace) | 3 over-threshold `web_search` payloads distilled 8495→4247 tok (under the 10687 hard limit alone); exempt + idempotency checks pass |
+| Coexistence | masking recognizes `[OUTPUT_DISTILLED]`, re-masks 0, no double indirection |
+| Live (real agent, 4-turn, 8192 window) | distiller fired 4×; peak single-request 4810 ≤ hard_limit 5836 ≤ window 8192; `read_file` passes through intact; retrieval succeeds |
+| pytest | baseline (7 pre-existing failures; the 8th was the known-flaky perf test, passes in isolation) |
+
+**Blocked on PO:** sign-off to port Group B (`distill.py` + `_is_already_masked`
+override + demo wiring pattern) into `logicore/`.

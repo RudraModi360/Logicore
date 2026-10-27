@@ -177,11 +177,11 @@ class OllamaGateway(ProviderGateway):
             if max_tokens:
                 options["num_predict"] = max_tokens
             # Pass context window size to Ollama (default 4096 is too small for most agents)
-            ctx = getattr(self, "context_window", None)
+            ctx = getattr(self.provider, "context_window", None)
             if ctx is None:
                 try:
                     from logicore.runtime.context.token_estimator import get_model_context_window
-                    ctx = get_model_context_window(self.model_name)
+                    ctx = get_model_context_window(self.model_name, self.provider)
                 except Exception:
                     pass
             if ctx:
@@ -318,11 +318,11 @@ class OllamaGateway(ProviderGateway):
                 options = {}
                 if max_tokens:
                     options["num_predict"] = max_tokens
-                ctx = getattr(self, "context_window", None)
+                ctx = getattr(self.provider, "context_window", None)
                 if ctx is None:
                     try:
                         from logicore.runtime.context.token_estimator import get_model_context_window
-                        ctx = get_model_context_window(self.model_name)
+                        ctx = get_model_context_window(self.model_name, self.provider)
                     except Exception:
                         pass
                 if ctx:

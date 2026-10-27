@@ -432,17 +432,23 @@ def estimate_tokens(messages: List[Dict[str, Any]]) -> int:
 
 
 class PrototypeTracer:
-    """Append-only JSONL tracer for the prototype agent loop."""
+    """Append-only JSONL tracer for the prototype agent loop.
+
+    When an ``estimator`` (framework TokenEstimator) is provided, every
+    ``est_tokens`` field is computed with it (the single source of truth)
+    instead of the rough char/4 heuristic, so trace numbers are authoritative.
+    """
 
     def __init__(self, path: Optional[str] = None, enabled: Optional[bool] = None,
                  provider: str = "", model: str = "", trace_dir: Optional[str] = None,
-                 profile: Optional[Dict[str, Any]] = None):
+                 profile: Optional[Dict[str, Any]] = None, estimator: Optional[Any] = None):
         if enabled is None:
             enabled = os.environ.get("PROTOTYPE_TRACE", "1") != "0"
         self.enabled = bool(enabled)
         self.provider = provider
         self.model = model
         self.profile = dict(profile or {})
+        self._estimator = estimator
         self.path: Optional[str] = None
         self._file = None
         self._seq = 0
@@ -461,6 +467,12 @@ class PrototypeTracer:
             path = os.path.join(root, f"prototype_{stamp}_{os.getpid()}.jsonl")
         self.path = path
         self._file = open(path, "a", encoding="utf-8")
+
+    def _count(self, messages: List[Dict[str, Any]]) -> int:
+        """Authoritative token count: framework estimator when present, else char/4."""
+        if self._estimator is not None:
+            return self._estimator.count_messages_tokens(messages)
+        return estimate_tokens(messages)
 
     # -- plumbing ---------------------------------------------------------- #
     def _record(self, kind: str, **payload: Any) -> None:
@@ -509,11 +521,11 @@ class PrototypeTracer:
         self._record("turn_start",
                      user_input=_clip(user_input, 20000),
                      session_messages=len(messages),
-                     est_tokens=estimate_tokens(messages))
+                     est_tokens=self._count(messages))
 
     def llm_request(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> None:
         self.counters["llm_calls"] += 1
-        est = estimate_tokens(messages)
+        est = self._count(messages)
         limit = int(self.profile.get("context_length") or 0)
         self._record("llm_request",
                      message_count=len(messages),
@@ -551,8 +563,34 @@ class PrototypeTracer:
                      final_response=_clip(final_response, 20000),
                      iterations=iterations,
                      session_messages=len(messages),
-                     est_tokens=estimate_tokens(messages),
+                     est_tokens=self._count(messages),
                      transcript=_jsonable(messages))
+
+    def context_manage(self, result: Any) -> None:
+        """Record what the context manager did before an LLM request (A5).
+
+        Captures tokens-before/after-manage, the action flags, tokens saved,
+        and the estimator's accuracy class so a trace is self-explanatory and
+        has exactly one token authority per event.
+        """
+        masking = getattr(result, "masking_result", None)
+        compression = getattr(result, "compression_result", None)
+        self._record(
+            "context_manage",
+            original_tokens=getattr(result, "original_tokens", 0),
+            final_tokens=getattr(result, "final_tokens", 0),
+            tokens_saved=getattr(result, "tokens_saved", 0),
+            masked=bool(getattr(result, "masked", False)),
+            masked_count=(masking.masked_count if masking else 0),
+            compressed=bool(getattr(result, "compressed", False)),
+            compressed_status=(compression.status.value if compression else None),
+            truncated=bool(getattr(result, "truncated", False)),
+            hard_enforced=bool(getattr(result, "hard_enforced", False)),
+            hard_limit=getattr(result, "hard_limit", None),
+            tokens_before_enforce=getattr(result, "tokens_before_enforce", None),
+            accuracy_class=(self._estimator.get_accuracy_class()
+                            if self._estimator is not None else None),
+        )
 
     def error(self, exc: BaseException, phase: str = "turn") -> None:
         self._record("error", phase=phase,

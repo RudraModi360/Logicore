@@ -6,10 +6,18 @@ from experiments.context_engine.fixed import (
     FixedCompressionService,
     FixedContextWindowManager,
 )
+from experiments.context_engine.distill import (
+    ToolOutputDistiller,
+    wrap_tool_impls,
+    DISTILLED_INDICATOR,
+)
 
 __all__ = [
     "FixedTokenBudget",
     "FixedMaskingService",
     "FixedCompressionService",
     "FixedContextWindowManager",
+    "ToolOutputDistiller",
+    "wrap_tool_impls",
+    "DISTILLED_INDICATOR",
 ]

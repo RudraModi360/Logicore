@@ -176,6 +176,7 @@ class Agent:
             model_name=getattr(self, 'model_name', 'default'),
             debug=debug,
             telemetry_tracker=self.telemetry_tracker if self.telemetry_enabled else None,
+            session_provider=self.get_session,
         )
 
         # Reasoning level
@@ -1279,8 +1280,10 @@ Available skills:
                 if parent:
                     session.metadata["last_tool_directory"] = parent
 
-    def _serialize_tool_result_for_model(self, tool_name: str, result: Dict[str, Any], reused: bool = False) -> str:
-        return self.context_engine.distill_tool_result(tool_name, result, reused)
+    def _serialize_tool_result_for_model(
+        self, tool_name: str, result: Dict[str, Any], reused: bool = False, session_id: str = "default"
+    ) -> str:
+        return self.context_engine.distill_tool_result(tool_name, result, reused, session_id=session_id)
 
     # === Task Management ===
     

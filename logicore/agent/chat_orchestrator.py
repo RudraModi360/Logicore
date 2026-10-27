@@ -730,7 +730,7 @@ class ChatOrchestrator:
                     tool_msg = {
                         "role": "tool",
                         "name": "unknown_tool",
-                        "content": self.agent._serialize_tool_result_for_model("unknown_tool", malformed),
+                        "content": self.agent._serialize_tool_result_for_model("unknown_tool", malformed, session_id=session_id),
                     }
                     if tc_id:
                         tool_msg["tool_call_id"] = tc_id
@@ -806,7 +806,7 @@ class ChatOrchestrator:
                     tool_msg = {
                         "role": "tool",
                         "name": name,
-                        "content": self.agent._serialize_tool_result_for_model(name, result),
+                        "content": self.agent._serialize_tool_result_for_model(name, result, session_id=session_id),
                     }
                     if tc_id:
                         tool_msg["tool_call_id"] = tc_id
@@ -846,7 +846,7 @@ class ChatOrchestrator:
                     tool_msg = {
                         "role": "tool",
                         "name": name,
-                        "content": self.agent._serialize_tool_result_for_model(name, result),
+                        "content": self.agent._serialize_tool_result_for_model(name, result, session_id=session_id),
                     }
                     if tc_id:
                         tool_msg["tool_call_id"] = tc_id
@@ -897,7 +897,7 @@ class ChatOrchestrator:
                 
                 # Apply guardrail guidance to result
                 if guardrail_decision.action in {"warn", "halt"}:
-                    result_str = self.agent._serialize_tool_result_for_model(name, result)
+                    result_str = self.agent._serialize_tool_result_for_model(name, result, session_id=session_id)
                     result_str = append_toolguard_guidance(result_str, guardrail_decision)
                     # Update the result content with guidance
                     if isinstance(result, dict):
@@ -1452,7 +1452,7 @@ class ChatOrchestrator:
             if callbacks.get("on_tool_end"):
                 await self._fire_callback(callbacks["on_tool_end"], session_id, name, result)
 
-            tool_msg = {"role": "tool", "name": name, "content": self.agent._serialize_tool_result_for_model(name, result)}
+            tool_msg = {"role": "tool", "name": name, "content": self.agent._serialize_tool_result_for_model(name, result, session_id=session_id)}
             if tc_id:
                 tool_msg["tool_call_id"] = tc_id
             session.add_message(tool_msg)
@@ -1478,7 +1478,7 @@ class ChatOrchestrator:
         tool_msg = {
             "role": "tool",
             "name": name,
-            "content": self.agent._serialize_tool_result_for_model(name, result)
+            "content": self.agent._serialize_tool_result_for_model(name, result, session_id=session_id)
         }
         if tc_id:
             tool_msg["tool_call_id"] = tc_id

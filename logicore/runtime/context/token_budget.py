@@ -118,10 +118,15 @@ class TokenBudget:
         self.context_window = config.get_model_context_window(model_name, provider)
         
         # Calculate thresholds
-        self.compression_threshold = config.get_compression_threshold_for_model(model_name)
+        self.compression_threshold = config.get_compression_threshold_for_model(
+            model_name, provider
+        )
         
         # Reserved tokens for response (ensure model can respond)
-        self.reserved_for_response = min(4096, self.context_window // 4)
+        self.reserved_for_response = min(
+            config.context.reserved_response_cap,
+            int(self.context_window * config.context.reserved_response_ratio),
+        )
         
         # Current usage
         self._usage = TokenUsage()
@@ -179,9 +184,17 @@ class TokenBudget:
         return self._usage.total >= self.compression_threshold
     
     def should_mask_tool_outputs(self) -> bool:
-        """Check if tool output masking should be triggered."""
+        """Check whether masking is needed from tool or total-context pressure."""
         tool_result_tokens = self._usage.by_category.get(TokenCategory.TOOL_RESULTS, 0)
-        return tool_result_tokens >= self.config.context.protection_threshold_tokens
+        tool_threshold = min(
+            self.config.context.protection_threshold_tokens,
+            int(self.context_window * 0.35),
+        )
+        tool_pressure = tool_result_tokens >= tool_threshold
+        total_pressure = self.get_usage_ratio() >= (
+            self.config.context.compression_threshold_ratio - 0.20
+        )
+        return tool_pressure or total_pressure
     
     def get_compression_target(self) -> int:
         """Get target token count after compression."""

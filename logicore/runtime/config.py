@@ -130,19 +130,39 @@ class ContextConfig:
     
     # Tool output masking: trigger pruning when prunable tokens exceed N
     min_prunable_tokens: int = 10000
-    
+
+    # Tool output masking: tools whose outputs are never masked (history backstop;
+    # the distiller keeps its own config-driven exempt set - insertion-time and
+    # history-time stages have different semantics)
+    masking_exempt_tools: List[str] = field(
+        default_factory=lambda: ["ask_user", "human_feedback", "get_user_input", "confirm"]
+    )
+
+    # Reserved tokens reserved for model response generation
+    reserved_response_cap: int = 4096
+    reserved_response_ratio: float = 0.25
+
+    # Hard limit safety margin: enforced prompt cap = (window - reserve) * (1 - margin)
+    hard_limit_margin: float = 0.05
+
     # Protect the most recent turn from masking
     protect_latest_turn: bool = True
     
     # Max token budget for function responses in preserved history
     function_response_token_budget: int = 50000
     
-    # Tool output distillation: summarize outputs larger than N tokens
+    # Tool output distillation: summarize/offload outputs larger than N tokens.
+    # The distiller runs at the smaller of this absolute cap and the
+    # window-scaled threshold (window // 10, min 500 tokens).
     distillation_threshold_tokens: int = 8000
-    
-    # Max size for distillation (skip if larger)
-    max_distillation_size: int = 1000000
-    
+
+    # Tool output distillation: tools whose results are never distilled
+    # (insertion-time stage). read_file must pass so the agent sees the value
+    # it just fetched; masking (history backstop) keeps its own separate set.
+    distill_exempt_tools: List[str] = field(
+        default_factory=lambda: ["read_file", "ask_user", "human_feedback", "get_user_input", "confirm"]
+    )
+
     # System prompt max tokens (truncate if exceeded). Token-based cap so the
     # framework measures the same unit the LLM counts, eliminating the
     # char-vs-token mismatch that caused premature 40k "token" truncation.
@@ -318,9 +338,9 @@ class RuntimeConfig:
         from logicore.runtime.context.token_estimator import get_model_context_window
         return get_model_context_window(model_name, provider)
     
-    def get_compression_threshold_for_model(self, model_name: str) -> int:
+    def get_compression_threshold_for_model(self, model_name: str, provider=None) -> int:
         """Calculate compression threshold based on model's context window."""
-        context_window = self.get_model_context_window(model_name)
+        context_window = self.get_model_context_window(model_name, provider)
         threshold = int(context_window * self.context.compression_threshold_ratio)
         return max(threshold, 1000)  # Minimum 1000 tokens
     
@@ -358,6 +378,11 @@ class RuntimeConfig:
             val = _raw(key)
             if val:
                 return val.lower() in ("true", "1", "yes", "on")
+
+        def get_env_list(key: str, default: List[str]) -> List[str]:
+            val = _raw(key)
+            if val:
+                return [t.strip() for t in val.split(",") if t.strip()]
             return default
         
         # Map settings fields to RuntimeConfig
@@ -379,6 +404,17 @@ class RuntimeConfig:
                 compression_threshold_tokens=get_env_int("LOGICORE_COMPRESSION_TOKENS", 100000),
                 protection_threshold_tokens=get_env_int("LOGICORE_PROTECTION_TOKENS", 20000),
                 min_prunable_tokens=get_env_int("LOGICORE_MIN_PRUNABLE_TOKENS", getattr(settings, "CONTEXT_TOOL_OUTPUT_MASK_THRESHOLD", 10000)),
+                reserved_response_cap=get_env_int("LOGICORE_RESERVED_RESPONSE_CAP", 4096),
+                reserved_response_ratio=get_env_float("LOGICORE_RESERVED_RESPONSE_RATIO", 0.25),
+                masking_exempt_tools=get_env_list(
+                    "LOGICORE_MASKING_EXEMPT_TOOLS",
+                    ["ask_user", "human_feedback", "get_user_input", "confirm"],
+                ),
+                distill_exempt_tools=get_env_list(
+                    "LOGICORE_DISTILL_EXEMPT_TOOLS",
+                    ["read_file", "ask_user", "human_feedback", "get_user_input", "confirm"],
+                ),
+                hard_limit_margin=get_env_float("LOGICORE_HARD_LIMIT_MARGIN", 0.05),
             ),
             tool=ToolConfig(
                 max_output_chars=get_env_int("LOGICORE_TOOL_MAX_OUTPUT", 12000),
@@ -426,6 +462,11 @@ class RuntimeConfig:
                 "preserve_recent_count": self.context.preserve_recent_count,
                 "protection_threshold_tokens": self.context.protection_threshold_tokens,
                 "min_prunable_tokens": self.context.min_prunable_tokens,
+                "masking_exempt_tools": self.context.masking_exempt_tools,
+                "distill_exempt_tools": self.context.distill_exempt_tools,
+                "reserved_response_cap": self.context.reserved_response_cap,
+                "reserved_response_ratio": self.context.reserved_response_ratio,
+                "hard_limit_margin": self.context.hard_limit_margin,
                 "system_prompt_max_tokens": self.context.system_prompt_max_tokens,
                 "system_prompt_max_tokens_ratio": self.context.system_prompt_max_tokens_ratio,
             },

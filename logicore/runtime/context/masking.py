@@ -19,17 +19,21 @@ from datetime import datetime
 from typing import Optional, Dict, List, Any, Callable, Set
 
 from logicore.runtime.config import RuntimeConfig
+from logicore.runtime.context.tool_output_distiller import DISTILLED_INDICATOR
+from logicore.utils.sanitize import sanitize_fs_component
 
 
-# Tools whose outputs should never be masked
-EXEMPT_TOOLS: Set[str] = {
+MASKING_INDICATOR = "[OUTPUT_MASKED]"
+
+# Default tools whose outputs should never be masked (history backstop;
+# distiller keeps its own config-driven exempt set - insertion-time and
+# history-time stages have different semantics)
+DEFAULT_EXEMPT_TOOLS: Set[str] = {
     "ask_user",
-    "human_feedback", 
+    "human_feedback",
     "get_user_input",
     "confirm",
 }
-
-MASKING_INDICATOR = "[OUTPUT_MASKED]"
 
 
 @dataclass
@@ -89,6 +93,8 @@ class ToolOutputMaskingService:
         self._estimator = token_counter if isinstance(token_counter, TokenEstimator) else TokenEstimator(token_counter)
         self._token_counter = self._estimator.count_tokens
         self.temp_dir = temp_dir or tempfile.gettempdir()
+        # Config-driven exempt set (env LOGICORE_MASKING_EXEMPT_TOOLS overrides)
+        self.exempt_tools = {t.lower() for t in config.context.masking_exempt_tools}
     
     def _count_tokens(self, text: str) -> int:
         """Count tokens in text."""
@@ -133,14 +139,14 @@ class ToolOutputMaskingService:
         return msg.get("name") or msg.get("tool_call_id")
     
     def _is_already_masked(self, content: str) -> bool:
-        """Check if content is already masked."""
-        return MASKING_INDICATOR in content
+        """Check if content is already masked or distilled."""
+        return content.startswith(MASKING_INDICATOR) or content.startswith(DISTILLED_INDICATOR)
     
     def _is_exempt_tool(self, tool_name: Optional[str]) -> bool:
         """Check if tool is exempt from masking."""
         if not tool_name:
             return False
-        return tool_name.lower() in {t.lower() for t in EXEMPT_TOOLS}
+        return tool_name.lower() in self.exempt_tools
     
     def _save_masked_content(
         self,
@@ -149,18 +155,9 @@ class ToolOutputMaskingService:
         session_id: str,
     ) -> str:
         """Save masked content to file and return path."""
-        import re
-        
-        # Sanitize tool_name to prevent path traversal
-        # Remove path separators, special characters, and limit length
-        sanitized_tool = re.sub(r'[^\w\-]', '_', tool_name)
-        sanitized_tool = re.sub(r'_+', '_', sanitized_tool).strip('_')
-        sanitized_tool = sanitized_tool[:50]  # Limit length
-        
-        # Sanitize session_id as well
-        sanitized_session = re.sub(r'[^\w\-]', '_', session_id)
-        sanitized_session = re.sub(r'_+', '_', sanitized_session).strip('_')
-        sanitized_session = sanitized_session[:50]
+        # Sanitize tool_name and session_id to prevent path traversal
+        sanitized_tool = sanitize_fs_component(tool_name)
+        sanitized_session = sanitize_fs_component(session_id)
         
         # Create session directory
         session_dir = os.path.join(self.temp_dir, "logicore_masked", sanitized_session)
@@ -199,7 +196,8 @@ class ToolOutputMaskingService:
             f"Tool: {tool_name}\n"
             f"Output size: {char_count} chars (~{token_estimate} tokens), {line_count} lines\n"
             f"Full output saved to: {filepath}\n"
-            f"Reason: Output masked to preserve context window"
+            f"Instruction: Output was masked to preserve context window. "
+            f"If you need details, use read_file('{filepath}')."
         )
     
     def mask(
@@ -294,8 +292,8 @@ class ToolOutputMaskingService:
     
     def add_exempt_tool(self, tool_name: str) -> None:
         """Add a tool to the exempt list."""
-        EXEMPT_TOOLS.add(tool_name)
+        self.exempt_tools.add(tool_name.lower())
     
     def remove_exempt_tool(self, tool_name: str) -> None:
         """Remove a tool from the exempt list."""
-        EXEMPT_TOOLS.discard(tool_name)
+        self.exempt_tools.discard(tool_name.lower())
